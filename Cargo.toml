@@ -1,0 +1,51 @@
+# Media Enhanced Swiftlet Cargo
+# Used for Realtime Media Internet Communications using QUIC
+
+[package]
+name = "swiftlet"
+version = "0.1.0"
+authors = ["MediaEnhanced"]
+edition = "2021"
+# Rust Version is set to be updated manually
+rust-version = "1.71"
+description = "Rust program that echos audio over a QUIC connection"
+# The build script informs the cargo builder of the dynamic library "./bin" location
+# neccessary for linking to dependencies
+#build = "src/build.rs"
+publish = false
+default-run = "swiftlet"
+# Disable Automatic Discovery
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+[dependencies]
+# Argument Parsing Requirements:
+#clap = "*"
+
+# Thread Sync Requirements:
+crossbeam = "*"
+
+# Network (Thread) Requirements:
+mio = { version = "*", features = ["os-poll", "net"]}
+quiche = { version = "*" }
+ring = { version = "*" }
+
+# Audio Requirements:
+cpal = "*"
+opus = "*"
+
+# Console Requirements:
+crossterm = "*"
+ratatui = "*"
+
+
+[[bin]]
+name = "swiftlet"
+path = "./src/main.rs"
+
+[profile.release]
+opt-level = 2
+lto = true
+panic = 'abort'
