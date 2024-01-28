@@ -127,19 +127,19 @@ fn main() -> std::io::Result<()> {
                 thread::spawn(move || network::client_thread(address, username, network_channels));
 
             // Start Audio Output Here:
-            let audio_out_stream = start_audio_output(audio_out_channels);
+            if let Some(audio_out_stream) = start_audio_output(audio_out_channels) {
+                // Start client console
+                let _ = run_console_client(
+                    address.to_string(),
+                    username_console,
+                    console_channels,
+                    console_audio_out_channels,
+                    audio_out_stream,
+                );
 
-            // Start Console Here:
-            let _ = run_console_client(
-                address.to_string(),
-                username_console,
-                console_channels,
-                console_audio_out_channels,
-                audio_out_stream,
-            );
-
-            // Wait for Network Thread to finish
-            network_thread_handler.join().unwrap();
+                // Wait for Network Thread to finish
+                network_thread_handler.join().unwrap();
+            }
         }
         None => {
             // No server address was provided, so this is a server
@@ -351,7 +351,7 @@ fn run_console_client(
     mut username: String,
     channels: ConsoleThreadChannels,
     audio_out_channels: ConsoleAudioOutputChannels,
-    audio_out_stream: Option<audio::Stream>,
+    audio_out_stream: audio::Stream,
 ) -> std::io::Result<()> {
     // Start Console Here:
     crossterm::terminal::enable_raw_mode().unwrap();
@@ -541,9 +541,7 @@ fn run_console_client(
         .command_send
         .send(ConsoleCommands::NetworkingStop(42));
 
-    if let Some(stream) = audio_out_stream {
-        stream.pause();
-    }
+    audio_out_stream.pause();
 
     // Cleanup Console Here:
     std::io::stdout().execute(crossterm::terminal::LeaveAlternateScreen)?;
