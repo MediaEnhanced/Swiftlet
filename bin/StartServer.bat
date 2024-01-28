@@ -1,4 +1,4 @@
 @echo off
-Swiftlet.exe -n Realm
+Swiftlet.exe -s Realm --ipv6 true
 pause
 exit 0
