@@ -5,9 +5,6 @@ debug/
 # Moved Executable
 bin/Swiftlet.exe
 
-# Copyrightable Song
-bin/audio/song.opus
-
 # Executable Target
 Cargo.lock
 

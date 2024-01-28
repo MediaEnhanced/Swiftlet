@@ -10,7 +10,7 @@ edition = "2021"
 rust-version = "1.71"
 description = "Rust program that echos audio over a QUIC connection"
 # The build script informs the cargo builder of the dynamic library "./bin" location
-# neccessary for linking to dependencies
+# neccessary for linking to dependencies in the future
 #build = "src/build.rs"
 publish = false
 default-run = "swiftlet"
@@ -21,7 +21,7 @@ autotests = false
 autobenches = false
 
 [dependencies]
-# Argument Parsing Requirements:
+# Argument Parsing Requirements (Possibly used in the future):
 #clap = "*"
 
 # Thread Sync Requirements:
@@ -49,3 +49,4 @@ path = "./src/main.rs"
 opt-level = 2
 lto = true
 panic = 'abort'
+strip = true
