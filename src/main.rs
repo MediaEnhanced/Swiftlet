@@ -297,7 +297,7 @@ fn run_console_client(
     mut username: String,
     channels: ConsoleThreadChannels,
     audio_out_channels: ConsoleAudioOutputChannels,
-    audio_out_stream: audio::Stream,
+    audio_out_stream: Option<audio::Stream>,
 ) -> std::io::Result<()> {
     // Start Console Here:
     crossterm::terminal::enable_raw_mode().unwrap();
@@ -337,9 +337,11 @@ fn run_console_client(
                         state_common.debug_scroll += 1;
                         should_draw = true;
                     } else if key.code == crossterm::event::KeyCode::Char('m') {
-                        audio_out_channels
-                            .command_send
-                            .send(ConsoleAudioCommands::PlayOpus(3));
+                        if audio_out_stream.is_some() {
+                            audio_out_channels
+                                .command_send
+                                .send(ConsoleAudioCommands::PlayOpus(3));
+                        }
                     } else if key.code == crossterm::event::KeyCode::Char('v') {
                         if let Some(ind) = my_conn_index {
                             let state_change = state_common.connections[ind].state ^ 4;
@@ -375,15 +377,19 @@ fn run_console_client(
                                     if state & 4 > 0 {
                                         if !is_in_vc {
                                             is_in_vc = true;
-                                            audio_out_channels
-                                                .command_send
-                                                .send(ConsoleAudioCommands::PlayOpus(1));
+                                            if audio_out_stream.is_some() {
+                                                audio_out_channels
+                                                    .command_send
+                                                    .send(ConsoleAudioCommands::PlayOpus(1));
+                                            }
                                         }
                                     } else if is_in_vc {
                                         is_in_vc = false;
-                                        audio_out_channels
-                                            .command_send
-                                            .send(ConsoleAudioCommands::PlayOpus(2));
+                                        if audio_out_stream.is_some() {
+                                            audio_out_channels
+                                                .command_send
+                                                .send(ConsoleAudioCommands::PlayOpus(2));
+                                        }
                                     }
                                 }
                             }
@@ -409,15 +415,19 @@ fn run_console_client(
                                 if state_test & 4 > 0 {
                                     if !is_in_vc {
                                         is_in_vc = true;
-                                        audio_out_channels
-                                            .command_send
-                                            .send(ConsoleAudioCommands::PlayOpus(1));
+                                        if audio_out_stream.is_some() {
+                                            audio_out_channels
+                                                .command_send
+                                                .send(ConsoleAudioCommands::PlayOpus(1));
+                                        }
                                     }
                                 } else if is_in_vc {
                                     is_in_vc = false;
-                                    audio_out_channels
-                                        .command_send
-                                        .send(ConsoleAudioCommands::PlayOpus(2));
+                                    if audio_out_stream.is_some() {
+                                        audio_out_channels
+                                            .command_send
+                                            .send(ConsoleAudioCommands::PlayOpus(2));
+                                    }
                                 }
                             }
                         }
@@ -481,7 +491,9 @@ fn run_console_client(
         .command_send
         .send(ConsoleCommands::NetworkingStop(42));
 
-    audio_out_stream.pause();
+    if let Some(audio_out) = audio_out_stream {
+        audio_out.pause();
+    }
 
     // Cleanup Console Here:
     std::io::stdout().execute(crossterm::terminal::LeaveAlternateScreen)?;

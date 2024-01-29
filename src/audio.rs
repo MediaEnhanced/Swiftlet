@@ -362,13 +362,19 @@ pub fn start_audio_output(channels: AudioOutputThreadChannels) -> Option<Stream>
     let debug_send = channels.debug_send.clone();
 
     let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .expect("no output device available");
+    let device = match host.default_output_device() {
+        Some(d) => d,
+        _ => {
+            return None;
+        }
+    };
 
-    let mut supported_configs_range = device
-        .supported_output_configs()
-        .expect("error while querying configs");
+    let mut supported_configs_range = match device.supported_output_configs() {
+        Ok(scr) => scr,
+        Err(e) => {
+            return None;
+        }
+    };
 
     let config = supported_configs_range
         .find(|c| c.max_sample_rate().0 == 48000 && c.min_sample_rate().0 == 48000);
