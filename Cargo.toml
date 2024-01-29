@@ -31,6 +31,8 @@ crossbeam = "*"
 mio = { version = "*", features = ["os-poll", "net"]}
 quiche = { version = "*" }
 ring = { version = "*" }
+# Maybe use a serialization library in the future
+#bincode = { version = "2.0.0-rc.3" }
 
 # Audio Requirements:
 cpal = "*"

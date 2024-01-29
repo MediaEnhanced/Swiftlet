@@ -5,6 +5,9 @@ debug/
 # Moved Executable
 bin/Swiftlet.exe
 
+# Ignored Wireshark security log file
+bin/security/key.log
+
 # Executable Target
 Cargo.lock
 

@@ -51,16 +51,10 @@ use std::{
 mod manage;
 use manage::{ClientManager, ServerManager, UpdateEvent};
 
-#[repr(u8)]
-pub enum StreamCommands {
-    InvalidCommand,
-    ServerStateRefresh, // NumClientsConnected, ClientIndex, ServerNameLen, ServerName, {ClientXNameLen, ClientXName, ClientXState}... 0
-    NewClient,          // ClientNamLen, ClientName, ClientState
-    StateChange,        // ClientIndex, ClientState
-    NewClientRequest,   // ClientNamLen, ClientName
-    StateChangeRequest, // ProbableIndex, NewStateRequest
-    ClientKeepAlive,
-}
+mod message;
+use message::{MessageType, StreamMessage};
+
+use self::manage::StreamReadable;
 
 fn u8_to_str(data: &[u8]) -> String {
     let str_local = match std::str::from_utf8(data) {
@@ -86,12 +80,14 @@ struct ClientState {
     user_name: [u8; MAX_CHAR_LENGTH * 4],
     user_name_len: usize,
     state: u8, // Bit State [reserved, serverMusicConnected, voiceChatConnected, voiceChatLoopback]
+    main_recv: StreamMessage,
 }
 
 struct ServerState {
     name: [u8; MAX_CHAR_LENGTH * 4],
     name_len: usize,
     client_states: Vec<ClientState>,
+    main_send: StreamMessage,
 }
 
 impl ServerState {
@@ -119,6 +115,7 @@ impl ServerState {
             name,
             name_len,
             client_states: Vec::new(),
+            main_send: StreamMessage::new_send(MessageType::InvalidType),
         }
     }
 
@@ -142,48 +139,57 @@ impl ServerState {
         }
     }
 
-    fn add_client_state(&mut self, cs_id: u64, user_name: &[u8]) -> Option<usize> {
+    fn add_client_state(&mut self, cs_id: u64, stream_msg: StreamMessage) -> Option<usize> {
         if self.find_client_state_index(cs_id).is_none() {
-            let mut name = [0; 128];
-            let mut name_len = 0;
+            if let Some(readable_data) = stream_msg.get_data_to_read() {
+                let username_len = readable_data[0] as usize;
 
-            let name_str = match std::str::from_utf8(user_name) {
-                Ok(s) => s,
-                Err(err) => {
-                    let index = err.valid_up_to();
-                    match std::str::from_utf8(&user_name[..index]) {
-                        Ok(s) => s,
-                        Err(err) => {
-                            return None;
+                let mut name = [0; 128];
+                let mut name_len = 0;
+
+                let username = &readable_data[1..username_len + 1];
+
+                let name_str = match std::str::from_utf8(username) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        let index = err.valid_up_to();
+                        match std::str::from_utf8(&username[..index]) {
+                            Ok(s) => s,
+                            Err(err) => {
+                                return None;
+                            }
                         }
                     }
+                };
+
+                for (c_ind, c) in name_str.chars().enumerate() {
+                    if c_ind >= MAX_CHAR_LENGTH {
+                        break;
+                    }
+
+                    let new_name_len = name_len + c.len_utf8();
+                    let name_subslice = &mut name[name_len..new_name_len];
+                    c.encode_utf8(name_subslice);
+                    name_len = new_name_len;
                 }
-            };
 
-            for (c_ind, c) in name_str.chars().enumerate() {
-                if c_ind >= MAX_CHAR_LENGTH {
-                    break;
+                if name_len == 0 {
+                    return None;
                 }
 
-                let new_name_len = name_len + c.len_utf8();
-                let name_subslice = &mut name[name_len..new_name_len];
-                c.encode_utf8(name_subslice);
-                name_len = new_name_len;
+                let mut client_state = ClientState {
+                    id: cs_id,
+                    user_name: name,
+                    user_name_len: name_len,
+                    state: 0,
+                    main_recv: stream_msg,
+                };
+                self.client_states.push(client_state);
+
+                Some(self.client_states.len() - 1)
+            } else {
+                None
             }
-
-            if name_len == 0 {
-                return None;
-            }
-
-            let mut client_state = ClientState {
-                id: cs_id,
-                user_name: name,
-                user_name_len: name_len,
-                state: 0,
-            };
-            self.client_states.push(client_state);
-
-            Some(self.client_states.len() - 1)
         } else {
             None
         }
@@ -198,59 +204,83 @@ impl ServerState {
         }
     }
 
-    fn create_refresh_data(&self) -> Vec<u8> {
-        let data_command = [
-            StreamCommands::ServerStateRefresh as u8,
-            self.client_states.len() as u8,
-            255,
-        ];
-        let mut data_buffer = Vec::from(data_command);
+    fn create_refresh_data(&mut self) -> bool {
+        if self.main_send.refresh_send(MessageType::ServerStateRefresh) {
+            if let Some(write_data) = self.main_send.get_data_to_write() {
+                let mut write_size = 3;
+                write_data[0] = self.client_states.len() as u8;
+                write_data[1] = 255;
+                write_data[2] = self.name_len as u8;
+                write_data[write_size..(write_size + self.name_len)]
+                    .copy_from_slice(&self.name[..self.name_len]);
+                write_size += self.name_len;
 
-        data_buffer.push(self.name_len as u8);
-        data_buffer.extend_from_slice(&self.name[..self.name_len]);
+                for cs in &self.client_states {
+                    write_data[write_size] = cs.user_name_len as u8;
+                    write_size += 1;
+                    write_data[write_size..(write_size + cs.user_name_len)]
+                        .copy_from_slice(&cs.user_name[..cs.user_name_len]);
+                    write_size += cs.user_name_len;
+                    write_data[write_size] = cs.state;
+                    write_size += 1;
+                }
 
-        for cs in &self.client_states {
-            data_buffer.push(cs.user_name_len as u8);
-            data_buffer.extend_from_slice(&cs.user_name[..cs.user_name_len]);
-            data_buffer.push(cs.state);
+                write_data[write_size] = 0;
+                write_size += 1;
+                //println!("Value: {}", write_size);
+                self.main_send.update_data_write(write_size);
+
+                true
+            } else {
+                false
+            }
+        } else {
+            false
         }
-        data_buffer.push(0);
-
-        data_buffer
     }
 
-    fn create_new_client_data(&self, verified_index: usize, data: &mut [u8]) -> Option<usize> {
-        let cs = &self.client_states[verified_index];
-        let expected_len = 3 + cs.user_name_len;
+    fn create_new_client_data(&mut self, verified_index: usize) -> bool {
+        if self.main_send.refresh_send(MessageType::NewClient) {
+            if let Some(write_data) = self.main_send.get_data_to_write() {
+                let cs = &self.client_states[verified_index];
 
-        if data.len() < expected_len {
-            return None;
+                write_data[0] = cs.user_name_len as u8;
+                let mut write_size = 1;
+                write_data[write_size..(write_size + cs.user_name_len)]
+                    .copy_from_slice(&cs.user_name[..cs.user_name_len]);
+                write_size += cs.user_name_len;
+
+                write_data[write_size] = cs.state;
+                write_size += 1;
+
+                self.main_send.update_data_write(write_size);
+
+                true
+            } else {
+                false
+            }
+        } else {
+            false
         }
-
-        data[0] = StreamCommands::NewClient as u8;
-        data[1] = cs.user_name_len as u8;
-
-        let state_position = cs.user_name_len + 2;
-        for (ind, d) in data[2..state_position].iter_mut().enumerate() {
-            *d = cs.user_name[ind];
-        }
-        data[state_position] = cs.state;
-
-        Some(expected_len)
     }
 
-    fn create_state_change_data(&self, verified_index: usize, data: &mut [u8]) -> Option<usize> {
-        if data.len() < 3 {
-            return None;
+    fn create_state_change_data(&mut self, verified_index: usize) -> bool {
+        if self.main_send.refresh_send(MessageType::ClientNewState) {
+            if let Some(write_data) = self.main_send.get_data_to_write() {
+                let cs = &self.client_states[verified_index];
+
+                write_data[0] = verified_index as u8;
+                write_data[1] = cs.state;
+
+                self.main_send.update_data_write(2);
+
+                true
+            } else {
+                false
+            }
+        } else {
+            false
         }
-
-        let cs = &self.client_states[verified_index];
-
-        data[0] = StreamCommands::StateChange as u8;
-        data[1] = verified_index as u8;
-        data[2] = cs.state;
-
-        Some(3)
     }
 
     fn refresh_update(&self, network_state_send: &Sender<NetworkStateMessage>) {
@@ -264,7 +294,7 @@ impl ServerState {
             state_populate.push(conn_state);
         }
 
-        let state_update = NetworkStateMessage::ConnectionsRefresh(state_populate);
+        let state_update = NetworkStateMessage::ConnectionsRefresh((None, state_populate));
         let _ = network_state_send.send(state_update);
     }
 
@@ -321,7 +351,6 @@ pub fn server_thread(
     };
 
     let mut server_state = ServerState::new(server_name);
-    let mut stream_read: [u8; 65536] = [0; 65536];
 
     let mut tick_duration = Duration::from_millis(5);
     let start_instant = Instant::now();
@@ -333,12 +362,7 @@ pub fn server_thread(
         match server_mgr.update() {
             // Sleeps when it can (ie. waiting for next tick / recv data and time is > 1ms)
             UpdateEvent::ReceivedData => {
-                server_read_loop(
-                    &mut stream_read,
-                    &mut server_state,
-                    &mut server_mgr,
-                    &channels,
-                );
+                server_read_loop(&mut server_state, &mut server_mgr, &channels);
             }
             UpdateEvent::NextTick => {
                 next_tick_instant += tick_duration; // Does not currently check for skipped ticks / assumes computer processes all
@@ -356,21 +380,19 @@ pub fn server_thread(
                 }
             }
             UpdateEvent::PotentiallyReceivedData => {
-                server_read_loop(
-                    &mut stream_read,
-                    &mut server_state,
-                    &mut server_mgr,
-                    &channels,
-                );
+                server_read_loop(&mut server_state, &mut server_mgr, &channels);
             }
             UpdateEvent::ConnectionClosed(conn_id) => {
                 if server_state.remove_client_state(conn_id) {
-                    let mut refresh_data = server_state.create_refresh_data();
-                    for (cs_ind, cs) in server_state.client_states.iter().enumerate() {
-                        refresh_data[2] = cs_ind as u8;
-                        //let _ = channels.network_debug_send.send("Server Send Close Refresh\n");
-                        server_mgr.send_stream_data(cs.id, MAIN_STREAM_ID, &refresh_data, false);
+                    if server_state.create_refresh_data() {
+                        if let Some(mut_data) = server_state.main_send.get_mut_data_to_send() {
+                            for (cs_ind, cs) in server_state.client_states.iter().enumerate() {
+                                mut_data[message::MESSAGE_HEADER_SIZE + 1] = cs_ind as u8;
+                                server_mgr.send_stream_data(cs.id, MAIN_STREAM_ID, mut_data, false);
+                            }
+                        }
                     }
+
                     server_state.refresh_update(&channels.network_state_send);
                 }
             }
@@ -412,7 +434,8 @@ pub fn client_thread(
         }
     };
 
-    let mut stream_read: [u8; 65536] = [0; 65536];
+    let mut main_recv = None;
+    let mut main_send = StreamMessage::new_send(MessageType::InvalidType);
     let mut tick_duration = Duration::from_millis(5);
     let mut command_handler_ticks = 0;
     let mut keep_alive_ticks = 0;
@@ -426,7 +449,13 @@ pub fn client_thread(
             match client_mgr.update() {
                 // Sleeps when it can (ie. waiting for next tick / recv data and time is > 1ms)
                 UpdateEvent::ReceivedData => {
-                    if client_read_loop(&mut stream_read, &user_name, &mut client_mgr, &channels) {
+                    if client_read_loop(
+                        &mut main_recv,
+                        &mut main_send,
+                        &user_name,
+                        &mut client_mgr,
+                        &channels,
+                    ) {
                         break;
                     }
                 }
@@ -438,14 +467,18 @@ pub fn client_thread(
                     keep_alive_ticks += 1;
                     if keep_alive_ticks >= 200 {
                         // Send a Keep Alive every 200 Ticks (1 sec)
-                        let keep_alive_data = [StreamCommands::ClientKeepAlive as u8, 0];
-                        client_mgr.send_stream_data(MAIN_STREAM_ID, &keep_alive_data, false);
+                        main_send.refresh_send(MessageType::KeepConnectionAlive);
+                        if let Some(send_data) = main_send.get_data_to_send() {
+                            client_mgr.send_stream_data(MAIN_STREAM_ID, send_data, false);
+                        }
+                        keep_alive_ticks = 0;
                     }
 
                     command_handler_ticks += 1;
                     if command_handler_ticks >= 4 {
                         // Handle Commands Every 4 Ticks (20 ms)
                         if client_command_handler(
+                            &mut main_send,
                             &mut client_mgr,
                             true,
                             &channels.command_recv,
@@ -458,7 +491,13 @@ pub fn client_thread(
                     }
                 }
                 UpdateEvent::PotentiallyReceivedData => {
-                    if client_read_loop(&mut stream_read, &user_name, &mut client_mgr, &channels) {
+                    if client_read_loop(
+                        &mut main_recv,
+                        &mut main_send,
+                        &user_name,
+                        &mut client_mgr,
+                        &channels,
+                    ) {
                         break;
                     }
                 }
@@ -473,6 +512,7 @@ pub fn client_thread(
             loop {
                 thread::sleep(Duration::from_millis(100));
                 if client_command_handler(
+                    &mut main_send,
                     &mut client_mgr,
                     false,
                     &channels.command_recv,
@@ -497,23 +537,119 @@ pub fn client_thread(
 }
 
 fn server_read_loop(
-    stream_read: &mut [u8],
     server_state: &mut ServerState,
     server_mgr: &mut ServerManager,
     channels: &NetworkThreadChannels,
 ) {
     loop {
-        match server_mgr.recv_data(stream_read) {
-            UpdateEvent::StreamReceivedData(recv_data_info) => {
-                if recv_data_info.stream_id == MAIN_STREAM_ID {
-                    server_process_main_stream_data(
-                        &stream_read[..recv_data_info.data_size],
-                        recv_data_info.conn_id,
-                        server_mgr,
-                        server_state,
-                        &channels.network_state_send,
-                        &channels.network_debug_send,
-                    );
+        match server_mgr.recv_data() {
+            UpdateEvent::StreamReceivedData(stream_readable) => {
+                if stream_readable.stream_id == MAIN_STREAM_ID {
+                    if let Some(verified_index) =
+                        server_state.find_client_state_index(stream_readable.conn_id)
+                    {
+                        server_process_main_stream_data(
+                            stream_readable,
+                            verified_index,
+                            server_mgr,
+                            server_state,
+                            channels,
+                        );
+                    } else {
+                        // See if first data sent by the new client is what was expected... else close connection
+                        let mut header_data = [0; message::MESSAGE_HEADER_SIZE];
+                        match server_mgr.recv_stream_data(&stream_readable, &mut header_data) {
+                            Ok((header_bytes, header_fin)) => {
+                                if header_bytes == message::MESSAGE_HEADER_SIZE && !header_fin {
+                                    let mut stream_message = StreamMessage::new_recv(header_data);
+                                    match stream_message.get_message_type() {
+                                        MessageType::NewClientAnnounce => {
+                                            if let Some(data_recv) =
+                                                stream_message.get_data_to_recv()
+                                            {
+                                                // Expects NewClientAnnounce Message to be readable all at once (fair assumption)
+                                                match server_mgr
+                                                    .recv_stream_data(&stream_readable, data_recv)
+                                                {
+                                                    Ok((recv_bytes, fin)) => {
+                                                        if !header_fin {
+                                                            stream_message
+                                                                .update_data_recv(recv_bytes);
+                                                            if let Some(index) = server_state
+                                                                .add_client_state(
+                                                                    stream_readable.conn_id,
+                                                                    stream_message,
+                                                                )
+                                                            {
+                                                                if server_state
+                                                                    .create_refresh_data()
+                                                                {
+                                                                    if let Some(mut_data) =
+                                                                        server_state
+                                                                            .main_send
+                                                                            .get_mut_data_to_send()
+                                                                    {
+                                                                        mut_data[message::MESSAGE_HEADER_SIZE + 1] = index as u8;
+                                                                        server_mgr
+                                                                            .send_stream_data(
+                                                                                stream_readable
+                                                                                    .conn_id,
+                                                                                MAIN_STREAM_ID,
+                                                                                mut_data,
+                                                                                false,
+                                                                            );
+                                                                    }
+                                                                }
+
+                                                                if server_state
+                                                                    .create_new_client_data(index)
+                                                                {
+                                                                    if let Some(send_data) =
+                                                                        server_state
+                                                                            .main_send
+                                                                            .get_data_to_send()
+                                                                    {
+                                                                        for (cs_ind, cs) in
+                                                                            server_state
+                                                                                .client_states
+                                                                                .iter()
+                                                                                .enumerate()
+                                                                        {
+                                                                            if cs_ind != index {
+                                                                                server_mgr.send_stream_data(cs.id, MAIN_STREAM_ID, send_data, false);
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+
+                                                                server_state.new_connection_update(
+                                                                    index,
+                                                                    &channels.network_state_send,
+                                                                );
+                                                            }
+                                                        } else {
+                                                            // Close the connection
+                                                        }
+                                                    }
+                                                    Err(s) => {
+                                                        // Probably close the connection but also print out error
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _ => {
+                                            // Close the connection
+                                        }
+                                    }
+                                } else {
+                                    // Close the connection
+                                }
+                            }
+                            Err(s) => {
+                                // Probably close the connection but also print out error
+                            }
+                        }
+                    }
                 }
             }
             UpdateEvent::FinishedReceiving => {
@@ -521,20 +657,30 @@ fn server_read_loop(
             }
             UpdateEvent::ConnectionClosed(conn_id) => {
                 if server_state.remove_client_state(conn_id) {
-                    let mut refresh_data = server_state.create_refresh_data();
-                    for (cs_ind, cs) in server_state.client_states.iter().enumerate() {
-                        refresh_data[2] = cs_ind as u8;
-                        server_mgr.send_stream_data(cs.id, MAIN_STREAM_ID, &refresh_data, false);
+                    if server_state.create_refresh_data() {
+                        if let Some(mut_data) = server_state.main_send.get_mut_data_to_send() {
+                            for (cs_ind, cs) in server_state.client_states.iter().enumerate() {
+                                mut_data[message::MESSAGE_HEADER_SIZE + 1] = cs_ind as u8;
+                                server_mgr.send_stream_data(cs.id, MAIN_STREAM_ID, mut_data, false);
+                            }
+                        }
                     }
+
                     server_state.refresh_update(&channels.network_state_send);
                 }
             }
             UpdateEvent::NoUpdate => {
                 // NO break
             }
-            UpdateEvent::FinishedConnectingOnce(_) => {}
+            UpdateEvent::FinishedConnectingOnce(_) => {
+                // No error
+            }
             UpdateEvent::NewConnectionStarted(_) => {
                 // NO break
+            }
+            UpdateEvent::SocketManagerError => {
+                let _ = channels.network_debug_send.send("Server Socket Error!\n");
+                break;
             }
             _ => {
                 // Some form of error
@@ -548,21 +694,58 @@ fn server_read_loop(
 }
 
 fn client_read_loop(
-    stream_read: &mut [u8],
+    main_stream_read: &mut Option<StreamMessage>,
+    main_send: &mut StreamMessage,
     user_name: &str,
     client_mgr: &mut ClientManager,
     channels: &NetworkThreadChannels,
 ) -> bool {
     loop {
-        match client_mgr.recv_data(stream_read) {
-            UpdateEvent::StreamReceivedData(recv_data_info) => {
-                if recv_data_info.stream_id == MAIN_STREAM_ID {
-                    client_process_main_stream_data(
-                        &stream_read[..recv_data_info.data_size],
-                        client_mgr,
-                        &channels.network_state_send,
-                        &channels.network_debug_send,
-                    );
+        match client_mgr.recv_data() {
+            UpdateEvent::StreamReceivedData(stream_readable) => {
+                if stream_readable.stream_id == MAIN_STREAM_ID {
+                    if let Some(stream_msg_recv) = main_stream_read {
+                        client_process_main_stream_data(
+                            stream_readable,
+                            stream_msg_recv,
+                            main_send,
+                            client_mgr,
+                            channels,
+                        );
+                    } else {
+                        let mut header_data = [0; message::MESSAGE_HEADER_SIZE];
+                        match client_mgr.recv_stream_data(&stream_readable, &mut header_data) {
+                            Ok((header_bytes, header_fin)) => {
+                                if header_bytes == message::MESSAGE_HEADER_SIZE && !header_fin {
+                                    let mut stream_message = StreamMessage::new_recv(header_data);
+                                    match stream_message.get_message_type() {
+                                        MessageType::ServerStateRefresh => {
+                                            //let _ = channels.network_debug_send.send("Server Refresh Header Got!\n");
+
+                                            *main_stream_read = Some(stream_message);
+                                            if let Some(stream_msg_recv) = main_stream_read {
+                                                client_process_main_stream_data(
+                                                    stream_readable,
+                                                    stream_msg_recv,
+                                                    main_send,
+                                                    client_mgr,
+                                                    channels,
+                                                );
+                                            }
+                                        }
+                                        _ => {
+                                            // Close the connection
+                                        }
+                                    }
+                                } else {
+                                    // Close the connection
+                                }
+                            }
+                            Err(e) => {
+                                // Probably close the connection but also print out error
+                            }
+                        }
+                    }
                 }
             }
             UpdateEvent::FinishedReceiving => {
@@ -577,23 +760,28 @@ fn client_read_loop(
             UpdateEvent::FinishedConnectingOnce(_) => {
                 client_mgr.create_stream(MAIN_STREAM_ID, 100);
 
-                let mut write_buffer = [0; 256];
-                write_buffer[0] = StreamCommands::NewClientRequest as u8;
+                main_send.refresh_send(MessageType::NewClientAnnounce);
+                if let Some(write_data) = main_send.get_data_to_write() {
+                    let _ = channels.network_debug_send.send("Client Announce Sent!\n");
+                    let mut start_index = 1;
+                    for (c_ind, c) in user_name.chars().enumerate() {
+                        if c_ind >= MAX_CHAR_LENGTH {
+                            break;
+                        }
 
-                let mut start_index = 2;
-                for (c_ind, c) in user_name.chars().enumerate() {
-                    if c_ind >= MAX_CHAR_LENGTH {
-                        break;
+                        let new_start_index = start_index + c.len_utf8();
+                        let c_subslice = &mut write_data[start_index..new_start_index];
+                        c.encode_utf8(c_subslice);
+                        start_index = new_start_index;
                     }
+                    write_data[0] = (start_index - 1) as u8;
 
-                    let new_start_index = start_index + c.len_utf8();
-                    let c_subslice = &mut write_buffer[start_index..new_start_index];
-                    c.encode_utf8(c_subslice);
-                    start_index = new_start_index;
+                    main_send.update_data_write(start_index);
+
+                    if let Some(send_data) = main_send.get_data_to_send() {
+                        client_mgr.send_stream_data(MAIN_STREAM_ID, send_data, false);
+                    }
                 }
-                write_buffer[1] = (start_index - 2) as u8;
-
-                client_mgr.send_stream_data(MAIN_STREAM_ID, &write_buffer[..start_index], false);
             }
             UpdateEvent::NoUpdate => {
                 // NO break
@@ -611,120 +799,228 @@ fn client_read_loop(
 }
 
 fn server_process_main_stream_data(
-    recv_data: &[u8],
-    conn_id: u64,
+    stream_readable: StreamReadable,
+    verified_index: usize,
     server_mgr: &mut ServerManager,
     server_state: &mut ServerState,
-    state_send: &Sender<NetworkStateMessage>,
-    debug_send: &Sender<&'static str>,
+    channels: &NetworkThreadChannels,
 ) {
-    // Needs better error handling
-    if recv_data[0] == StreamCommands::NewClientRequest as u8 {
-        let client_name_len = recv_data[1] as usize;
-        if client_name_len > 0 && client_name_len <= (MAX_CHAR_LENGTH * 4) {
-            if let Some(index) =
-                server_state.add_client_state(conn_id, &recv_data[2..client_name_len + 2])
-            {
-                let mut refresh_data = server_state.create_refresh_data();
-                refresh_data[2] = index as u8;
-                server_mgr.send_stream_data(conn_id, MAIN_STREAM_ID, &refresh_data, false);
+    let mut close_connection = false;
 
-                let mut write_buffer = [0; 256];
-                if let Some(len) = server_state.create_new_client_data(index, &mut write_buffer) {
-                    for cs in server_state.client_states.iter() {
-                        if cs.id != conn_id {
-                            server_mgr.send_stream_data(
-                                cs.id,
-                                MAIN_STREAM_ID,
-                                &write_buffer[..len],
-                                false,
-                            );
+    loop {
+        let stream_msg = &mut server_state.client_states[verified_index].main_recv;
+        if stream_msg.is_done_recving() {
+            let mut header_data = [0; message::MESSAGE_HEADER_SIZE];
+            match server_mgr.recv_stream_data(&stream_readable, &mut header_data) {
+                Ok((header_bytes, header_fin)) => {
+                    if header_bytes == message::MESSAGE_HEADER_SIZE && !header_fin {
+                        stream_msg.refresh_recv(header_data);
+                        if let Some(data_recv) = stream_msg.get_data_to_recv() {
+                            match server_mgr.recv_stream_data(&stream_readable, data_recv) {
+                                Ok((recv_bytes, recv_fin)) => {
+                                    stream_msg.update_data_recv(recv_bytes);
+                                    if recv_fin {
+                                        close_connection = true;
+                                    }
+                                }
+                                Err(e) => {
+                                    // Probably close the connection but also print out error
+                                }
+                            }
                         }
+                    } else if header_bytes == 0 && !header_fin {
+                        break;
+                    } else {
+                        close_connection = true;
+                        break;
                     }
                 }
-
-                server_state.new_connection_update(index, state_send);
+                Err(e) => match e {
+                    quiche::Error::Done => break,
+                    _ => {
+                        let _ = channels.network_debug_send.send("Error close??\n");
+                    }
+                },
             }
-        }
-    } else if recv_data[0] == StreamCommands::StateChangeRequest as u8 {
-        let probable_index = recv_data[1] as usize;
-        if let Some(cs_index) =
-            server_state.find_client_state_index_with_probable(conn_id, probable_index)
-        {
-            let potential_new_state = recv_data[2];
-            // In future check if server will allow state change here!
-            server_state.client_states[cs_index].state = potential_new_state;
-
-            let mut write_buffer = [0; 16];
-            if let Some(len) = server_state.create_state_change_data(cs_index, &mut write_buffer) {
-                for cs in server_state.client_states.iter() {
-                    server_mgr.send_stream_data(cs.id, MAIN_STREAM_ID, &write_buffer[..len], false);
+        } else if let Some(data_recv) = stream_msg.get_data_to_recv() {
+            match server_mgr.recv_stream_data(&stream_readable, data_recv) {
+                Ok((recv_bytes, recv_fin)) => {
+                    stream_msg.update_data_recv(recv_bytes);
+                    if recv_fin {
+                        close_connection = true;
+                    }
+                }
+                Err(e) => {
+                    // Probably close the connection but also print out error
                 }
             }
-
-            server_state.state_change_update(cs_index, state_send);
         }
+
+        if let Some(data_read) = stream_msg.get_data_to_read() {
+            match stream_msg.get_message_type() {
+                MessageType::NewStateRequest => {
+                    let potential_new_state = data_read[0];
+                    // In future check if server will allow state change here!
+                    server_state.client_states[verified_index].state = potential_new_state;
+
+                    let mut msg_send = StreamMessage::new_send(MessageType::ClientNewState);
+                    if let Some(write_data) = msg_send.get_data_to_write() {
+                        write_data[0] = verified_index as u8;
+                        write_data[1] = server_state.client_states[verified_index].state;
+
+                        msg_send.update_data_write(2);
+
+                        if let Some(send_data) = msg_send.get_data_to_send() {
+                            for cs in server_state.client_states.iter() {
+                                server_mgr.send_stream_data(
+                                    cs.id,
+                                    MAIN_STREAM_ID,
+                                    send_data,
+                                    false,
+                                );
+                            }
+                        }
+                    }
+
+                    server_state.state_change_update(verified_index, &channels.network_state_send);
+                }
+                MessageType::FileTransferRequest => {
+                    // Write later
+                }
+                _ => {}
+            }
+        } else {
+            break;
+        }
+    }
+
+    if close_connection {
+        let _ = channels
+            .network_debug_send
+            .send("Server Connection Should Close!\n");
     }
 }
 
 fn client_process_main_stream_data(
-    recv_data: &[u8],
+    stream_readable: StreamReadable,
+    stream_msg_recv: &mut StreamMessage,
+    main_send: &mut StreamMessage,
     client_mgr: &mut ClientManager,
-    state_send: &Sender<NetworkStateMessage>,
-    debug_send: &Sender<&'static str>,
+    channels: &NetworkThreadChannels,
 ) {
-    if recv_data[0] == StreamCommands::ServerStateRefresh as u8 {
-        // Valid connection
-        let _ = debug_send.send("Server Refresh Recv\n");
+    let mut close_connection = false;
 
-        let conn_ind = recv_data[2] as usize;
-
-        let mut name_end: usize = (recv_data[3] + 4).into();
-        let mut server_name = u8_to_str(&recv_data[4..name_end]);
-        let name_update = NetworkStateMessage::ServerNameChange(server_name);
-        let _ = state_send.send(name_update);
-
-        let mut state_populate = Vec::<NetworkStateConnection>::new();
-
-        let mut name_len: usize = recv_data[name_end].into();
-        while name_len != 0 {
-            let name_start = name_end + 1;
-            name_end = name_len + name_start;
-            let mut client_name = u8_to_str(&recv_data[name_start..name_end]);
-
-            let conn_state = NetworkStateConnection {
-                name: client_name,
-                state: recv_data[name_end],
-            };
-
-            state_populate.push(conn_state);
-
-            name_end += 1;
-            name_len = recv_data[name_end].into();
+    loop {
+        if stream_msg_recv.is_done_recving() {
+            let mut header_data = [0; message::MESSAGE_HEADER_SIZE];
+            match client_mgr.recv_stream_data(&stream_readable, &mut header_data) {
+                Ok((header_bytes, header_fin)) => {
+                    if header_bytes == message::MESSAGE_HEADER_SIZE && !header_fin {
+                        stream_msg_recv.refresh_recv(header_data);
+                        if let Some(data_recv) = stream_msg_recv.get_data_to_recv() {
+                            match client_mgr.recv_stream_data(&stream_readable, data_recv) {
+                                Ok((recv_bytes, recv_fin)) => {
+                                    stream_msg_recv.update_data_recv(recv_bytes);
+                                    if recv_fin {
+                                        close_connection = true;
+                                    }
+                                }
+                                Err(e) => {
+                                    // Probably close the connection but also print out error
+                                }
+                            }
+                        }
+                    } else if header_bytes == 0 && !header_fin {
+                        break;
+                    } else {
+                        close_connection = true;
+                        break;
+                    }
+                }
+                Err(e) => match e {
+                    quiche::Error::Done => break,
+                    _ => {
+                        let _ = channels.network_debug_send.send("Error close??\n");
+                    }
+                },
+            }
+        } else if let Some(data_recv) = stream_msg_recv.get_data_to_recv() {
+            match client_mgr.recv_stream_data(&stream_readable, data_recv) {
+                Ok((recv_bytes, recv_fin)) => {
+                    //println!("Value: {}", recv_bytes);
+                    stream_msg_recv.update_data_recv(recv_bytes);
+                    if recv_fin {
+                        close_connection = true;
+                    }
+                }
+                Err(e) => {
+                    // Probably close the connection but also print out error
+                }
+            }
         }
 
-        let state_update = NetworkStateMessage::ConnectionsRefresh(state_populate);
-        let _ = state_send.send(state_update);
+        if let Some(data_read) = stream_msg_recv.get_data_to_read() {
+            match stream_msg_recv.get_message_type() {
+                MessageType::ServerStateRefresh => {
+                    // State Refresh
 
-        let index_update = NetworkStateMessage::SetConnectionIndex(conn_ind);
-        let _ = state_send.send(index_update);
-    } else if recv_data[0] == StreamCommands::NewClient as u8 {
-        // Valid connection
-        //let _ = network_debug_send.send("New Client with Name\n");
+                    let conn_ind = data_read[1] as usize;
 
-        let mut name_end: usize = (recv_data[1] + 2).into();
-        let mut client_name = u8_to_str(&recv_data[2..name_end]);
-        let new_conn = NetworkStateMessage::NewConnection((client_name, recv_data[name_end]));
-        let _ = state_send.send(new_conn);
-    } else if recv_data[0] == StreamCommands::StateChange as u8 {
-        // Valid connection
-        //let _ = network_debug_send.send("State Change Recv\n");
+                    let mut name_end: usize = (data_read[2] + 3).into();
+                    let mut server_name = u8_to_str(&data_read[3..name_end]);
+                    let name_update = NetworkStateMessage::ServerNameChange(server_name);
+                    let _ = channels.network_state_send.send(name_update);
 
-        let conn_pos = recv_data[1] as usize;
-        let new_state = recv_data[2];
+                    let mut state_populate = Vec::<NetworkStateConnection>::new();
 
-        let new_conn = NetworkStateMessage::StateChange((conn_pos, new_state));
-        let _ = state_send.send(new_conn);
+                    let mut name_len: usize = data_read[name_end].into();
+                    while name_len != 0 {
+                        let name_start = name_end + 1;
+                        name_end = name_len + name_start;
+                        let mut client_name = u8_to_str(&data_read[name_start..name_end]);
+
+                        let conn_state = NetworkStateConnection {
+                            name: client_name,
+                            state: data_read[name_end],
+                        };
+
+                        state_populate.push(conn_state);
+
+                        name_end += 1;
+                        name_len = data_read[name_end].into();
+                    }
+
+                    let state_update =
+                        NetworkStateMessage::ConnectionsRefresh((Some(conn_ind), state_populate));
+                    let _ = channels.network_state_send.send(state_update);
+
+                    let _ = channels.network_debug_send.send("Server Refresh Recv!!\n");
+                }
+                MessageType::NewClient => {
+                    let mut name_end: usize = (data_read[0] + 1).into();
+                    let mut client_name = u8_to_str(&data_read[1..name_end]);
+                    let new_conn =
+                        NetworkStateMessage::NewConnection((client_name, data_read[name_end]));
+                    let _ = channels.network_state_send.send(new_conn);
+                }
+                MessageType::ClientNewState => {
+                    let conn_pos = data_read[0] as usize;
+                    let new_state = data_read[1];
+
+                    let new_conn = NetworkStateMessage::StateChange((conn_pos, new_state));
+                    let _ = channels.network_state_send.send(new_conn);
+                }
+                _ => {}
+            }
+        } else {
+            break;
+        }
+    }
+
+    if close_connection {
+        let _ = channels
+            .network_debug_send
+            .send("Client Connection Should Close!\n");
     }
 }
 
@@ -761,6 +1057,7 @@ fn server_command_handler(
 }
 
 fn client_command_handler(
+    main_send: &mut StreamMessage,
     client_mgr: &mut ClientManager,
     connected: bool,
     command_recv: &Receiver<ConsoleCommands>,
@@ -782,10 +1079,17 @@ fn client_command_handler(
             Ok(cmd_recv) => {
                 if connected {
                     match cmd_recv {
-                        ConsoleCommands::ClientStateChange((prob_ind, state)) => {
-                            let data = [StreamCommands::StateChangeRequest as u8, prob_ind, state];
-                            client_mgr.send_stream_data(MAIN_STREAM_ID, &data, false);
-                            //let _ = debug_send.send("State Change Update!\n");
+                        ConsoleCommands::ClientStateChange(new_state_requested) => {
+                            main_send.refresh_send(MessageType::NewStateRequest);
+                            if let Some(write_data) = main_send.get_data_to_write() {
+                                write_data[0] = new_state_requested;
+
+                                main_send.update_data_write(1);
+
+                                if let Some(send_data) = main_send.get_data_to_send() {
+                                    client_mgr.send_stream_data(MAIN_STREAM_ID, send_data, false);
+                                }
+                            }
                         }
                         ConsoleCommands::ClientConnectionClose => {
                             client_mgr.close_connection(42);

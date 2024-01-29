@@ -49,7 +49,7 @@ use communication::{
 
 mod network;
 use cpal::traits::StreamTrait;
-use network::{Ipv6Addr, SocketAddr};
+use network::SocketAddr;
 
 mod audio;
 use audio::start_audio_output;
@@ -85,19 +85,18 @@ struct Args {
 }
 
 fn main() -> std::io::Result<()> {
-    //Result<(), std::io::Error> expanded
     println!("Networking Audio Program Started");
 
+    // Uncomment if this would be useful (only for debug code?)
     //std::env::set_var("RUST_BACKTRACE", "1");
 
-    // Argument Parsing Here:
+    // Argument Parsing
     let args = Args::parse();
 
-    // Initialize variable bindings common to both clients and servers here:
-
+    // Initialize variable bindings common to both clients and servers
     let (network_channels, console_channels) = communication::create_networking_console_channels();
 
-    // Check if the program started as a Client or a Server:
+    // Check if the program started as a Client or a Server
     match args.address {
         // This is a client because we have an address to connect to
         Some(address) => {
@@ -109,6 +108,7 @@ fn main() -> std::io::Result<()> {
             let (audio_out_channels, network_audio_out_channels, console_audio_out_channels) =
                 communication::create_audio_output_channels();
 
+            // Load in Audio Files
             for (ind, f) in AUDIO_FILES.iter().enumerate() {
                 if let Ok(bytes) = std::fs::read(std::path::Path::new(f)) {
                     if let Some(opus_data) = audio::convert_ogg_opus_file(&bytes, (ind as u64) + 1)
@@ -120,16 +120,16 @@ fn main() -> std::io::Result<()> {
                 }
             }
 
-            // Start Network Thread Here:
+            // Start Network Thread
             let username = args.username.unwrap().clone();
             let username_console = username.clone();
             let network_thread_handler =
                 thread::spawn(move || network::client_thread(address, username, network_channels));
 
-            // Start Audio Output Here:
+            // Start Audio Output
             let audio_out_stream = start_audio_output(audio_out_channels);
 
-            // Start Console Here:
+            // Start Console
             let _ = run_console_client(
                 address.to_string(),
                 username_console,
@@ -138,7 +138,7 @@ fn main() -> std::io::Result<()> {
                 audio_out_stream,
             );
 
-            // Wait for Network Thread to finish
+            // Wait for Network Thread to Finish
             network_thread_handler.join().unwrap();
         }
         None => {
@@ -148,76 +148,23 @@ fn main() -> std::io::Result<()> {
                 None => PORT_DEFAULT,
             };
 
-            // Start Network Thread Here:
+            // Start Network Thread
             let server_name = args.sname.unwrap_or(String::from("Server"));
             let server_name_console = server_name.clone();
             let network_thread_handler = thread::spawn(move || {
                 network::server_thread(args.ipv6, port, server_name.clone(), network_channels)
             });
 
-            // Start Console Here:
+            // Start Console
             let _ = run_console_server(server_name_console, console_channels);
 
-            // Wait for Network Thread to finish
+            // Wait for Network Thread to Finish
             network_thread_handler.join().unwrap();
         }
     }
 
     println!("Networking Audio Program Quitting");
     Ok(())
-}
-
-fn argument_parsing() -> (Option<Ipv6Addr>, String) {
-    let mut arg_strings_iterator = std::env::args(); // Gets the Argument String Iterator (assumes utf8)
-    let arg_0 = match arg_strings_iterator.next() {
-        // Gets the first String of the Iterator
-        Some(arg) => arg,
-        None => {
-            println!("No Arguments");
-            return (None, SERVERNAME_DEFAULT.to_string());
-        }
-    };
-
-    let mut address_parse_attempts: u64 = 0;
-    let mut found_name = false;
-    let mut addr_option = None;
-    let mut name = SERVERNAME_DEFAULT.to_string();
-    let mut name_next = false;
-    for arg in arg_strings_iterator {
-        // arg_1 and beyond
-        if name_next {
-            name = arg;
-            found_name = true;
-            name_next = false;
-        } else if !found_name {
-            if arg.len() >= 2 && &arg[..2] == "-n" {
-                name_next = true;
-            }
-            if arg.len() >= 6 && &arg[..6] == "--name" {
-                name_next = true;
-            }
-        } else if addr_option.is_none() {
-            address_parse_attempts += 1;
-            match arg.parse() {
-                Ok(valid_addr) => {
-                    addr_option = Some(valid_addr);
-                }
-                Err(err) => {
-                    println!("Address Parse Error");
-                }
-            }
-        }
-    }
-
-    if found_name {
-        if addr_option.is_none() && address_parse_attempts > 0 {
-            addr_option = Some(Ipv6Addr::from(ADDR_DEFAULT));
-        }
-    } else if addr_option.is_some() {
-        name = USERNAME_DEFAULT.to_string();
-    }
-
-    (addr_option, name)
 }
 
 struct ConsoleStateCommon {
@@ -287,7 +234,7 @@ fn run_console_server(servername: String, channels: ConsoleThreadChannels) -> st
                         NetworkStateMessage::ServerNameChange(server_name) => {
                             state_common.title_string = server_name;
                         }
-                        NetworkStateMessage::ConnectionsRefresh(connection_state_vec) => {
+                        NetworkStateMessage::ConnectionsRefresh((_, connection_state_vec)) => {
                             state_common.connections = connection_state_vec;
                         }
                         NetworkStateMessage::NewConnection((user_name, state)) => {
@@ -300,7 +247,6 @@ fn run_console_server(servername: String, channels: ConsoleThreadChannels) -> st
                         NetworkStateMessage::StateChange((entry, state)) => {
                             state_common.connections[entry].state = state;
                         }
-                        _ => {}
                     }
                     should_draw = true;
                 }
@@ -399,10 +345,7 @@ fn run_console_client(
                             let state_change = state_common.connections[ind].state ^ 4;
                             let _ = channels
                                 .command_send
-                                .send(ConsoleCommands::ClientStateChange((
-                                    ind as u8,
-                                    state_change,
-                                )));
+                                .send(ConsoleCommands::ClientStateChange(state_change));
                         }
                     }
                 }
@@ -455,31 +398,28 @@ fn run_console_client(
                         NetworkStateMessage::ServerNameChange(server_name) => {
                             state_common.title_string = server_name;
                         }
-                        NetworkStateMessage::ConnectionsRefresh(connection_state_vec) => {
+                        NetworkStateMessage::ConnectionsRefresh((
+                            new_conn_index,
+                            connection_state_vec,
+                        )) => {
+                            my_conn_index = new_conn_index;
                             state_common.connections = connection_state_vec;
-                            for (index, conn) in state_common.connections.iter().enumerate() {
-                                if conn.state & 1 > 0 {
-                                    my_conn_index = Some(index);
-                                    if conn.state & 4 > 0 {
-                                        if !is_in_vc {
-                                            is_in_vc = true;
-                                            audio_out_channels
-                                                .command_send
-                                                .send(ConsoleAudioCommands::PlayOpus(1));
-                                        }
-                                    } else if is_in_vc {
-                                        is_in_vc = false;
+                            if let Some(conn_ind) = my_conn_index {
+                                let state_test = state_common.connections[conn_ind].state;
+                                if state_test & 4 > 0 {
+                                    if !is_in_vc {
+                                        is_in_vc = true;
                                         audio_out_channels
                                             .command_send
-                                            .send(ConsoleAudioCommands::PlayOpus(2));
+                                            .send(ConsoleAudioCommands::PlayOpus(1));
                                     }
-
-                                    break;
+                                } else if is_in_vc {
+                                    is_in_vc = false;
+                                    audio_out_channels
+                                        .command_send
+                                        .send(ConsoleAudioCommands::PlayOpus(2));
                                 }
                             }
-                        }
-                        NetworkStateMessage::SetConnectionIndex(conn_ind) => {
-                            my_conn_index = Some(conn_ind);
                         }
                     }
                     should_draw = true;
@@ -563,37 +503,28 @@ fn console_ui(frame: &mut ratatui::Frame, state: &ConsoleStateCommon, my_state: 
 
     for (conn_ind, conn) in state.connections.iter().enumerate() {
         let mut row = Vec::new();
-        row.push(conn.name.clone());
+        let username_cell = Cell::from(conn.name.clone());
 
         if let Some(test_ind) = my_state {
             if test_ind == conn_ind {
-                row.push(String::from("X"));
+                let username_cell =
+                    username_cell.style(Style::default().add_modifier(Modifier::BOLD));
+                row.push(username_cell);
             } else {
-                row.push(String::from(" "));
+                row.push(username_cell);
             }
         } else {
-            row.push(String::from(" "));
+            row.push(username_cell);
         }
-        // if conn.state & 1 > 0 {
-        // 	row.push(String::from("X"));
-        // }
-        // else {
-        // 	row.push(String::from(" "));
-        // }
-        if conn.state & 2 > 0 {
-            row.push(String::from("X"));
-        } else {
-            row.push(String::from(" "));
-        }
-        if conn.state & 4 > 0 {
-            row.push(String::from("X"));
-        } else {
-            row.push(String::from(" "));
-        }
-        if conn.state & 8 > 0 {
-            row.push(String::from("X"));
-        } else {
-            row.push(String::from(" "));
+
+        let mut state_test = 1;
+        for i in 1..4 {
+            if conn.state & state_test > 0 {
+                row.push(Cell::from("X"));
+            } else {
+                row.push(Cell::from(" "));
+            }
+            state_test <<= 1;
         }
 
         rows.push(Row::new(row));
@@ -608,7 +539,7 @@ fn console_ui(frame: &mut ratatui::Frame, state: &ConsoleStateCommon, my_state: 
     ];
 
     let widths = [
-        Constraint::Min(16),
+        Constraint::Min(32),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),

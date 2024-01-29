@@ -60,14 +60,13 @@ pub enum ConsoleCommands {
     NetworkingStop(u64),
     ClientConnectionClose,
     ServerConnectionClose(u64),
-    ClientStateChange((u8, u8)),
+    ClientStateChange(u8),
     ClientReconnect(crate::network::SocketAddr), //ServerMusicListen(),
 }
 
 pub enum NetworkStateMessage {
     ServerNameChange(String),
-    ConnectionsRefresh(Vec<NetworkStateConnection>),
-    SetConnectionIndex(usize),
+    ConnectionsRefresh((Option<usize>, Vec<NetworkStateConnection>)),
     NewConnection((String, u8)),
     StateChange((usize, u8)),
 }
@@ -76,11 +75,6 @@ pub struct NetworkStateConnection {
     pub name: String,
     pub state: u8,
 }
-
-// pub struct NetworkStateConnectionState {
-// 	pub entry: usize,
-// 	pub state: u8
-// }
 
 pub struct AudioOutputThreadChannels {
     pub command_recv: Receiver<ConsoleAudioCommands>,
