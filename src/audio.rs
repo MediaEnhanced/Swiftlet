@@ -31,7 +31,7 @@ use crate::communication::{
 pub use cpal::Stream;
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    BufferSize, SampleFormat,
+    BufferSize, SampleFormat, StreamConfig,
 };
 
 enum OggPageHeaderAnalysisResult {
@@ -365,27 +365,29 @@ pub fn start_audio_output(channels: AudioOutputThreadChannels) -> Option<Stream>
     let device = host
         .default_output_device()
         .expect("no output device available");
+
     let mut supported_configs_range = device
         .supported_output_configs()
         .expect("error while querying configs");
-    let supported_config = supported_configs_range
-        .next()
-        .expect("no supported config?!")
-        .with_sample_rate(cpal::SampleRate(48000));
 
-    let supported_format = supported_config.sample_format();
-    if supported_format != SampleFormat::F32 {
+    let config = supported_configs_range
+        .find(|c| c.max_sample_rate().0 == 48000 && c.min_sample_rate().0 == 48000);
+
+    config.as_ref()?;
+
+    let config = config.unwrap();
+
+    if config.sample_format() != SampleFormat::F32 {
         let _ = debug_send.send("Supported Config Format is Not F32\n");
         return None;
     }
 
-    let supported_channels = supported_config.channels();
-    if supported_channels != 2 {
+    if config.channels() != 2 {
         let _ = debug_send.send("Supported Config is Not Stereo\n");
         return None;
     }
 
-    match supported_config.buffer_size() {
+    match config.buffer_size() {
         cpal::SupportedBufferSize::Range { min, max } => {
             if 480 >= *min && 480 <= *max {
                 let _ = debug_send.send("480 Buffer supported!\n");
@@ -400,8 +402,11 @@ pub fn start_audio_output(channels: AudioOutputThreadChannels) -> Option<Stream>
         }
     }
 
-    let mut config = supported_config.config();
-    config.buffer_size = BufferSize::Fixed(480);
+    let config = StreamConfig {
+        channels: 2,
+        sample_rate: cpal::SampleRate(48000),
+        buffer_size: cpal::BufferSize::Fixed(480),
+    };
 
     let mut output_state = AudioOutputState {
         prev_callback_time: Instant::now(),

@@ -297,7 +297,7 @@ fn run_console_client(
     mut username: String,
     channels: ConsoleThreadChannels,
     audio_out_channels: ConsoleAudioOutputChannels,
-    audio_out_stream: Option<audio::Stream>,
+    audio_out_stream: audio::Stream,
 ) -> std::io::Result<()> {
     // Start Console Here:
     crossterm::terminal::enable_raw_mode().unwrap();
@@ -481,9 +481,7 @@ fn run_console_client(
         .command_send
         .send(ConsoleCommands::NetworkingStop(42));
 
-    if let Some(stream) = audio_out_stream {
-        stream.pause();
-    }
+    audio_out_stream.pause();
 
     // Cleanup Console Here:
     std::io::stdout().execute(crossterm::terminal::LeaveAlternateScreen)?;
