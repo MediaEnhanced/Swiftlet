@@ -20,14 +20,10 @@
 //OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //SOFTWARE.
 
-#![allow(unused_variables)]
 //#![allow(unused_imports)]
-//#![allow(unused_assignments)]
+#![allow(unused_variables)]
 #![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_must_use)]
 
-const ADDR_DEFAULT: [u16; 8] = [0, 0, 0, 0, 0, 0, 0, 1];
 const SERVERNAME_DEFAULT: &str = "Server";
 const USERNAME_DEFAULT: &str = "Client";
 const PORT_DEFAULT: u16 = 9001;
@@ -40,11 +36,12 @@ const AUDIO_FILES: [&str; 3] = [
     "audio/ExitVoice.opus",
     "audio/song.opus",
 ];
+const TRANSFER_AUDIO: &str = "audio/transfer.opus";
 
 mod communication;
 use communication::{
-    ConsoleAudioCommands, ConsoleAudioOutputChannels, ConsoleCommands, ConsoleThreadChannels,
-    NetworkStateConnection, NetworkStateMessage, TryRecvError,
+    ClientCommand, ConsoleAudioCommands, ConsoleAudioOutputChannels, ConsoleThreadChannels,
+    NetworkCommand, NetworkStateConnection, NetworkStateMessage, TryRecvError,
 };
 
 mod network;
@@ -52,12 +49,13 @@ use cpal::traits::StreamTrait;
 use network::SocketAddr;
 
 mod audio;
-use audio::start_audio_output;
 
 use clap::{ArgAction, Parser};
 use crossterm::ExecutableCommand; // Needed to use .execute on Stdout for crossterm setup
 use ratatui::{prelude::*, widgets::*};
 use std::thread;
+
+use crate::audio::OpusData;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -88,32 +86,28 @@ fn main() -> std::io::Result<()> {
     println!("Networking Audio Program Started");
 
     // Uncomment if this would be useful (only for debug code?)
-    //std::env::set_var("RUST_BACKTRACE", "1");
+    std::env::set_var("RUST_BACKTRACE", "1");
 
     // Argument Parsing
     let args = Args::parse();
 
-    // Initialize variable bindings common to both clients and servers
+    // Initialize inter-thread channels common to both clients and servers (a future "headless" server won't need these)
     let (network_channels, console_channels) = communication::create_networking_console_channels();
 
     // Check if the program started as a Client or a Server
     match args.address {
         // This is a client because we have an address to connect to
-        Some(address) => {
-            if args.username.is_none() {
-                println!("No client username (\"-u\" or \"--username\") provided. Exiting.");
-                std::process::exit(1);
-            }
-
+        Some(server_address) => {
             let (audio_out_channels, network_audio_out_channels, console_audio_out_channels) =
                 communication::create_audio_output_channels();
 
             // Load in Audio Files
             for (ind, f) in AUDIO_FILES.iter().enumerate() {
                 if let Ok(bytes) = std::fs::read(std::path::Path::new(f)) {
-                    if let Some(opus_data) = audio::convert_ogg_opus_file(&bytes, (ind as u64) + 1)
+                    if let Some(opus_data) =
+                        OpusData::convert_ogg_opus_file(&bytes, (ind as u64) + 1)
                     {
-                        console_audio_out_channels
+                        let _ = console_audio_out_channels
                             .command_send
                             .send(ConsoleAudioCommands::LoadOpus(opus_data));
                     }
@@ -121,18 +115,19 @@ fn main() -> std::io::Result<()> {
             }
 
             // Start Network Thread
-            let username = args.username.unwrap().clone();
-            let username_console = username.clone();
-            let network_thread_handler =
-                thread::spawn(move || network::client_thread(address, username, network_channels));
+            let user_name = match args.username {
+                Some(un) => un,
+                None => USERNAME_DEFAULT.to_string(),
+            };
+            let network_thread_handler = thread::spawn(move || {
+                network::client_thread(server_address, user_name, network_channels)
+            });
 
             // Start Audio Output
-            let audio_out_stream = start_audio_output(audio_out_channels);
+            let audio_out_stream = audio::start_audio_output(audio_out_channels);
 
             // Start Console
             let _ = run_console_client(
-                address.to_string(),
-                username_console,
                 console_channels,
                 console_audio_out_channels,
                 audio_out_stream,
@@ -149,7 +144,7 @@ fn main() -> std::io::Result<()> {
             };
 
             // Start Network Thread
-            let server_name = args.sname.unwrap_or(String::from("Server"));
+            let server_name = args.sname.unwrap_or(String::from(SERVERNAME_DEFAULT));
             let server_name_console = server_name.clone();
             let network_thread_handler = thread::spawn(move || {
                 network::server_thread(args.ipv6, port, server_name.clone(), network_channels)
@@ -268,7 +263,7 @@ fn run_console_server(servername: String, channels: ConsoleThreadChannels) -> st
                     }
                 }
                 Ok(recv_string) => {
-                    state_common.debug_string.push_str(recv_string);
+                    state_common.debug_string.push_str(&recv_string);
                     state_common.debug_lines += 1;
                     should_draw = true;
                 }
@@ -281,9 +276,7 @@ fn run_console_server(servername: String, channels: ConsoleThreadChannels) -> st
         }
     }
 
-    let _ = channels
-        .command_send
-        .send(ConsoleCommands::NetworkingStop(42));
+    let _ = channels.command_send.send(NetworkCommand::Stop(42));
 
     // Cleanup Console Here:
     std::io::stdout().execute(crossterm::terminal::LeaveAlternateScreen)?;
@@ -293,8 +286,6 @@ fn run_console_server(servername: String, channels: ConsoleThreadChannels) -> st
 }
 
 fn run_console_client(
-    mut server_address_string: String,
-    mut username: String,
     channels: ConsoleThreadChannels,
     audio_out_channels: ConsoleAudioOutputChannels,
     audio_out_stream: Option<audio::Stream>,
@@ -315,6 +306,7 @@ fn run_console_client(
 
     let mut my_conn_index: Option<usize> = None;
     let mut is_in_vc = false;
+    let mut already_transfered = false;
 
     let mut should_draw = true;
 
@@ -338,16 +330,27 @@ fn run_console_client(
                         should_draw = true;
                     } else if key.code == crossterm::event::KeyCode::Char('m') {
                         if audio_out_stream.is_some() {
-                            audio_out_channels
+                            let _ = audio_out_channels
                                 .command_send
                                 .send(ConsoleAudioCommands::PlayOpus(3));
                         }
                     } else if key.code == crossterm::event::KeyCode::Char('v') {
                         if let Some(ind) = my_conn_index {
                             let state_change = state_common.connections[ind].state ^ 4;
-                            let _ = channels
-                                .command_send
-                                .send(ConsoleCommands::ClientStateChange(state_change));
+                            let _ = channels.command_send.send(NetworkCommand::Client(
+                                ClientCommand::StateChange(state_change),
+                            ));
+                        }
+                    } else if key.code == crossterm::event::KeyCode::Char('t')
+                        && !already_transfered
+                    {
+                        if let Ok(bytes) = std::fs::read(std::path::Path::new(TRANSFER_AUDIO)) {
+                            if let Some(opus_data) = OpusData::convert_ogg_opus_file(&bytes, 45) {
+                                let _ = channels.command_send.send(NetworkCommand::Client(
+                                    ClientCommand::MusicTransfer(opus_data),
+                                ));
+                                already_transfered = true;
+                            }
                         }
                     }
                 }
@@ -378,7 +381,7 @@ fn run_console_client(
                                         if !is_in_vc {
                                             is_in_vc = true;
                                             if audio_out_stream.is_some() {
-                                                audio_out_channels
+                                                let _ = audio_out_channels
                                                     .command_send
                                                     .send(ConsoleAudioCommands::PlayOpus(1));
                                             }
@@ -386,7 +389,7 @@ fn run_console_client(
                                     } else if is_in_vc {
                                         is_in_vc = false;
                                         if audio_out_stream.is_some() {
-                                            audio_out_channels
+                                            let _ = audio_out_channels
                                                 .command_send
                                                 .send(ConsoleAudioCommands::PlayOpus(2));
                                         }
@@ -416,7 +419,7 @@ fn run_console_client(
                                     if !is_in_vc {
                                         is_in_vc = true;
                                         if audio_out_stream.is_some() {
-                                            audio_out_channels
+                                            let _ = audio_out_channels
                                                 .command_send
                                                 .send(ConsoleAudioCommands::PlayOpus(1));
                                         }
@@ -424,7 +427,7 @@ fn run_console_client(
                                 } else if is_in_vc {
                                     is_in_vc = false;
                                     if audio_out_stream.is_some() {
-                                        audio_out_channels
+                                        let _ = audio_out_channels
                                             .command_send
                                             .send(ConsoleAudioCommands::PlayOpus(2));
                                     }
@@ -452,7 +455,7 @@ fn run_console_client(
                     }
                 }
                 Ok(recv_string) => {
-                    state_common.debug_string.push_str(recv_string);
+                    state_common.debug_string.push_str(&recv_string);
                     state_common.debug_lines += 1;
                     should_draw = true;
                 }
@@ -487,12 +490,10 @@ fn run_console_client(
         }
     }
 
-    let _ = channels
-        .command_send
-        .send(ConsoleCommands::NetworkingStop(42));
+    let _ = channels.command_send.send(NetworkCommand::Stop(42));
 
     if let Some(audio_out) = audio_out_stream {
-        audio_out.pause();
+        let _ = audio_out.pause();
     }
 
     // Cleanup Console Here:
@@ -542,7 +543,7 @@ fn console_ui(frame: &mut ratatui::Frame, state: &ConsoleStateCommon, my_state: 
 
     let header_row = [
         String::from("Name"),
-        String::from("R"),
+        String::from("T"),
         String::from("S"),
         String::from("V"),
         String::from("L"),
@@ -556,7 +557,7 @@ fn console_ui(frame: &mut ratatui::Frame, state: &ConsoleStateCommon, my_state: 
         Constraint::Length(1),
     ];
 
-    let mut table = Table::new(rows, widths)
+    let table = Table::new(rows, widths)
         .header(Row::new(header_row))
         .column_spacing(1)
         .block(

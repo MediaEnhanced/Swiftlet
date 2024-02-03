@@ -164,179 +164,220 @@ pub struct OpusData {
     packet_data: Vec<u8>,
 }
 
-pub fn convert_ogg_opus_file(data: &[u8], id: u64) -> Option<OpusData> {
-    let mut index = 0;
+impl OpusData {
+    pub fn convert_ogg_opus_file(data: &[u8], id: u64) -> Option<Self> {
+        let mut index = 0;
 
-    let first_page_result = match &data[index..index + 26].try_into() {
-        Ok(ogg_page_header) => analyze_ogg_page_header(ogg_page_header, None),
-        Err(err) => {
-            return None;
-        }
-    };
-    let serial_num = match first_page_result {
-        IdentificationHeader(arr) => arr,
-        _ => {
-            //println!("First Header Error!");
-            return None;
-        }
-    };
-
-    index += 26;
-    let mut remaining_bytes = data.len() - 26;
-    if remaining_bytes < 2 {
-        return None;
-    }
-    let page_segments = data[index];
-    if page_segments != 1 {
-        return None;
-    }
-    let segment_len = data[index + 1] as usize;
-
-    index += 2;
-    remaining_bytes -= 2;
-    if remaining_bytes < segment_len {
-        return None;
-    }
-    if segment_len < 19 {
-        return None;
-    }
-
-    let opus_head_pattern = [b'O', b'p', b'u', b's', b'H', b'e', b'a', b'd']; // Opus Head Magic Signature
-    if data[index..index + 8] != opus_head_pattern {
-        return None;
-    }
-    if data[index + 8] != 1 {
-        // Opus Version
-        return None;
-    }
-    let stereo = match data[index + 9] {
-        1 => false,
-        2 => true,
-        _ => return None,
-    };
-    let mut pre_skip = data[index + 10] as u16;
-    pre_skip |= (data[index + 11] as u16) << 8;
-    let mut output_gain = data[index + 12] as i16;
-    output_gain |= (data[index + 13] as i16) << 8;
-    let output_gain = f32::powf(10.0, (output_gain as f32) / (5120.0));
-
-    let mut opus_data = OpusData {
-        id,
-        stereo,
-        pre_skip,
-        output_gain,
-        packet_len: Vec::new(),
-        packet_data: Vec::new(),
-    };
-
-    index += segment_len;
-    remaining_bytes -= segment_len;
-    let second_page_result = match &data[index..index + 26].try_into() {
-        Ok(ogg_page_header) => analyze_ogg_page_header(ogg_page_header, Some(&serial_num)),
-        Err(err) => {
-            return None;
-        }
-    };
-    match second_page_result {
-        CommentHeader => {}
-        _ => {
-            //println!("Second Header Error!");
-            return None;
-        }
-    }
-
-    index += 26;
-    remaining_bytes -= 26;
-    if remaining_bytes < 1 {
-        return None;
-    }
-    let page_segments = data[index] as usize;
-
-    index += 1;
-    remaining_bytes -= 1;
-    if remaining_bytes < page_segments {
-        return None;
-    }
-    let mut comment_size = 0;
-    for d in &data[index..index + page_segments] {
-        comment_size += *d as usize;
-    }
-
-    index += page_segments;
-    remaining_bytes -= page_segments;
-    if remaining_bytes < comment_size {
-        return None;
-    }
-
-    index += comment_size;
-    remaining_bytes -= comment_size;
-    let mut page_sequence_count = 2;
-    let mut packet_length = 0;
-    loop {
-        let page_result = match &data[index..index + 26].try_into() {
-            Ok(ogg_page_header) => analyze_ogg_page_header(ogg_page_header, Some(&serial_num)),
+        let first_page_result = match &data[index..index + 26].try_into() {
+            Ok(ogg_page_header) => analyze_ogg_page_header(ogg_page_header, None),
             Err(err) => {
-                return Some(opus_data);
+                return None;
             }
         };
-        let (page_sequence_num, is_continuation, is_final) = match page_result {
-            AudioDataPage(psn) => (psn, false, false),
-            AudioDataPageContinuation(psn) => (psn, true, false),
-            AudioDataPageFinal(psn) => (psn, false, true),
-            AudioDataPageContinuationFinal(psn) => (psn, true, true),
-            _ => return Some(opus_data),
+        let serial_num = match first_page_result {
+            IdentificationHeader(arr) => arr,
+            _ => {
+                //println!("First Header Error!");
+                return None;
+            }
         };
-        if page_sequence_num != page_sequence_count {
-            return Some(opus_data);
+
+        index += 26;
+        let mut remaining_bytes = data.len() - 26;
+        if remaining_bytes < 2 {
+            return None;
         }
-        page_sequence_count += 1;
-        if is_continuation != (packet_length > 0) {
-            return Some(opus_data);
+        let page_segments = data[index];
+        if page_segments != 1 {
+            return None;
+        }
+        let segment_len = data[index + 1] as usize;
+
+        index += 2;
+        remaining_bytes -= 2;
+        if remaining_bytes < segment_len {
+            return None;
+        }
+        if segment_len < 19 {
+            return None;
+        }
+
+        let opus_head_pattern = [b'O', b'p', b'u', b's', b'H', b'e', b'a', b'd']; // Opus Head Magic Signature
+        if data[index..index + 8] != opus_head_pattern {
+            return None;
+        }
+        if data[index + 8] != 1 {
+            // Opus Version
+            return None;
+        }
+        let stereo = match data[index + 9] {
+            1 => false,
+            2 => true,
+            _ => return None,
+        };
+        let mut pre_skip = data[index + 10] as u16;
+        pre_skip |= (data[index + 11] as u16) << 8;
+        let mut output_gain = data[index + 12] as i16;
+        output_gain |= (data[index + 13] as i16) << 8;
+        let output_gain = f32::powf(10.0, (output_gain as f32) / (5120.0));
+
+        let mut opus_data = OpusData {
+            id,
+            stereo,
+            pre_skip,
+            output_gain,
+            packet_len: Vec::new(),
+            packet_data: Vec::new(),
+        };
+
+        index += segment_len;
+        remaining_bytes -= segment_len;
+        let second_page_result = match &data[index..index + 26].try_into() {
+            Ok(ogg_page_header) => analyze_ogg_page_header(ogg_page_header, Some(&serial_num)),
+            Err(err) => {
+                return None;
+            }
+        };
+        match second_page_result {
+            CommentHeader => {}
+            _ => {
+                //println!("Second Header Error!");
+                return None;
+            }
         }
 
         index += 26;
         remaining_bytes -= 26;
         if remaining_bytes < 1 {
-            return Some(opus_data);
+            return None;
         }
         let page_segments = data[index] as usize;
 
         index += 1;
         remaining_bytes -= 1;
         if remaining_bytes < page_segments {
-            return Some(opus_data);
+            return None;
         }
-
-        let mut data_length = 0;
+        let mut comment_size = 0;
         for d in &data[index..index + page_segments] {
-            data_length += *d as usize;
-
-            packet_length += *d as u16;
-            if *d != 255 {
-                opus_data.packet_len.push(packet_length);
-                packet_length = 0;
-            }
+            comment_size += *d as usize;
         }
 
         index += page_segments;
         remaining_bytes -= page_segments;
-        if remaining_bytes < data_length {
-            return None; // Since I haven't added the data and there will be a mismatch
+        if remaining_bytes < comment_size {
+            return None;
         }
-        opus_data
-            .packet_data
-            .extend_from_slice(&data[index..index + data_length]);
 
-        index += data_length;
-        remaining_bytes -= data_length;
-        if is_final {
-            break;
+        index += comment_size;
+        remaining_bytes -= comment_size;
+        let mut page_sequence_count = 2;
+        let mut packet_length = 0;
+        loop {
+            let page_result = match &data[index..index + 26].try_into() {
+                Ok(ogg_page_header) => analyze_ogg_page_header(ogg_page_header, Some(&serial_num)),
+                Err(err) => {
+                    return Some(opus_data);
+                }
+            };
+            let (page_sequence_num, is_continuation, is_final) = match page_result {
+                AudioDataPage(psn) => (psn, false, false),
+                AudioDataPageContinuation(psn) => (psn, true, false),
+                AudioDataPageFinal(psn) => (psn, false, true),
+                AudioDataPageContinuationFinal(psn) => (psn, true, true),
+                _ => return Some(opus_data),
+            };
+            if page_sequence_num != page_sequence_count {
+                return Some(opus_data);
+            }
+            page_sequence_count += 1;
+            if is_continuation != (packet_length > 0) {
+                return Some(opus_data);
+            }
+
+            index += 26;
+            remaining_bytes -= 26;
+            if remaining_bytes < 1 {
+                return Some(opus_data);
+            }
+            let page_segments = data[index] as usize;
+
+            index += 1;
+            remaining_bytes -= 1;
+            if remaining_bytes < page_segments {
+                return Some(opus_data);
+            }
+
+            let mut data_length = 0;
+            for d in &data[index..index + page_segments] {
+                data_length += *d as usize;
+
+                packet_length += *d as u16;
+                if *d != 255 {
+                    opus_data.packet_len.push(packet_length);
+                    packet_length = 0;
+                }
+            }
+
+            index += page_segments;
+            remaining_bytes -= page_segments;
+            if remaining_bytes < data_length {
+                return None; // Since I haven't added the data and there will be a mismatch
+            }
+            opus_data
+                .packet_data
+                .extend_from_slice(&data[index..index + data_length]);
+
+            index += data_length;
+            remaining_bytes -= data_length;
+            if is_final {
+                break;
+            }
         }
+
+        //println!("Remaining Bytes: {}", remaining_bytes);
+
+        Some(opus_data)
     }
 
-    //println!("Remaining Bytes: {}", remaining_bytes);
+    pub fn to_data(&self) -> (u8, usize, usize, Vec<u8>) {
+        let mut data = Vec::new();
 
-    Some(opus_data)
+        let stereo_byte = if self.stereo { 1 } else { 0 };
+
+        //data.extend_from_slice(&self.packet_len.len().to_ne_bytes());
+        for d in &self.packet_len {
+            data.extend_from_slice(&u16::to_ne_bytes(*d));
+        }
+        //data.extend_from_slice(&self.packet_data.len().to_ne_bytes());
+        data.extend_from_slice(&self.packet_data);
+
+        (
+            stereo_byte,
+            self.packet_len.len(),
+            self.packet_data.len(),
+            data,
+        )
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut data = Vec::new();
+
+        if self.stereo {
+            data.push(1);
+        } else {
+            data.push(0);
+        }
+
+        data.extend_from_slice(&self.packet_len.len().to_ne_bytes());
+        for d in &self.packet_len {
+            data.extend_from_slice(&u16::to_ne_bytes(*d));
+        }
+        data.extend_from_slice(&self.packet_data.len().to_ne_bytes());
+        data.extend_from_slice(&self.packet_data);
+
+        data
+    }
 }
 
 struct AudioOutputState {
@@ -489,7 +530,7 @@ fn audio_output_callback(
                     break;
                 }
                 TryRecvError::Disconnected => {
-                    channels
+                    let _ = channels
                         .debug_send
                         .send("Audio Command Recv Disconnected!!!\n");
                     break;
@@ -543,7 +584,7 @@ fn audio_output_callback(
                     break;
                 }
                 TryRecvError::Disconnected => {
-                    channels
+                    let _ = channels
                         .debug_send
                         .send("Audio Packet Recv Disconnected!!!\n");
                     break;
@@ -591,7 +632,7 @@ fn audio_output_callback(
                             s.decoded_data_count += decode_len * 2;
                         }
                         Err(err) => {
-                            channels.debug_send.send("Opus Decode Issue\n");
+                            let _ = channels.debug_send.send("Opus Decode Issue\n");
                             break;
                         }
                     }
@@ -608,7 +649,7 @@ fn audio_output_callback(
                         s.decoded_data_offset = 0;
                     }
                 } else if s.decoded_data_count > 0 {
-                    channels.debug_send.send("Decode Case Unhandled\n");
+                    let _ = channels.debug_send.send("Decode Case Unhandled\n");
                 } else {
                     state.cleanup.push(s_ind);
                 }
@@ -631,10 +672,10 @@ fn audio_output_error(
 ) {
     match err {
         cpal::StreamError::DeviceNotAvailable => {
-            debug_send.send("Audio Output Device Not Available!\n");
+            let _ = debug_send.send("Audio Output Device Not Available!\n");
         }
         cpal::StreamError::BackendSpecific { err } => {
-            debug_send.send("Audio Output Backend Specific!\n");
+            let _ = debug_send.send("Audio Output Backend Specific!\n");
         }
     }
 }

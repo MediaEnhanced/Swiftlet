@@ -26,21 +26,21 @@ pub use crossbeam::channel::{Receiver, Sender, TryRecvError};
 use crate::audio;
 
 pub struct NetworkThreadChannels {
-    pub command_recv: Receiver<ConsoleCommands>,
+    pub command_recv: Receiver<NetworkCommand>,
     pub network_state_send: Sender<NetworkStateMessage>,
-    pub network_debug_send: Sender<&'static str>,
+    pub network_debug_send: Sender<String>, // String so that non-static debug messages can be made!
 }
 
 pub struct ConsoleThreadChannels {
-    pub command_send: Sender<ConsoleCommands>,
+    pub command_send: Sender<NetworkCommand>,
     pub network_state_recv: Receiver<NetworkStateMessage>,
-    pub network_debug_recv: Receiver<&'static str>,
+    pub network_debug_recv: Receiver<String>,
 }
 
 pub fn create_networking_console_channels() -> (NetworkThreadChannels, ConsoleThreadChannels) {
-    let (command_send, command_recv) = bounded::<ConsoleCommands>(64);
-    let (network_state_send, network_state_recv) = bounded::<NetworkStateMessage>(64);
-    let (network_debug_send, network_debug_recv) = bounded::<&'static str>(256);
+    let (command_send, command_recv) = bounded(64);
+    let (network_state_send, network_state_recv) = bounded(64);
+    let (network_debug_send, network_debug_recv) = bounded(256);
 
     let network_channels = NetworkThreadChannels {
         command_recv,
@@ -56,12 +56,20 @@ pub fn create_networking_console_channels() -> (NetworkThreadChannels, ConsoleTh
     (network_channels, console_channels)
 }
 
-pub enum ConsoleCommands {
-    NetworkingStop(u64),
-    ClientConnectionClose,
-    ServerConnectionClose(u64),
-    ClientStateChange(u8),
-    ClientReconnect(crate::network::SocketAddr), //ServerMusicListen(),
+pub enum NetworkCommand {
+    Stop(u64),
+    Client(ClientCommand),
+    Server(ServerCommand),
+}
+
+pub enum ClientCommand {
+    StateChange(u8),
+    ServerConnect(crate::network::SocketAddr),
+    MusicTransfer(audio::OpusData),
+}
+
+pub enum ServerCommand {
+    ConnectionClose(usize),
 }
 
 pub enum NetworkStateMessage {
@@ -100,9 +108,9 @@ pub fn create_audio_output_channels() -> (
 ) {
     let (audio_output_command_send, audio_output_command_recv) =
         bounded::<ConsoleAudioCommands>(64);
-    let (audio_output_packet_send, audio_output_packet_recv) = bounded::<NetworkAudioPackets>(64);
-    let (audio_output_state_send, audio_output_state_recv) = bounded::<AudioStateMessage>(64);
-    let (audio_output_debug_send, audio_output_debug_recv) = bounded::<&'static str>(256);
+    let (audio_output_packet_send, audio_output_packet_recv) = bounded(64);
+    let (audio_output_state_send, audio_output_state_recv) = bounded(64);
+    let (audio_output_debug_send, audio_output_debug_recv) = bounded(256);
 
     let audio_output_channels = AudioOutputThreadChannels {
         command_recv: audio_output_command_recv,
