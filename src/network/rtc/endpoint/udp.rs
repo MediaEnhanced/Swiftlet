@@ -20,9 +20,11 @@
 //OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //SOFTWARE.
 
+use crate::network::rtc::SocketAddr;
+
 // UDP Management Intended for use with QUIC
 use std::collections::BinaryHeap;
-use std::net::SocketAddr;
+
 use std::time::Instant;
 
 pub(super) const MAX_UDP_LENGTH: usize = 65536;
@@ -74,10 +76,13 @@ impl PartialEq for DelayedSendPacket {
 }
 
 // UDP Socket Manager (Using the mio crate)
-pub(super) struct SocketManager {
+pub(super) struct UdpSocket {
     poll: mio::Poll,
     events: mio::Events,
     socket: mio::net::UdpSocket,
+    read_data: [u8; MAX_UDP_LENGTH],
+    //prev_recv_size: usize,
+    //prev_recv_from: Option<SocketAddr>,
     packet: [u8; TARGET_MAX_DATAGRAM_SIZE],
     send_queue: BinaryHeap<DelayedSendPacket>,
 }
@@ -91,7 +96,7 @@ pub(super) enum SocketError {
     RecvOtherIssue,
 }
 
-impl SocketManager {
+impl UdpSocket {
     pub(super) fn new(bind_addr: SocketAddr) -> Result<(Self, SocketAddr), SocketError> {
         let mut socket = match mio::net::UdpSocket::bind(bind_addr) {
             Ok(s) => s,
@@ -116,10 +121,13 @@ impl SocketManager {
             Err(_) => return Err(SocketError::CouldNotCreate),
         }
 
-        let socket_state = SocketManager {
+        let socket_state = UdpSocket {
             poll,
             events: mio::Events::with_capacity(1024),
             socket,
+            read_data: [0; MAX_UDP_LENGTH],
+            //prev_recv_size: 0,
+            //prev_recv_from: None,
             packet: [0; TARGET_MAX_DATAGRAM_SIZE],
             send_queue: BinaryHeap::new(),
         };
@@ -178,43 +186,40 @@ impl SocketManager {
             .map(|delayed_send_packet| delayed_send_packet.instant)
     }
 
-    pub(super) fn send_check(&mut self) -> Result<(), SocketError> {
+    pub(super) fn send_check(&mut self) -> Result<u64, SocketError> {
+        let mut sends = 0;
         while let Some(delayed_send_packet) = self.send_queue.peek() {
             if delayed_send_packet.instant <= Instant::now() {
-                match self.send_queue.pop() {
-                    Some(send_packet) => {
-                        // Drops packet before it enters network stack if it would block
-                        // Uncertain if it will partially fill socket (could even be OS dependent)
-                        match self.socket.send_to(
-                            &send_packet.data[..send_packet.data_len],
-                            send_packet.to_addr,
-                        ) {
-                            Ok(send_size) => {
-                                if send_size != send_packet.data_len {
-                                    return Err(SocketError::SendSizeWrong);
-                                }
-                            }
-                            Err(err) => {
-                                if err.kind() == std::io::ErrorKind::WouldBlock {
-                                    return Err(SocketError::SendBlocked);
-                                } else {
-                                    return Err(SocketError::SendOtherIssue);
-                                }
-                            }
+                // Drops packet before it enters network stack if it would block
+                // Uncertain if it will partially fill socket (could even be OS dependent)
+                match self.socket.send_to(
+                    &delayed_send_packet.data[..delayed_send_packet.data_len],
+                    delayed_send_packet.to_addr,
+                ) {
+                    Ok(send_size) => {
+                        if send_size != delayed_send_packet.data_len {
+                            return Err(SocketError::SendSizeWrong);
+                        }
+                        sends += 1;
+                    }
+                    Err(err) => {
+                        if err.kind() == std::io::ErrorKind::WouldBlock {
+                            return Err(SocketError::SendBlocked);
+                        } else {
+                            return Err(SocketError::SendOtherIssue);
                         }
                     }
-                    None => {
-                        return Ok(()); // Will this EVER be reached?
-                    }
                 }
+                self.send_queue.pop();
             } else {
-                return Ok(());
+                return Ok(sends);
             }
         }
-        Ok(())
+        Ok(sends)
     }
 
     // Returns true if there is data to be read
+    // It should capture "missed" events between calls and return without delay
     #[inline]
     pub(super) fn sleep_till_recv_data(&mut self, timeout: std::time::Duration) -> bool {
         match self.poll.poll(&mut self.events, Some(timeout)) {
@@ -223,12 +228,35 @@ impl SocketManager {
         }
     }
 
-    pub(super) fn recv_data(
-        &mut self,
-        data: &mut [u8],
-    ) -> Result<(usize, SocketAddr), SocketError> {
-        match self.socket.recv_from(data) {
-            Ok((recv_size, addr_from)) => Ok((recv_size, addr_from)),
+    // #[inline]
+    // pub(super) fn has_data_to_recv(&mut self) -> Result<bool, SocketError> {
+    //     match self.socket.recv_from(&mut self.read_data) {
+    //         Ok((recv_size, addr_from)) => {
+    //             self.prev_recv_size = recv_size;
+    //             self.prev_recv_from = Some(addr_from);
+    //             Ok(true)
+    //         }
+    //         Err(err) => {
+    //             if err.kind() == std::io::ErrorKind::WouldBlock {
+    //                 Ok(false)
+    //             } else {
+    //                 Err(SocketError::RecvOtherIssue)
+    //             }
+    //         }
+    //     }
+    // }
+
+    #[inline]
+    pub(super) fn get_next_recv_data(&mut self) -> Result<(&mut [u8], SocketAddr), SocketError> {
+        // if let Some(prev_addr_from) = self.prev_recv_from {
+        //     self.prev_recv_from = None;
+        //     //let recv_size = self.prev_recv_size;
+        //     //self.prev_recv_size = 0;
+        //     //Ok((&mut self.read_data[..recv_size], prev_addr_from))
+        //     Ok((&mut self.read_data[..self.prev_recv_size], prev_addr_from))
+        // } else {
+        match self.socket.recv_from(&mut self.read_data) {
+            Ok((recv_size, addr_from)) => Ok((&mut self.read_data[..recv_size], addr_from)),
             Err(err) => {
                 if err.kind() == std::io::ErrorKind::WouldBlock {
                     Err(SocketError::RecvBlocked)
@@ -237,5 +265,6 @@ impl SocketManager {
                 }
             }
         }
+        // }
     }
 }

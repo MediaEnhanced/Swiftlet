@@ -35,9 +35,9 @@ Start "Networking Audio Server" "..\target\release\swiftlet.exe" --sname Realm -
 timeout /t 1
 Start "Networking Audio Client1" "..\target\release\swiftlet.exe" -u Jared -a [::1]:9001
 timeout /t 1
-Start "Networking Audio Client2" "..\target\release\swiftlet.exe" -u Client2 -a [::1]:9001
-timeout /t 1
-Start "Networking Audio Client3" "..\target\release\swiftlet.exe" -u Client3 -a [::1]:9001
+rem Start "Networking Audio Client2" "..\target\release\swiftlet.exe" -u Client2 -a [::1]:9001
+rem timeout /t 1
+rem Start "Networking Audio Client3" "..\target\release\swiftlet.exe" -u Client3 -a [::1]:9001
 
 echo.
 exit 0

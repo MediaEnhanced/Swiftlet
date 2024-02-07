@@ -46,7 +46,7 @@ use communication::{
 
 mod network;
 use cpal::traits::StreamTrait;
-use network::SocketAddr;
+use network::rtc::SocketAddr;
 
 mod audio;
 
@@ -86,7 +86,7 @@ fn main() -> std::io::Result<()> {
     println!("Networking Audio Program Started");
 
     // Uncomment if this would be useful (only for debug code?)
-    std::env::set_var("RUST_BACKTRACE", "1");
+    //std::env::set_var("RUST_BACKTRACE", "1");
 
     // Argument Parsing
     let args = Args::parse();

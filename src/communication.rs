@@ -64,7 +64,7 @@ pub enum NetworkCommand {
 
 pub enum ClientCommand {
     StateChange(u8),
-    ServerConnect(crate::network::SocketAddr),
+    ServerConnect(crate::network::rtc::SocketAddr),
     MusicTransfer(audio::OpusData),
 }
 
