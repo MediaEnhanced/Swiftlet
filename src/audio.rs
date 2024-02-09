@@ -360,9 +360,7 @@ impl OpusData {
         )
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut data = Vec::new();
-
+    pub fn add_to_vec(&self, data: &mut Vec<u8>) {
         if self.stereo {
             data.push(1);
         } else {
@@ -375,8 +373,6 @@ impl OpusData {
         }
         data.extend_from_slice(&self.packet_data.len().to_ne_bytes());
         data.extend_from_slice(&self.packet_data);
-
-        data
     }
 }
 
@@ -389,10 +385,10 @@ struct AudioOutputState {
 struct AudioOutputPlayback {
     is_stereo: bool,
     decoder: opus::Decoder,
-    decoded_data: [f32; 2880],
+    decoded_data: [f32; 15360],
     decoded_data_count: usize,
     decoded_data_offset: usize,
-    is_realtime: bool,
+    realtime_id: u8, // 0 is Non-realtime
     opus_data_index: usize,
     opus_data_next_packet: usize,
     opus_data_next_data: usize, // opus
@@ -558,10 +554,10 @@ fn audio_output_callback(
                             let audio_out_playback = AudioOutputPlayback {
                                 is_stereo: opus.stereo,
                                 decoder,
-                                decoded_data: [0.0; 2880],
+                                decoded_data: [0.0; 15360],
                                 decoded_data_count: 0,
                                 decoded_data_offset: 0,
-                                is_realtime: false,
+                                realtime_id: 0,
                                 opus_data_index: index,
                                 opus_data_next_packet: 0,
                                 opus_data_next_data: 0,
@@ -575,27 +571,102 @@ fn audio_output_callback(
         }
     }
 
-    // Zero the data buffer
-
     loop {
         match channels.packet_recv.try_recv() {
-            Err(try_recv_error) => match try_recv_error {
-                TryRecvError::Empty => {
-                    break;
+            Err(TryRecvError::Empty) => break,
+            Ok(NetworkAudioPackets::MusicPacket((music_id, music_data))) => {
+                if let Some(playback_ind) = state
+                    .playbacks
+                    .iter()
+                    .position(|p| p.realtime_id == music_id)
+                {
+                    let playback = &mut state.playbacks[playback_ind];
+
+                    let mut start_ind = playback.decoded_data_offset;
+                    let mut end_ind = start_ind + 1920;
+                    if start_ind > 0 {
+                        if playback.decoded_data_count < 15360 {
+                            start_ind = playback.decoded_data_count;
+                            end_ind = start_ind + 1920;
+                        } else {
+                            let _ = channels.debug_send.send("Unfortunate\n");
+                            playback.decoded_data_offset = 0;
+                            playback.decoded_data_count = 0;
+                            start_ind = 0;
+                            end_ind = 1920;
+                        }
+                    }
+
+                    match playback.decoder.decode_float(
+                        &music_data[1..],
+                        &mut playback.decoded_data[start_ind..end_ind],
+                        false,
+                    ) {
+                        Ok(decode_len) => {
+                            state.playbacks[playback_ind].decoded_data_count += decode_len * 2;
+                            //let _ = channels.debug_send.send("Music Decode!\n");
+                        }
+                        Err(_) => {
+                            let _ = channels.debug_send.send("Opus Decode Issue\n");
+                            continue;
+                        }
+                    }
+                } else {
+                    let is_stereo = music_data[0] > 0;
+                    let opus_channels = match is_stereo {
+                        true => opus::Channels::Stereo,
+                        false => opus::Channels::Mono,
+                    };
+                    let mut decoder = match opus::Decoder::new(48000, opus_channels) {
+                        Ok(decoder) => decoder,
+                        Err(err) => {
+                            let _ = channels.debug_send.send("Cannot Create Opus Decoder\n");
+                            break;
+                        }
+                    };
+                    let mut decoded_data = [0.0; 15360];
+                    let mut decoded_data_count = 0;
+                    match decoder.decode_float(&music_data[1..], &mut decoded_data, false) {
+                        Ok(decode_len) => {
+                            decoded_data_count += decode_len * 2;
+                        }
+                        Err(_) => {
+                            let _ = channels.debug_send.send("Opus Decode Issue\n");
+                            continue;
+                        }
+                    }
+
+                    let audio_out_playback = AudioOutputPlayback {
+                        is_stereo,
+                        decoder,
+                        decoded_data,
+                        decoded_data_count,
+                        decoded_data_offset: 0,
+                        realtime_id: music_id,
+                        opus_data_index: 0,
+                        opus_data_next_packet: 0,
+                        opus_data_next_data: 0,
+                    };
+                    state.playbacks.push(audio_out_playback);
                 }
-                TryRecvError::Disconnected => {
-                    let _ = channels
-                        .debug_send
-                        .send("Audio Packet Recv Disconnected!!!\n");
-                    break;
+            }
+            Ok(NetworkAudioPackets::MusicStop(music_id)) => {
+                if let Some(playback_ind) = state
+                    .playbacks
+                    .iter()
+                    .position(|p| p.realtime_id == music_id)
+                {
+                    state.playbacks.remove(playback_ind);
                 }
-            },
-            Ok(packet_recv) => {
-                //Opus Process Data from vector of data bytes into 480 decoded f32s
-                //let opus_decompressed_data: [f32; 480] = opus_decode(recv_audio_msg.data.to_bytes());
-                //Convert volume to f32 from audio_output_state based on the matching id
-                //Per output sample: sample += volume * decoded f32
-                //data += opus_decompressed_data;
+            }
+            Ok(_) => {
+                //Nothing yet
+            }
+            Err(TryRecvError::Disconnected) => {
+                let _ = channels
+                    .debug_send
+                    .send("Audio Packet Recv Disconnected!!!\n");
+                break;
             }
         }
     }
@@ -611,7 +682,17 @@ fn audio_output_callback(
     }
 
     for (s_ind, s) in state.playbacks.iter_mut().enumerate() {
-        if s.is_realtime {
+        if s.realtime_id > 0 {
+            if s.is_stereo {
+                for (index, sample) in samples.iter_mut().enumerate() {
+                    *sample += s.decoded_data[index + s.decoded_data_offset];
+                }
+                s.decoded_data_offset += 960;
+                if s.decoded_data_offset >= s.decoded_data_count {
+                    s.decoded_data_offset = 0;
+                    s.decoded_data_count = 0;
+                }
+            }
         } else {
             // Non-realtime
             if s.is_stereo {

@@ -140,7 +140,9 @@ pub enum ConsoleAudioCommands {
 }
 
 pub enum NetworkAudioPackets {
-    EndpointClose(u64),
+    MusicPacket((u8, Vec<u8>)),
+    MusicStop(u8),
+    VoiceData(Vec<u8>),
 }
 
 pub enum AudioStateMessage {}

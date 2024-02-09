@@ -91,7 +91,7 @@ impl Endpoint {
         alpn: &[u8],
         cert_path: &str,
         pkey_path: &str,
-        reliable_stream_buffer: u64,
+        reliable_stream_buffer: usize,
     ) -> Result<Self, EndpointError> {
         if let Ok((socket_mgr, local_addr)) = UdpSocket::new(bind_addr) {
             let max_payload_size = udp::TARGET_MAX_DATAGRAM_SIZE;
@@ -102,7 +102,7 @@ impl Endpoint {
                 Some(pkey_path),
                 5000,
                 max_payload_size,
-                reliable_stream_buffer,
+                reliable_stream_buffer as u64,
                 65536,
             ) {
                 Ok(cfg) => cfg,
@@ -118,7 +118,7 @@ impl Endpoint {
             let endpoint_manager = Endpoint {
                 udp: socket_mgr,
                 max_payload_size,
-                recv_data_capacity: reliable_stream_buffer as usize,
+                recv_data_capacity: reliable_stream_buffer,
                 local_addr,
                 config,
                 next_connection_id: 1,
@@ -138,7 +138,7 @@ impl Endpoint {
         bind_addr: SocketAddr,
         alpn: &[u8],
         cert_path: &str,
-        reliable_stream_buffer: u64,
+        reliable_stream_buffer: usize,
     ) -> Result<Self, EndpointError> {
         if let Ok((socket_mgr, local_addr)) = UdpSocket::new(bind_addr) {
             let max_payload_size = udp::TARGET_MAX_DATAGRAM_SIZE;
@@ -149,7 +149,7 @@ impl Endpoint {
                 None,
                 5000,
                 max_payload_size,
-                reliable_stream_buffer,
+                reliable_stream_buffer as u64,
                 65536,
             ) {
                 Ok(cfg) => cfg,
@@ -166,7 +166,7 @@ impl Endpoint {
             let endpoint_manager = Endpoint {
                 udp: socket_mgr,
                 max_payload_size,
-                recv_data_capacity: reliable_stream_buffer as usize,
+                recv_data_capacity: reliable_stream_buffer,
                 local_addr,
                 config,
                 next_connection_id: 1,
@@ -256,7 +256,6 @@ impl Endpoint {
                 self.local_addr,
                 &scid_data,
                 &mut self.config,
-                self.recv_data_capacity,
                 None,
             ) {
                 Ok(conn_mgr) => {
@@ -279,7 +278,7 @@ impl Endpoint {
         cert_path: &str,
         peer_addr: SocketAddr,
         server_name: &str,
-        reliable_stream_buffer: u64,
+        reliable_stream_buffer: usize,
     ) -> Result<Self, EndpointError> {
         let mut endpoint_mgr =
             Endpoint::new_client(bind_addr, alpn, cert_path, reliable_stream_buffer)?;
@@ -446,7 +445,6 @@ impl Endpoint {
                                 self.local_addr,
                                 scid_data,
                                 &mut self.config,
-                                self.recv_data_capacity,
                                 writer_opt,
                             ) {
                                 Ok(conn_mgr) => {
@@ -491,22 +489,8 @@ impl Endpoint {
                                 }
                                 Ok(RecvResult::Established(conn_id)) => {
                                     self.send(verified_index)?;
-                                    if !self.is_server {
-                                        match self.connections[verified_index]
-                                            .create_reliable_stream()
-                                        {
-                                            Ok(res) => Ok(EndpointEvent::EstablishedOnce((
-                                                conn_id,
-                                                verified_index,
-                                            ))),
-                                            Err(_) => Err(EndpointError::StreamCreation),
-                                        }
-                                    } else {
-                                        Ok(EndpointEvent::EstablishedOnce((
-                                            conn_id,
-                                            verified_index,
-                                        )))
-                                    }
+
+                                    Ok(EndpointEvent::EstablishedOnce((conn_id, verified_index)))
                                 }
                                 Ok(_) => {
                                     self.send(verified_index)?;
@@ -533,9 +517,12 @@ impl Endpoint {
     pub fn close_connection(
         &mut self,
         conn_id: u64,
+        probable_index: usize,
         error_code: u64,
     ) -> Result<bool, EndpointError> {
-        if let Some(verified_index) = self.find_connection_from_id(conn_id) {
+        if let Some(verified_index) =
+            self.find_connection_from_id_with_probable_index(conn_id, probable_index)
+        {
             match self.connections[verified_index].close(error_code, b"reason") {
                 Ok(_) => match self.send(verified_index) {
                     Ok(_) => Ok(true),
@@ -568,23 +555,6 @@ impl Endpoint {
         Ok(num_pings)
     }
 
-    // pub fn create_stream(
-    //     &mut self,
-    //     conn_id: u64,
-    //     stream_id: u64,
-    //     priority: u8,
-    // ) -> Result<bool, EndpointError> {
-    //     // Assumes that is called only after connection is established
-    //     if let Some(verified_index) = self.find_connection_from_id(conn_id) {
-    //         match self.connections[verified_index].create_stream(stream_id, priority) {
-    //             Ok(res) => Ok(res),
-    //             Err(_) => Err(EndpointError::StreamCreation),
-    //         }
-    //     } else {
-    //         Err(EndpointError::ConnectionNotFound)
-    //     }
-    // }
-
     pub fn send_reliable_stream_data(
         &mut self,
         conn_id: u64,
@@ -607,12 +577,11 @@ impl Endpoint {
         &mut self,
         conn_id: u64,
         probable_index: usize,
-        read_data_copy: &mut [u8],
     ) -> Result<(Option<usize>, Option<Vec<u8>>), EndpointError> {
         if let Some(verified_index) =
             self.find_connection_from_id_with_probable_index(conn_id, probable_index)
         {
-            match self.connections[verified_index].stream_reliable_read(read_data_copy) {
+            match self.connections[verified_index].stream_reliable_read() {
                 Ok((x, y)) => Ok((x, y)),
                 Err(_) => Err(EndpointError::StreamSend),
             }
@@ -626,11 +595,13 @@ impl Endpoint {
         conn_id: u64,
         probable_index: usize,
         next_target: usize,
+        vec_data_return: Vec<u8>,
     ) -> Result<(), EndpointError> {
         if let Some(verified_index) =
             self.find_connection_from_id_with_probable_index(conn_id, probable_index)
         {
-            self.connections[verified_index].stream_reliable_next_read_target(next_target);
+            self.connections[verified_index]
+                .stream_reliable_next_read_target(next_target, vec_data_return);
             Ok(())
         } else {
             Err(EndpointError::ConnectionNotFound)

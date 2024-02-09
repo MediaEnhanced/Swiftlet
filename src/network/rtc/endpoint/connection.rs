@@ -57,7 +57,7 @@ pub(super) struct Connection {
     established_once: bool,
     recv_captured: usize,
     recv_target: usize,
-    recv_data: Vec<u8>,
+    recv_data: Option<Vec<u8>>,
     reliable_send_queue: VecDeque<SendBuffer>,
 }
 
@@ -68,6 +68,7 @@ pub(super) enum RecvResult {
     Nothing,
     ReliableReadTarget(u64),
     Closing(u64),
+    ReliableBufferMissing,
     StreamReadable((u64, u64)),
 }
 
@@ -100,6 +101,8 @@ impl Connection {
             config.load_priv_key_from_pem_file(pkey_path)?;
             config.verify_peer(false);
 
+            config.set_initial_max_streams_bidi(3); // 1 For Main Communication, 2 and 3 for Unordered Alt Data (like file transfers)
+
             // Enable the ability to log the secret keys for wireshark debugging
             config.log_keys();
         } else {
@@ -107,22 +110,21 @@ impl Connection {
             // Maybe not return error immediately here?
             config.load_verify_locations_from_file(cert_path)?;
             config.verify_peer(true);
+
+            config.set_initial_max_streams_bidi(0);
         }
 
-        config.set_initial_max_streams_bidi(1);
-        config.set_initial_max_streams_uni(1); // Not sure... based on future testing
+        config.set_initial_max_streams_uni(4); // Not sure... based on future testing
 
         config.set_max_idle_timeout(idle_timeout_in_ms);
 
         config.set_max_recv_udp_payload_size(max_payload_size);
         config.set_max_send_udp_payload_size(max_payload_size);
 
-        // 4_194_304 |  4 MiB
         config.set_initial_max_stream_data_bidi_local(reliable_stream_buffer);
         config.set_initial_max_stream_data_bidi_remote(reliable_stream_buffer);
         config.set_initial_max_stream_data_uni(unreliable_stream_buffer);
 
-        // 16_777_216 | 16 MiB
         config.set_initial_max_data(reliable_stream_buffer + (unreliable_stream_buffer * 4));
 
         config.enable_pacing(true); // Default that I confirm
@@ -159,7 +161,6 @@ impl Connection {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         id: u64,
         peer_addr: SocketAddr,
@@ -167,7 +168,6 @@ impl Connection {
         local_addr: SocketAddr,
         scid_data: &[u8],
         config: &mut quiche::Config,
-        recv_data_capacity: usize,
         writer_opt: Option<Box<std::fs::File>>,
     ) -> Result<Self, Error> {
         let recv_info = quiche::RecvInfo {
@@ -185,7 +185,7 @@ impl Connection {
             let connection =
                 quiche::connect(server_name, &current_scid, local_addr, peer_addr, config)?;
 
-            let mut conn_mgr = Connection {
+            let conn_mgr = Connection {
                 id,
                 current_scid,
                 connection,
@@ -195,11 +195,9 @@ impl Connection {
                 established_once: false,
                 recv_captured: 0,
                 recv_target: 0,
-                recv_data: Vec::with_capacity(recv_data_capacity),
+                recv_data: None,
                 reliable_send_queue: VecDeque::new(),
             };
-
-            conn_mgr.recv_data.resize(recv_data_capacity, 0);
 
             Ok(conn_mgr)
         } else {
@@ -218,7 +216,7 @@ impl Connection {
                     }
                 };
 
-            let mut conn_mgr = Connection {
+            let conn_mgr = Connection {
                 id,
                 current_scid,
                 connection,
@@ -228,11 +226,9 @@ impl Connection {
                 established_once: false,
                 recv_captured: 0,
                 recv_target: 0,
-                recv_data: Vec::with_capacity(recv_data_capacity),
+                recv_data: None,
                 reliable_send_queue: VecDeque::new(),
             };
-
-            conn_mgr.recv_data.resize(recv_data_capacity, 0);
 
             Ok(conn_mgr)
         }
@@ -354,10 +350,10 @@ impl Connection {
                     if next_readable_stream == MAIN_STREAM_ID {
                         if self.recv_captured >= self.recv_target {
                             Ok(RecvResult::ReliableReadTarget(self.id))
-                        } else {
+                        } else if let Some(recv_data) = &mut self.recv_data {
                             let (bytes_read, is_finished) = self.connection.stream_recv(
                                 MAIN_STREAM_ID,
-                                &mut self.recv_data[self.recv_captured..self.recv_target],
+                                &mut recv_data[self.recv_captured..self.recv_target],
                             )?; // Shouldn't throw a done since it was stated to be readable
                             if !is_finished {
                                 self.recv_captured += bytes_read;
@@ -370,16 +366,24 @@ impl Connection {
                                 self.connection.close(false, 1, b"Stream0Finished")?;
                                 Ok(RecvResult::Closing(self.id))
                             }
+                        } else {
+                            Ok(RecvResult::Nothing)
                         }
                     } else {
                         Ok(RecvResult::StreamReadable((self.id, next_readable_stream)))
                     }
                 } else {
-                    Ok(RecvResult::Nothing)
+                    Ok(RecvResult::ReliableBufferMissing)
                 }
             }
         } else if self.connection.is_established() {
             self.established_once = true;
+            // Create Streams if it is a Client!
+            if !self.connection.is_server() {
+                // Reliable Stream:
+                self.connection
+                    .stream_priority(MAIN_STREAM_ID, MAIN_STREAM_PRIORITY, true)?;
+            }
             Ok(RecvResult::Established(self.id))
         } else if self.connection.is_closed() {
             Ok(RecvResult::Closed(self.id))
@@ -405,19 +409,6 @@ impl Connection {
         }
     }
 
-    // #[inline]
-    // pub(super) fn create_stream(&mut self, stream_id: u64, urgency: u8) -> Result<bool, Error> {
-    //     self.connection.stream_priority(stream_id, urgency, true)?;
-    //     Ok(true)
-    // }
-
-    #[inline]
-    pub(super) fn create_reliable_stream(&mut self) -> Result<bool, Error> {
-        self.connection
-            .stream_priority(MAIN_STREAM_ID, MAIN_STREAM_PRIORITY, true)?;
-        Ok(true)
-    }
-
     pub(super) fn stream_reliable_send(&mut self, data_vec: Vec<u8>) -> Result<usize, Error> {
         let send_buffer = SendBuffer {
             data: data_vec,
@@ -427,54 +418,34 @@ impl Connection {
         self.stream_reliable_send_next()
     }
 
-    // Soft errors here for now
-    pub(super) fn stream_reliable_next_read_target(&mut self, mut next_target: usize) {
-        if next_target > self.recv_data.len() {
-            next_target = self.recv_data.len();
+    pub(super) fn stream_reliable_next_read_target(
+        &mut self,
+        next_target: usize,
+        mut data_vec: Vec<u8>,
+    ) {
+        if next_target > data_vec.len() {
+            data_vec.resize(next_target, 0);
         }
         self.recv_captured = 0;
         self.recv_target = next_target;
+        self.recv_data = Some(data_vec);
     }
 
     pub(super) fn stream_reliable_read(
         &mut self,
-        read_copy: &mut [u8],
     ) -> Result<(Option<usize>, Option<Vec<u8>>), Error> {
         if self.recv_captured >= self.recv_target {
-            if read_copy.len() >= self.recv_target {
-                read_copy[..self.recv_target].copy_from_slice(&self.recv_data[..self.recv_target]);
-                Ok((Some(self.recv_target), None))
-            } else {
-                let capacity = self.recv_data.capacity();
-                let mut vec_return =
-                    std::mem::replace(&mut self.recv_data, Vec::with_capacity(capacity));
-                self.recv_data.resize(capacity, 0);
-                vec_return.shrink_to(self.recv_target);
-                Ok((None, Some(vec_return)))
-            }
-        } else {
+            Ok((Some(self.recv_target), self.recv_data.take()))
+        } else if let Some(recv_data) = &mut self.recv_data {
             match self.connection.stream_recv(
                 MAIN_STREAM_ID,
-                &mut self.recv_data[self.recv_captured..self.recv_target],
+                &mut recv_data[self.recv_captured..self.recv_target],
             ) {
                 Ok((bytes_read, is_finished)) => {
                     if !is_finished {
                         self.recv_captured += bytes_read;
                         if self.recv_captured >= self.recv_target {
-                            if read_copy.len() >= self.recv_target {
-                                read_copy[..self.recv_target]
-                                    .copy_from_slice(&self.recv_data[..self.recv_target]);
-                                Ok((Some(self.recv_target), None))
-                            } else {
-                                let capacity = self.recv_data.capacity();
-                                let mut vec_return = std::mem::replace(
-                                    &mut self.recv_data,
-                                    Vec::with_capacity(capacity),
-                                );
-                                self.recv_data.resize(capacity, 0);
-                                vec_return.shrink_to(self.recv_target);
-                                Ok((None, Some(vec_return)))
-                            }
+                            Ok((Some(self.recv_target), self.recv_data.take()))
                         } else {
                             Ok((None, None))
                         }
@@ -489,6 +460,8 @@ impl Connection {
                 Err(Error::Done) => Ok((None, None)),
                 Err(e) => Err(e),
             }
+        } else {
+            Err(Error::InvalidState) // Temporarily used to indicate No recv_data buffer
         }
     }
 

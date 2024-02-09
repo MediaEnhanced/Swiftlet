@@ -60,16 +60,20 @@ pub struct RtcQuicHandler<'a> {
     current_tick: u64,
     endpoint: Endpoint,
     events: &'a mut dyn RtcQuicEvents,
-    read_data: [u8; 256],
+    initial_recv_buffer_size: usize,
 }
 
 impl<'a> RtcQuicHandler<'a> {
-    pub fn new(endpoint: Endpoint, events: &'a mut dyn RtcQuicEvents) -> Self {
+    pub fn new(
+        endpoint: Endpoint,
+        events: &'a mut dyn RtcQuicEvents,
+        initial_recv_buffer_size: usize,
+    ) -> Self {
         RtcQuicHandler {
             current_tick: 0,
             endpoint,
             events,
-            read_data: [0; 256],
+            initial_recv_buffer_size,
         }
     }
 
@@ -132,37 +136,38 @@ impl<'a> RtcQuicHandler<'a> {
                     return Ok(false);
                 }
                 Ok(EndpointEvent::ReliableStreamReceived((conn_id, verified_index))) => loop {
-                    match self.endpoint.recv_reliable_stream_data(
-                        conn_id,
-                        verified_index,
-                        &mut self.read_data,
-                    ) {
+                    match self
+                        .endpoint
+                        .recv_reliable_stream_data(conn_id, verified_index)
+                    {
                         Ok((read_bytes_option, vec_option)) => {
                             if let Some(read_bytes) = read_bytes_option {
+                                let vec_data = match vec_option {
+                                    Some(v) => v,
+                                    None => {
+                                        // let mut v =
+                                        //     Vec::with_capacity(self.initial_recv_buffer_size);
+                                        // v.resize(self.initial_recv_buffer_size, 0);
+                                        // v
+                                        vec![0; self.initial_recv_buffer_size] // Faster according to clippy and github issue discussion but unsure why...?
+                                    }
+                                };
                                 if let Some(next_recv_target) = self.events.reliable_stream_recv(
                                     &mut self.endpoint,
                                     conn_id,
                                     verified_index,
-                                    &self.read_data[..read_bytes],
+                                    &vec_data[..read_bytes],
                                 ) {
                                     let _ = self.endpoint.set_reliable_stream_recv_target(
                                         conn_id,
                                         verified_index,
                                         next_recv_target,
+                                        vec_data,
                                     );
-                                }
-                            } else if let Some(data_vec) = vec_option {
-                                if let Some(next_recv_target) = self.events.reliable_stream_recv(
-                                    &mut self.endpoint,
-                                    conn_id,
-                                    verified_index,
-                                    &data_vec,
-                                ) {
-                                    let _ = self.endpoint.set_reliable_stream_recv_target(
-                                        conn_id,
-                                        verified_index,
-                                        next_recv_target,
-                                    );
+                                } else {
+                                    let _ =
+                                        self.endpoint.close_connection(conn_id, verified_index, 16);
+                                    break;
                                 }
                             } else {
                                 break;

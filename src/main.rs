@@ -120,7 +120,12 @@ fn main() -> std::io::Result<()> {
                 None => USERNAME_DEFAULT.to_string(),
             };
             let network_thread_handler = thread::spawn(move || {
-                network::client_thread(server_address, user_name, network_channels)
+                network::client_thread(
+                    server_address,
+                    user_name,
+                    network_channels,
+                    network_audio_out_channels,
+                )
             });
 
             // Start Audio Output
@@ -351,6 +356,13 @@ fn run_console_client(
                                 ));
                                 already_transfered = true;
                             }
+                        }
+                    } else if key.code == crossterm::event::KeyCode::Char('s') {
+                        if let Some(ind) = my_conn_index {
+                            let state_change = state_common.connections[ind].state ^ 2;
+                            let _ = channels.command_send.send(NetworkCommand::Client(
+                                ClientCommand::StateChange(state_change),
+                            ));
                         }
                     }
                 }

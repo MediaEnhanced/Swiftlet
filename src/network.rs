@@ -29,26 +29,26 @@ const CERT_PATH: &str = "security/cert.pem"; // Location of the certificate for 
 const PKEY_PATH: &str = "security/pkey.pem"; // Location of the private key for the server to use
 
 // IPv6 Addresses and Sockets used when sending the client an initial connection addresss
-use std::cmp;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 use std::time::Duration;
 
 // Use Inter-Thread Communication Definitions
 use crate::communication::{
-    ClientCommand, NetworkCommand, NetworkStateConnection, NetworkStateMessage,
-    NetworkThreadChannels, ServerCommand, TryRecvError,
+    ClientCommand, NetworkAudioOutputChannels, NetworkAudioPackets, NetworkCommand,
+    NetworkStateConnection, NetworkStateMessage, NetworkThreadChannels, ServerCommand,
+    TryRecvError,
 };
 
 pub mod rtc;
 use rtc::endpoint::Endpoint;
 use rtc::SocketAddr;
 
-use self::rtc::RtcQuicHandler;
+use self::rtc::{RtcQuicEvents, RtcQuicHandler};
 
 const MESSAGE_HEADER_SIZE: usize = 3;
 const MAX_MESSAGE_SIZE: usize = 65535;
+const BUFFER_SIZE_PER_CONNECTION: usize = 4_194_304; // 4 MiB
 
-#[derive(Copy, Clone)]
 #[repr(u8)]
 enum StreamMsgType {
     InvalidType = 0,
@@ -58,133 +58,132 @@ enum StreamMsgType {
     NewClient,          // ClientNameLen, ClientName, ClientState
     RemoveClient,       // ClientIndex,
     ClientNewState,     // ClientIndex, ClientState
-    TransferResponse,   // Transfer ID (1)
-
-    // Not fully working yet:
-    MusicTransferResponse, // MusicTransferID (2 bytes)
-    MusicIdReady,          // MusicID (2 bytes)
+    MusicIdReady,       // MusicID (1 byte)
+    NextMusicPacket,    // Stereo, Music Packet
 
     // Client Messages:
     NewClientAnnounce, // ClientNameLen, ClientName
     NewStateRequest,   // RequestedState
-    KeepConnectionAlive,
-    TransferRequest, // Data_Len_Size (3), TransferIntention (1)
-    TransferData,    // Transfer ID (1), TransferData
+    MusicRequest,      // MusicID (1 byte)
 
-    // Not fully working yet:
-    MusicTransferRequest, // Packet_Len_Size (8), Data_Len_Size(8), Stereo
-
-    MusicTransferData, // MusicTransferID (2 bytes), MusicTransferData
+    // General Messages:
+    TransferRequest,  // Data_Len_Size (3), TransferIntention (1)
+    TransferResponse, // Transfer ID (2)
+    TransferData,     // Header (Includes Transfer ID instead of Size) TransferData
 }
 
-enum StreamMsgIntended {
+enum IntendedFor {
     Nobody,
     Client,
     Server,
-    Anyone, // Might get rid of this type in future
+    Anyone,
 }
 
 impl StreamMsgType {
+    #[inline] // Verbose but compiles down to minimal instructions
     fn from_u8(byte: u8) -> Self {
         match byte {
             x if x == StreamMsgType::ServerStateRefresh as u8 => StreamMsgType::ServerStateRefresh,
             x if x == StreamMsgType::NewClient as u8 => StreamMsgType::NewClient,
             x if x == StreamMsgType::RemoveClient as u8 => StreamMsgType::RemoveClient,
             x if x == StreamMsgType::ClientNewState as u8 => StreamMsgType::ClientNewState,
-            x if x == StreamMsgType::TransferResponse as u8 => StreamMsgType::TransferResponse,
-
-            x if x == StreamMsgType::MusicTransferResponse as u8 => {
-                StreamMsgType::MusicTransferResponse
-            }
             x if x == StreamMsgType::MusicIdReady as u8 => StreamMsgType::MusicIdReady,
+            x if x == StreamMsgType::NextMusicPacket as u8 => StreamMsgType::NextMusicPacket,
 
             x if x == StreamMsgType::NewClientAnnounce as u8 => StreamMsgType::NewClientAnnounce,
             x if x == StreamMsgType::NewStateRequest as u8 => StreamMsgType::NewStateRequest,
-            x if x == StreamMsgType::KeepConnectionAlive as u8 => {
-                StreamMsgType::KeepConnectionAlive
-            }
+            x if x == StreamMsgType::MusicRequest as u8 => StreamMsgType::MusicRequest,
+
             x if x == StreamMsgType::TransferRequest as u8 => StreamMsgType::TransferRequest,
+            x if x == StreamMsgType::TransferResponse as u8 => StreamMsgType::TransferResponse,
             x if x == StreamMsgType::TransferData as u8 => StreamMsgType::TransferData,
 
-            x if x == StreamMsgType::MusicTransferRequest as u8 => {
-                StreamMsgType::MusicTransferRequest
-            }
-            x if x == StreamMsgType::MusicTransferData as u8 => StreamMsgType::MusicTransferData,
             _ => StreamMsgType::InvalidType,
         }
     }
 
-    fn get_value(&self) -> u8 {
-        // Requires Copy and Clone derived...?
-        *self as u8
-    }
-
-    fn intended_for(&self) -> StreamMsgIntended {
+    #[inline]
+    fn to_u8(&self) -> u8 {
         match self {
-            StreamMsgType::ServerStateRefresh => StreamMsgIntended::Client,
-            StreamMsgType::NewClient => StreamMsgIntended::Client,
-            StreamMsgType::RemoveClient => StreamMsgIntended::Client,
-            StreamMsgType::ClientNewState => StreamMsgIntended::Client,
-            StreamMsgType::TransferResponse => StreamMsgIntended::Client,
+            StreamMsgType::ServerStateRefresh => StreamMsgType::ServerStateRefresh as u8,
+            StreamMsgType::NewClient => StreamMsgType::NewClient as u8,
+            StreamMsgType::RemoveClient => StreamMsgType::RemoveClient as u8,
+            StreamMsgType::ClientNewState => StreamMsgType::ClientNewState as u8,
+            StreamMsgType::MusicIdReady => StreamMsgType::MusicIdReady as u8,
+            StreamMsgType::NextMusicPacket => StreamMsgType::NextMusicPacket as u8,
 
-            StreamMsgType::MusicTransferResponse => StreamMsgIntended::Client,
-            StreamMsgType::MusicIdReady => StreamMsgIntended::Client,
+            StreamMsgType::NewClientAnnounce => StreamMsgType::NewClientAnnounce as u8,
+            StreamMsgType::NewStateRequest => StreamMsgType::NewStateRequest as u8,
+            StreamMsgType::MusicRequest => StreamMsgType::MusicRequest as u8,
 
-            StreamMsgType::NewClientAnnounce => StreamMsgIntended::Server,
-            StreamMsgType::NewStateRequest => StreamMsgIntended::Server,
-            StreamMsgType::KeepConnectionAlive => StreamMsgIntended::Server,
-            StreamMsgType::TransferRequest => StreamMsgIntended::Server,
-            StreamMsgType::TransferData => StreamMsgIntended::Server,
-
-            StreamMsgType::MusicTransferRequest => StreamMsgIntended::Server,
-
-            StreamMsgType::MusicTransferData => StreamMsgIntended::Anyone,
-
-            _ => StreamMsgIntended::Nobody,
+            StreamMsgType::TransferRequest => StreamMsgType::TransferRequest as u8,
+            StreamMsgType::TransferResponse => StreamMsgType::TransferResponse as u8,
+            StreamMsgType::TransferData => StreamMsgType::TransferData as u8,
+            _ => IntendedFor::Nobody as u8,
         }
     }
 
-    fn get_max_size(&self) -> usize {
+    #[inline]
+    fn intended_for(&self) -> IntendedFor {
         match self {
-            StreamMsgType::ServerStateRefresh => MAX_MESSAGE_SIZE,
-            StreamMsgType::NewClient => MESSAGE_HEADER_SIZE + 256,
-            StreamMsgType::RemoveClient => MESSAGE_HEADER_SIZE + 1,
-            StreamMsgType::ClientNewState => MESSAGE_HEADER_SIZE + 2,
-            StreamMsgType::TransferResponse => MESSAGE_HEADER_SIZE + 1,
+            StreamMsgType::ServerStateRefresh => IntendedFor::Client,
+            StreamMsgType::NewClient => IntendedFor::Client,
+            StreamMsgType::RemoveClient => IntendedFor::Client,
+            StreamMsgType::ClientNewState => IntendedFor::Client,
+            StreamMsgType::MusicIdReady => IntendedFor::Client,
+            StreamMsgType::NextMusicPacket => IntendedFor::Client,
 
-            StreamMsgType::MusicTransferResponse => MESSAGE_HEADER_SIZE + 3,
-            StreamMsgType::MusicIdReady => MESSAGE_HEADER_SIZE + 3,
+            StreamMsgType::NewClientAnnounce => IntendedFor::Server,
+            StreamMsgType::NewStateRequest => IntendedFor::Server,
+            StreamMsgType::MusicRequest => IntendedFor::Server,
 
-            StreamMsgType::NewClientAnnounce => MESSAGE_HEADER_SIZE + 256,
-            StreamMsgType::NewStateRequest => MESSAGE_HEADER_SIZE + 1,
-            StreamMsgType::KeepConnectionAlive => MESSAGE_HEADER_SIZE,
-            StreamMsgType::TransferRequest => MESSAGE_HEADER_SIZE + 4,
-            StreamMsgType::TransferData => MAX_MESSAGE_SIZE,
-
-            StreamMsgType::MusicTransferRequest => MESSAGE_HEADER_SIZE + 3,
-
-            StreamMsgType::MusicTransferData => MAX_MESSAGE_SIZE,
-
-            _ => 3,
+            StreamMsgType::TransferRequest => IntendedFor::Anyone,
+            StreamMsgType::TransferResponse => IntendedFor::Anyone,
+            StreamMsgType::TransferData => IntendedFor::Anyone,
+            _ => IntendedFor::Nobody,
         }
     }
 
+    #[inline]
     fn get_stream_msg(&self) -> Vec<u8> {
-        // Maybe adjust capacity based on get_max_size in future
-        Vec::from([self.get_value(), 0, 0])
+        Vec::from([self.to_u8(), 0, 0])
+    }
+}
+
+#[repr(u8)]
+enum TransferIntention {
+    Deletion = 0,
+    Music,
+}
+
+impl TransferIntention {
+    #[inline]
+    fn from_u8(byte: u8) -> Self {
+        match byte {
+            x if x == TransferIntention::Music as u8 => TransferIntention::Music,
+            _ => TransferIntention::Deletion,
+        }
+    }
+
+    #[inline]
+    fn to_u8(&self) -> u8 {
+        match self {
+            TransferIntention::Music => TransferIntention::Music as u8,
+            _ => TransferIntention::Deletion as u8,
+        }
     }
 }
 
 #[inline]
 fn set_stream_msg_size(vec_data: &mut Vec<u8>) {
     let num_bytes = usize::to_ne_bytes(vec_data.len() - MESSAGE_HEADER_SIZE);
-    vec_data[1] = num_bytes[1];
-    vec_data[2] = num_bytes[0];
+    vec_data[1] = num_bytes[0];
+    vec_data[2] = num_bytes[1];
 }
 
 #[inline]
 fn get_stream_msg_size(read_data: &[u8]) -> usize {
-    usize::from_ne_bytes([read_data[2], read_data[1], 0, 0, 0, 0, 0, 0])
+    usize::from_ne_bytes([read_data[1], read_data[2], 0, 0, 0, 0, 0, 0])
 }
 
 fn u8_to_str(data: &[u8]) -> String {
@@ -210,79 +209,74 @@ struct MusicStorage {
     is_stereo: bool,
     packet_len: Vec<u16>,
     packet_data: Vec<u8>,
-    remaining_data: Option<(usize, usize)>,
-    prev_byte: Option<u8>,
 }
 
 impl MusicStorage {
-    fn new_blank(is_stereo: bool, packet_len_size: usize, packet_data_size: usize) -> Self {
+    fn new(read_data: &[u8]) -> Self {
+        let is_stereo = read_data[0] == 1;
+
+        let mut read_data_ind = 9;
+        let packet_len_size = usize::from_ne_bytes(read_data[1..9].try_into().unwrap());
+        let mut packet_len = Vec::with_capacity(packet_len_size);
+        for i in 0..packet_len_size {
+            packet_len.push(u16::from_ne_bytes([
+                read_data[read_data_ind],
+                read_data[read_data_ind + 1],
+            ]));
+            read_data_ind += 2;
+        }
+
+        let packet_data_size = usize::from_ne_bytes(
+            read_data[read_data_ind..read_data_ind + 8]
+                .try_into()
+                .unwrap(),
+        );
+        read_data_ind += 8;
+        let packet_data = Vec::from(&read_data[read_data_ind..read_data_ind + packet_data_size]);
+
         MusicStorage {
             is_stereo,
-            packet_len: Vec::with_capacity(packet_len_size),
-            packet_data: Vec::with_capacity(packet_data_size),
-            remaining_data: Some((packet_len_size, packet_data_size)),
-            prev_byte: None,
+            packet_len,
+            packet_data,
         }
     }
+}
 
-    fn load_in(&mut self, data: &[u8]) -> bool {
-        // Return represents more data to go
-        if let Some((mut packet_len_remaining, mut packet_data_remaining)) = self.remaining_data {
-            let mut data_pos = 0;
+struct MusicPlayback {
+    storage_index: usize,
+    tick: u64,
+    packet_num: usize,
+    data_offset: usize,
+    stereo_byte: u8,
+}
 
-            if let Some(pb) = self.prev_byte {
-                self.packet_len
-                    .push(u16::from_ne_bytes([pb, data[data_pos]]));
-                self.prev_byte = None;
-                packet_len_remaining -= 1;
-                data_pos += 1;
-            }
-
-            if packet_len_remaining > 0 {
-                let max_packet_lens = (data.len() - data_pos) >> 1;
-                let is_leftover =
-                    max_packet_lens < packet_len_remaining && ((data.len() - data_pos) & 1) > 0;
-                let mut loop_min = cmp::min(max_packet_lens, packet_len_remaining);
-                while loop_min > 0 {
-                    self.packet_len
-                        .push(u16::from_ne_bytes([data[data_pos], data[data_pos + 1]]));
-                    data_pos += 2;
-                    packet_len_remaining -= 1;
-                    loop_min -= 1;
-                }
-                if is_leftover {
-                    self.prev_byte = Some(data[data.len() - 1]);
-                }
-            }
-
-            if packet_len_remaining == 0 && packet_data_remaining > 0 {
-                let data_remaining_len = data.len() - data_pos;
-                let slice_min = cmp::min(data_remaining_len, packet_data_remaining);
-                self.packet_data
-                    .extend_from_slice(&data[data_pos..(data_pos + slice_min)]);
-                packet_data_remaining -= slice_min;
-            }
-
-            if packet_data_remaining > 0 {
-                self.remaining_data = Some((packet_len_remaining, packet_data_remaining));
-                false
-            } else {
-                self.remaining_data = None;
-                true
-            }
-        } else {
-            true
+impl MusicPlayback {
+    fn new(index: usize, is_stereo: bool) -> Self {
+        MusicPlayback {
+            storage_index: index,
+            tick: 0,
+            packet_num: 0,
+            data_offset: 0,
+            stereo_byte: is_stereo as u8,
         }
     }
+}
+
+struct TransferInfo {
+    id: u16,
+    target: TransferIntention,
+    size: usize,
 }
 
 struct ClientState {
     id: u64,
     probable_index: usize,
     msg_type_recv: Option<StreamMsgType>,
+    transfers: Vec<TransferInfo>,
+    transfer_id_recv: Option<u16>,
     user_name: [u8; MAX_CHAR_LENGTH * 4],
     user_name_len: usize,
-    state: u8, // Bit State [transferingMusic, serverMusicConnected, voiceChatConnected, voiceChatLoopback]
+    state: u8, // Bit State [fileTransfer, musicServer, connectedVoice, voiceLoopback]
 }
 
 impl ClientState {
@@ -291,6 +285,8 @@ impl ClientState {
             id: conn_id,
             probable_index,
             msg_type_recv: None,
+            transfers: Vec::new(),
+            transfer_id_recv: None,
             user_name: [0; MAX_CHAR_LENGTH * 4],
             user_name_len: 0,
             state: 0,
@@ -332,7 +328,9 @@ struct ServerState {
     command_handler_tick: u64,
     potential_clients: Vec<u64>,
     client_states: Vec<ClientState>,
+    next_transfer_id: u16,
     music_storage: Vec<MusicStorage>,
+    music_playback: Option<MusicPlayback>,
 }
 
 impl ServerState {
@@ -363,7 +361,9 @@ impl ServerState {
             command_handler_tick: 0,
             potential_clients: Vec::new(),
             client_states: Vec::new(),
+            next_transfer_id: 1,
             music_storage: Vec::new(),
+            music_playback: None,
         }
     }
 
@@ -399,198 +399,115 @@ impl ServerState {
         }
     }
 
+    fn update_client_state(&mut self, endpoint: &mut Endpoint, verified_index: usize) {
+        let mut send_data = StreamMsgType::ClientNewState.get_stream_msg();
+        send_data.push(verified_index as u8);
+        send_data.push(self.client_states[verified_index].state);
+        set_stream_msg_size(&mut send_data);
+
+        for cs in self.client_states.iter() {
+            let _ = endpoint.send_reliable_stream_data(cs.id, cs.probable_index, send_data.clone());
+        }
+
+        self.state_change_update(verified_index);
+    }
+
     fn handle_stream_msg(
         &mut self,
         endpoint: &mut Endpoint,
         verified_index: usize,
         msg_type: StreamMsgType,
         read_data: &[u8],
-    ) {
+    ) -> bool {
         match msg_type {
             StreamMsgType::NewStateRequest => {
-                let potential_new_state = read_data[0];
-                // In future check if server will allow state change here!
-                self.client_states[verified_index].state = potential_new_state;
-                let mut send_data = StreamMsgType::ClientNewState.get_stream_msg();
-                send_data.push(verified_index as u8);
-                send_data.push(self.client_states[verified_index].state);
-                set_stream_msg_size(&mut send_data);
-
-                for cs in self.client_states.iter() {
-                    let _ = endpoint.send_reliable_stream_data(
-                        cs.id,
-                        cs.probable_index,
-                        send_data.clone(),
-                    );
+                let mut potential_new_state = read_data[0];
+                if (potential_new_state & 2) > 0 {
+                    if !self.music_storage.is_empty() {
+                        if self.music_playback.is_none() {
+                            self.music_playback =
+                                Some(MusicPlayback::new(0, self.music_storage[0].is_stereo));
+                        }
+                    } else {
+                        potential_new_state &= 0xFD;
+                    }
                 }
 
-                self.state_change_update(verified_index);
+                // In future check if server will allow state change here!
+                self.client_states[verified_index].state = potential_new_state;
+                self.update_client_state(endpoint, verified_index);
             }
-            // StreamMsgType::TransferRequest => {
-            //     if self.connections[verified_index].transfer_recv.is_none() {
-            //         let transfer_size = usize::from_ne_bytes([
-            //             read_data[0],
-            //             read_data[1],
-            //             read_data[2],
-            //             0,
-            //             0,
-            //             0,
-            //             0,
-            //             0,
-            //         ]);
-            //         let media_transfer = RealtimeMediaTransfer {
-            //             data: Vec::new(),
-            //             size: transfer_size,
-            //             bytes_transfered: 0,
-            //         };
-            //         self.connections[verified_index].transfer_recv = Some(media_transfer);
+            StreamMsgType::TransferRequest => {
+                let transfer_size =
+                    usize::from_ne_bytes([read_data[0], read_data[1], read_data[2], 0, 0, 0, 0, 0]);
+                let info_string = format!("Data transfer request: {}\n", transfer_size);
+                self.send_debug_text(info_string.as_str());
+                if transfer_size <= BUFFER_SIZE_PER_CONNECTION {
+                    // More Checking before acception in future
 
-            //         self.msg_send.refresh_send(StreamMsgType::TransferResponse);
-            //         let write_data = self.msg_send.get_data_to_write();
-            //         write_data[0] = 33;
-            //         self.msg_send.update_data_write(1);
-            //         let send_data = self.msg_send.get_data_to_send();
-            //         self.connections[verified_index].send_main_stream_data(
-            //             &mut self.endpoint,
-            //             send_data,
-            //             self.current_tick,
-            //         );
+                    let trans_id_bytes = u16::to_ne_bytes(self.next_transfer_id);
+                    let trans_info = TransferInfo {
+                        id: self.next_transfer_id,
+                        target: TransferIntention::from_u8(read_data[3]),
+                        size: transfer_size,
+                    };
+                    self.client_states[verified_index]
+                        .transfers
+                        .push(trans_info);
 
-            //         server_state.client_states[verified_index].state |= 1;
-            //         self.msg_send.refresh_send(StreamMsgType::ClientNewState);
-            //         let write_data = self.msg_send.get_data_to_write();
-            //         write_data[0] = verified_index as u8;
-            //         write_data[1] = server_state.client_states[verified_index].state;
-            //         self.msg_send.update_data_write(2);
-            //         let send_data = self.msg_send.get_data_to_send();
-            //         for conn in self.connections.iter_mut() {
-            //             conn.send_main_stream_data(
-            //                 &mut self.endpoint,
-            //                 send_data,
-            //                 self.current_tick,
-            //             );
-            //         }
+                    self.next_transfer_id += 1; // Future rollover stuff or different scheme here
 
-            //         server_state
-            //             .state_change_update(verified_index, &self.channels.network_state_send);
-            //     }
-            // }
-            // StreamMsgType::TransferData => {
-            //     if self.connections[verified_index].transfer_recv.is_some() {
-            //         let mut done = false;
-            //         if self.connections[verified_index].recv_transfer_data() {
-            //             // Finished Receiving
-            //             if let RealtimeMediaTypeData::Server(server_state) = &mut self.type_data {
-            //                 done = true;
-            //                 server_state.client_states[verified_index].state &= 0xFE;
+                    let mut send_data = StreamMsgType::TransferResponse.get_stream_msg();
+                    send_data.push(trans_id_bytes[0]);
+                    send_data.push(trans_id_bytes[1]);
+                    set_stream_msg_size(&mut send_data);
 
-            //                 self.msg_send.refresh_send(StreamMsgType::ClientNewState);
-            //                 let write_data = self.msg_send.get_data_to_write();
-            //                 write_data[0] = verified_index as u8;
-            //                 write_data[1] = server_state.client_states[verified_index].state;
-            //                 self.msg_send.update_data_write(2);
-            //                 let send_data = self.msg_send.get_data_to_send();
-            //                 for conn in self.connections.iter_mut() {
-            //                     conn.send_main_stream_data(
-            //                         &mut self.endpoint,
-            //                         send_data,
-            //                         self.current_tick,
-            //                     );
-            //                 }
-
-            //                 server_state.state_change_update(
-            //                     verified_index,
-            //                     &self.channels.network_state_send,
-            //                 );
-            //                 self.connections[verified_index].transfer_recv = None;
-            //             }
-            //         }
-            //         if done {
-            //             self.send_debug_text("Finished the Transfer!!!\n");
-            //         }
-            //     } else {
-            //         self.send_debug_text("Got Unexpected TransferData Messages!\n");
-            //     }
-            // }
-
-            // StreamMsgType::MusicTransferRequest => {
-            //     let packet_len_size = usize::from_ne_bytes([
-            //         read_data[0],
-            //         read_data[1],
-            //         read_data[2],
-            //         read_data[3],
-            //         0,
-            //         0,
-            //         0,
-            //         0,
-            //     ]);
-
-            //     let data_size = usize::from_ne_bytes([
-            //         read_data[8],
-            //         read_data[9],
-            //         read_data[10],
-            //         read_data[11],
-            //         0,
-            //         0,
-            //         0,
-            //         0,
-            //     ]);
-
-            //     let is_stereo = read_data[16] > 0;
-
-            //     server_state.music_storage.push(MusicStorage::new_blank(
-            //         is_stereo,
-            //         packet_len_size,
-            //         data_size,
-            //     ));
-
-            //     server_state
-            //         .main_send
-            //         .refresh_send(MessageType::MusicTransferResponse);
-
-            //     let write_data = server_state.main_send.get_data_to_write();
-            //     let num_bytes = (server_state.music_storage.len() - 1).to_ne_bytes();
-
-            //     write_data[0] = num_bytes[0];
-            //     write_data[1] = num_bytes[1];
-
-            //     server_state.main_send.update_data_write(2);
-
-            //     let data_send = server_state.main_send.get_data_to_send();
-            //     server_endpoint.send_stream_data(
-            //         stream_readable.conn_id,
-            //         MAIN_STREAM_ID,
-            //         data_send,
-            //         false,
-            //     );
-            // }
-            // StreamMsgType::MusicTransferData => {
-            //     let music_storage_index =
-            //         usize::from_ne_bytes([read_data[0], read_data[1], 0, 0, 0, 0, 0, 0]);
-
-            //     if music_storage_index < server_state.music_storage.len()
-            //         && server_state.music_storage[music_storage_index].load_in(&read_data[2..])
-            //     {
-            //         let write_data = server_state.main_send.get_data_to_write();
-            //         write_data[0] = read_data[0];
-            //         write_data[1] = read_data[1];
-
-            //         server_state.main_send.update_data_write(2);
-
-            //         let data_send = server_state.main_send.get_data_to_send();
-            //         server_endpoint.send_stream_data(
-            //             stream_readable.conn_id,
-            //             MAIN_STREAM_ID,
-            //             data_send,
-            //             false,
-            //         );
-            //     }
-            // }
-            StreamMsgType::NewClientAnnounce => {
-                // If this is reached the client is possibly malicious and should be closed
+                    let _ = endpoint.send_reliable_stream_data(
+                        self.client_states[verified_index].id,
+                        self.client_states[verified_index].probable_index,
+                        send_data,
+                    );
+                }
             }
-            _ => {}
+            StreamMsgType::TransferData => {
+                if let Some(transfer_id) =
+                    self.client_states[verified_index].transfer_id_recv.take()
+                {
+                    if let Some(transfer_ind) = self.client_states[verified_index]
+                        .transfers
+                        .iter()
+                        .position(|transfers| transfers.id == transfer_id)
+                    {
+                        self.client_states[verified_index].state &= 0xFE;
+                        self.update_client_state(endpoint, verified_index);
+
+                        match self.client_states[verified_index].transfers[transfer_ind].target {
+                            TransferIntention::Music => {
+                                self.music_storage.push(MusicStorage::new(read_data));
+                                let mut send_data = StreamMsgType::MusicIdReady.get_stream_msg();
+                                send_data.push(self.music_storage.len() as u8);
+                                set_stream_msg_size(&mut send_data);
+
+                                for cs in self.client_states.iter() {
+                                    let _ = endpoint.send_reliable_stream_data(
+                                        cs.id,
+                                        cs.probable_index,
+                                        send_data.clone(),
+                                    );
+                                }
+                            }
+                            _ => {
+                                // Deletion... so do nothing
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                return false;
+            }
         }
+        true
     }
 
     fn add_new_verified_connection(
@@ -748,6 +665,49 @@ impl rtc::RtcQuicEvents for ServerState {
     }
 
     fn tick(&mut self, endpoint: &mut Endpoint) -> bool {
+        if let Some(playback) = &mut self.music_playback {
+            playback.tick += 1; // 4 ticks should be the 20ms music currently hidden requirement
+            if playback.tick >= 4 {
+                let mut send_data = StreamMsgType::NextMusicPacket.get_stream_msg();
+                send_data.push(playback.stereo_byte);
+
+                let len =
+                    self.music_storage[playback.storage_index].packet_len[playback.packet_num];
+                let next_offset = playback.data_offset + (len as usize);
+                send_data.extend_from_slice(
+                    &self.music_storage[playback.storage_index].packet_data
+                        [playback.data_offset..next_offset],
+                );
+                playback.data_offset = next_offset;
+                playback.packet_num += 1;
+                if playback.packet_num
+                    >= self.music_storage[playback.storage_index].packet_len.len()
+                {
+                    playback.packet_num = 0;
+                    playback.data_offset = 0;
+                }
+                playback.tick = 0;
+
+                set_stream_msg_size(&mut send_data);
+
+                let mut num_listeners = 0;
+                for cs in self.client_states.iter() {
+                    if (cs.state & 2) > 0 {
+                        let _ = endpoint.send_reliable_stream_data(
+                            cs.id,
+                            cs.probable_index,
+                            send_data.clone(), // Makes copies here which isn't ideal
+                                               // Especially one more than number of sends
+                        );
+                        num_listeners += 1;
+                    }
+                }
+                if num_listeners == 0 {
+                    self.music_playback = None;
+                }
+            }
+        }
+
         self.command_handler_tick += 1;
         if self.command_handler_tick >= 10 {
             loop {
@@ -780,13 +740,51 @@ impl rtc::RtcQuicEvents for ServerState {
     ) -> Option<usize> {
         if let Some(vi) = self.find_connection_index(conn_id) {
             self.client_states[vi].probable_index = verified_index;
-            if let Some(msg_type) = self.client_states[vi].msg_type_recv {
-                self.handle_stream_msg(endpoint, vi, msg_type, read_data);
-                self.client_states[vi].msg_type_recv = None;
-                Some(MESSAGE_HEADER_SIZE)
+            if let Some(msg_type) = self.client_states[vi].msg_type_recv.take() {
+                if self.handle_stream_msg(endpoint, vi, msg_type, read_data) {
+                    Some(MESSAGE_HEADER_SIZE)
+                } else {
+                    None // Close Connection
+                }
             } else {
-                self.client_states[vi].msg_type_recv = Some(StreamMsgType::from_u8(read_data[0]));
-                Some(get_stream_msg_size(read_data))
+                let new_msg_type = StreamMsgType::from_u8(read_data[0]);
+                match new_msg_type.intended_for() {
+                    IntendedFor::Server => {
+                        self.client_states[vi].msg_type_recv = Some(new_msg_type);
+                        Some(get_stream_msg_size(read_data))
+                    }
+                    IntendedFor::Anyone => {
+                        match new_msg_type {
+                            StreamMsgType::TransferData => {
+                                let trans_id = u16::from_ne_bytes([read_data[1], read_data[2]]);
+                                let trans_size_opt = self.client_states[vi]
+                                    .transfers
+                                    .iter()
+                                    .find(|ti| ti.id == trans_id)
+                                    .map(|trans_info| trans_info.size);
+
+                                if let Some(trans_size) = trans_size_opt {
+                                    self.client_states[vi].msg_type_recv = Some(new_msg_type);
+                                    self.client_states[vi].transfer_id_recv = Some(trans_id);
+
+                                    self.client_states[vi].state |= 0x01;
+                                    self.update_client_state(endpoint, vi);
+
+                                    Some(trans_size)
+                                } else {
+                                    None // Close Connection
+                                }
+                            }
+                            _ => {
+                                self.client_states[vi].msg_type_recv = Some(new_msg_type);
+                                Some(get_stream_msg_size(read_data))
+                            }
+                        }
+                    }
+                    _ => {
+                        None // Close Connection
+                    }
+                }
             }
         } else if let Some(pot_ind) = self
             .potential_clients
@@ -797,8 +795,7 @@ impl rtc::RtcQuicEvents for ServerState {
             if self.add_new_verified_connection(endpoint, conn_id, verified_index, read_data) {
                 Some(MESSAGE_HEADER_SIZE)
             } else {
-                // Close connection here in future
-                None
+                None // Close Connection
             }
         } else if read_data.len() >= MESSAGE_HEADER_SIZE {
             // Check to see if it's a new valid server
@@ -808,8 +805,7 @@ impl rtc::RtcQuicEvents for ServerState {
                     Some(get_stream_msg_size(read_data))
                 }
                 _ => {
-                    // Close connection here in future
-                    None
+                    None // Close Connection
                 }
             }
         } else {
@@ -822,14 +818,19 @@ struct ClientHandler {
     user_name: String,
     channels: NetworkThreadChannels,
     command_handler_tick: u64,
-    connection_id: Option<u64>,
-    probable_index: usize, // Only valid if connection_id.is_some()
+    connection_id: Option<u64>, // Focus Connection ID
+    probable_index: usize,      // Only valid if connection_id.is_some()
     msg_type_recv: Option<StreamMsgType>,
-    //focus_id: u64,
+    transfer_data: Option<Vec<u8>>,
+    audio_channels: NetworkAudioOutputChannels,
 }
 
 impl ClientHandler {
-    fn new(user_name: String, channels: NetworkThreadChannels) -> Self {
+    fn new(
+        user_name: String,
+        channels: NetworkThreadChannels,
+        audio_channels: NetworkAudioOutputChannels,
+    ) -> Self {
         ClientHandler {
             user_name,
             channels,
@@ -837,7 +838,8 @@ impl ClientHandler {
             connection_id: None,
             probable_index: 0,
             msg_type_recv: None,
-            //focus_id: 0,
+            transfer_data: None,
+            audio_channels,
         }
     }
 
@@ -846,7 +848,7 @@ impl ClientHandler {
         let _ = self.channels.network_debug_send.send(text.to_string());
     }
 
-    fn handle_commands(&self, endpoint: &mut Endpoint, cmd: ClientCommand) {
+    fn handle_commands(&mut self, endpoint: &mut Endpoint, cmd: ClientCommand) {
         match cmd {
             ClientCommand::StateChange(new_state_requested) => {
                 if let Some(conn_id) = self.connection_id {
@@ -861,68 +863,29 @@ impl ClientHandler {
                 let _ = endpoint.add_client_connection(server_address, SERVER_NAME);
             }
             ClientCommand::MusicTransfer(od) => {
-                // if !self.connections.is_empty() {
-                //     let transfer_data = od.to_bytes();
-                //     let transfer_size = transfer_data.len();
+                if let Some(conn_id) = self.connection_id {
+                    if self.transfer_data.is_none() {
+                        let mut transfer_data = StreamMsgType::TransferData.get_stream_msg();
+                        od.add_to_vec(&mut transfer_data);
+                        let size_in_bytes =
+                            (transfer_data.len() - MESSAGE_HEADER_SIZE).to_ne_bytes();
 
-                //     let info_string = format!("Data transfer size: {}\n", transfer_size);
-                //     self.send_debug_text(info_string.as_str());
+                        let mut send_data = StreamMsgType::TransferRequest.get_stream_msg();
+                        send_data.push(size_in_bytes[0]);
+                        send_data.push(size_in_bytes[1]);
+                        send_data.push(size_in_bytes[2]);
+                        send_data.push(TransferIntention::Music as u8);
 
-                //     let media_transfer = RealtimeMediaTransfer {
-                //         data: transfer_data,
-                //         size: transfer_size,
-                //         bytes_transfered: 0,
-                //     };
-                //     self.connections[0].transfer_send = Some(media_transfer);
+                        self.transfer_data = Some(transfer_data);
 
-                //     self.msg_send.refresh_send(StreamMsgType::TransferRequest);
-                //     let write_data = self.msg_send.get_data_to_write();
-
-                //     let size_in_bytes = transfer_size.to_ne_bytes();
-                //     write_data[0] = size_in_bytes[0];
-                //     write_data[1] = size_in_bytes[1];
-                //     write_data[2] = size_in_bytes[2];
-                //     write_data[3] = 1; // Indicating for deletion after fully received
-
-                //     self.msg_send.update_data_write(4);
-                //     let send_data = self.msg_send.get_data_to_send();
-                //     self.connections[0].send_main_stream_data(
-                //         &mut self.endpoint,
-                //         send_data,
-                //         self.current_tick,
-                //     );
-                // }
-
-                // if self.connections.len() > 0 {
-                //     let (stereo_byte, packet_len_size, data_len_size, od_data) = od.to_data();
-
-                //     self.msg_send
-                //         .refresh_send(StreamMsgType::MusicTransferRequest);
-                //     let write_data = self.msg_send.get_data_to_write();
-
-                //     write_data[0..8].copy_from_slice(&packet_len_size.to_ne_bytes());
-                //     write_data[8..16].copy_from_slice(&data_len_size.to_ne_bytes());
-
-                //     write_data[16] = stereo_byte;
-
-                //     // let num_bytes = od_data.len().to_ne_bytes();
-                //     // write_data[17] = num_bytes[0];
-                //     // write_data[18] = num_bytes[1];
-                //     // write_data[19] = num_bytes[2];
-
-                //     self.msg_send.update_data_write(17);
-
-                //     let send_data = self.msg_send.get_data_to_send();
-                //     let conn_id = self.connections[0].id;
-                //     self.endpoint
-                //         .send_stream_data(conn_id, MAIN_STREAM_ID, send_data, false);
-
-                //     self.connections[0].transfer_send = Some(RealtimeMediaTransfer {
-                //         data: od_data,
-                //         size: od_data.len(),
-                //         bytes_transfered: 0,
-                //     });
-                // }
+                        set_stream_msg_size(&mut send_data);
+                        let _ = endpoint.send_reliable_stream_data(
+                            conn_id,
+                            self.probable_index,
+                            send_data,
+                        );
+                    }
+                }
             }
         }
     }
@@ -944,11 +907,12 @@ impl ClientHandler {
     }
 
     fn handle_stream_msg(
-        &self,
+        &mut self,
         endpoint: &mut Endpoint,
+        conn_id: u64,
         msg_type: StreamMsgType,
         read_data: &[u8],
-    ) {
+    ) -> bool {
         match msg_type {
             StreamMsgType::ServerStateRefresh => {
                 // State Refresh
@@ -960,94 +924,31 @@ impl ClientHandler {
             StreamMsgType::ClientNewState => {
                 self.handle_client_new_state(read_data);
             }
-            // StreamMsgType::TransferResponse => {
-            //     let id_byte = read_data[0];
-            //     if self.connections[verified_index].transfer_send.is_some() {
-            //         loop {
-            //             self.msg_send.refresh_send(StreamMsgType::TransferData);
-            //             let write_data = self.msg_send.get_data_to_write();
-            //             write_data[0] = id_byte;
-
-            //             if let Some(transfer_media) =
-            //                 &mut self.connections[verified_index].transfer_send
-            //             {
-            //                 let write_len = write_data.len() - 1;
-            //                 let remaining_len =
-            //                     transfer_media.data.len() - transfer_media.bytes_transfered;
-            //                 let min_len = cmp::min(write_len, remaining_len);
-            //                 if min_len == 0 {
-            //                     break;
-            //                 }
-            //                 let transfer_end = min_len + transfer_media.bytes_transfered;
-            //                 write_data[1..(1 + min_len)].copy_from_slice(
-            //                     &transfer_media.data[transfer_media.bytes_transfered..transfer_end],
-            //                 );
-            //                 transfer_media.bytes_transfered = transfer_end;
-            //                 self.msg_send.update_data_write(min_len + 1);
-            //                 //let info_string = format!("Data written: {}\n", min_len + 1);
-            //                 //self.send_debug_text(info_string.as_str());
-            //             }
-
-            //             let send_data = self.msg_send.get_data_to_send();
-            //             match self.endpoint.send_stream_data(
-            //                 self.connections[verified_index].id,
-            //                 MAIN_STREAM_ID,
-            //                 send_data,
-            //                 false,
-            //             ) {
-            //                 Ok((i_sends, d_sends)) => {
-            //                     self.connections[verified_index].last_activity_tick =
-            //                         self.current_tick;
-            //                     let info_string = format!("Sends: {} {}\n", i_sends, d_sends);
-            //                     self.send_debug_text(info_string.as_str());
-            //                 }
-            //                 Err(e) => match e {
-            //                     EndpointError::StreamSendFilled => {
-            //                         self.send_debug_text("Stream Send Filled!\n")
-            //                     }
-            //                     _ => self.send_debug_text("Generic Stream Send Err!\n"),
-            //                 },
-            //             }
-            //         }
-
-            //         self.send_debug_text("Sent File Transfer!\n");
-            //     }
-            // }
-            // StreamMsgType::MusicTransferResponse => {
-            //     if let Some(music_data) = &client_handler.music_tranfer {
-            //         let mut music_data_start = 0;
-            //         loop {
-            //             client_handler
-            //                 .main_send
-            //                 .refresh_send(MessageType::MusicTransferData);
-            //             let write_data = client_handler.main_send.get_data_to_write();
-
-            //             write_data[0] = data_read[0];
-            //             write_data[1] = data_read[1];
-
-            //             let write_len = write_data.len() - 2;
-            //             let music_len = music_data.len() - music_data_start;
-
-            //             let min_len = cmp::min(write_len, music_len);
-            //             write_data[2..min_len].copy_from_slice(
-            //                 &music_data[music_data_start..music_data_start + min_len],
-            //             );
-            //             music_data_start += min_len;
-
-            //             client_handler.main_send.update_data_write(2 + min_len);
-
-            //             let send_data = client_handler.main_send.get_data_to_send();
-
-            //             client_endpoint.send_stream_data(MAIN_STREAM_ID, send_data, false);
-
-            //             if music_data_start >= music_data.len() {
-            //                 break;
-            //             }
-            //         }
-            //     }
-            // }
-            _ => {}
+            StreamMsgType::TransferResponse => {
+                if let Some(mut t_data) = self.transfer_data.take() {
+                    //self.send_debug_text("Got Here\n");
+                    t_data[1] = read_data[0];
+                    t_data[2] = read_data[1];
+                    let _ =
+                        endpoint.send_reliable_stream_data(conn_id, self.probable_index, t_data);
+                }
+            }
+            StreamMsgType::MusicIdReady => {
+                self.debug_text("Music ID is ready!\n");
+            }
+            StreamMsgType::NextMusicPacket => {
+                //self.debug_text("Music Packet Came In!\n");
+                let vec_data = Vec::from(read_data);
+                let _ = self
+                    .audio_channels
+                    .packet_send
+                    .send(NetworkAudioPackets::MusicPacket((1, vec_data)));
+            }
+            _ => {
+                return false;
+            }
         }
+        true
     }
 
     fn create_announce_data(&self) -> Vec<u8> {
@@ -1116,6 +1017,13 @@ impl ClientHandler {
         let conn_pos = read_data[0] as usize;
         let new_state = read_data[1];
 
+        if (new_state & 2) == 0 {
+            let _ = self
+                .audio_channels
+                .packet_send
+                .send(NetworkAudioPackets::MusicStop(1));
+        }
+
         let new_conn = NetworkStateMessage::StateChange((conn_pos, new_state));
         let _ = self.channels.network_state_send.send(new_conn);
     }
@@ -1171,7 +1079,12 @@ impl rtc::RtcQuicEvents for ClientHandler {
                     Ok(NetworkCommand::Client(client_cmd)) => {
                         self.handle_commands(endpoint, client_cmd);
                     }
-                    Ok(NetworkCommand::Stop(int)) => return true,
+                    Ok(NetworkCommand::Stop(int)) => {
+                        if let Some(conn_id) = self.connection_id {
+                            let _ = endpoint.close_connection(conn_id, self.probable_index, 8);
+                        }
+                        return true;
+                    }
                     Err(_) => return true, // Other recv errors
                     Ok(NetworkCommand::Server(_)) => {}
                 }
@@ -1196,18 +1109,31 @@ impl rtc::RtcQuicEvents for ClientHandler {
         if let Some(my_conn_id) = self.connection_id {
             if my_conn_id == conn_id {
                 self.probable_index = verified_index;
-                if let Some(msg_type) = self.msg_type_recv {
-                    self.handle_stream_msg(endpoint, msg_type, read_data);
-                    self.msg_type_recv = None;
-                    Some(MESSAGE_HEADER_SIZE)
+                if let Some(msg_type) = self.msg_type_recv.take() {
+                    if self.handle_stream_msg(endpoint, conn_id, msg_type, read_data) {
+                        Some(MESSAGE_HEADER_SIZE)
+                    } else {
+                        None // Close Connection
+                    }
                 } else {
-                    self.msg_type_recv = Some(StreamMsgType::from_u8(read_data[0]));
-                    Some(get_stream_msg_size(read_data))
+                    let new_msg_type = StreamMsgType::from_u8(read_data[0]);
+                    match new_msg_type.intended_for() {
+                        IntendedFor::Client => {
+                            self.msg_type_recv = Some(new_msg_type);
+                            Some(get_stream_msg_size(read_data))
+                        }
+                        IntendedFor::Anyone => {
+                            self.msg_type_recv = Some(new_msg_type);
+                            Some(get_stream_msg_size(read_data))
+                        }
+                        _ => {
+                            None // Close Connection
+                        }
+                    }
                 }
             } else {
                 // Weird state to be in considering logic below...
-                // Close connection here in future
-                None
+                None // Close Connection
             }
         } else if read_data.len() >= MESSAGE_HEADER_SIZE {
             // Check to see if it's a new valid server
@@ -1218,8 +1144,7 @@ impl rtc::RtcQuicEvents for ClientHandler {
                     Some(get_stream_msg_size(read_data))
                 }
                 _ => {
-                    // Close connection here in future
-                    None
+                    None // Close Connection
                 }
             }
         } else {
@@ -1242,22 +1167,31 @@ pub fn server_thread(
         None => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)),
     };
 
-    let server_endpoint =
-        match Endpoint::new_server(bind_address, ALPN_NAME, CERT_PATH, PKEY_PATH, 4_194_304) {
-            Ok(endpoint) => endpoint,
-            Err(err) => {
-                let _ = channels
-                    .network_debug_send
-                    .send("Server Endpoint Creation Error!\n".to_string());
-                // Can add more detailed print here later
-                return;
-            }
-        };
+    let server_endpoint = match Endpoint::new_server(
+        bind_address,
+        ALPN_NAME,
+        CERT_PATH,
+        PKEY_PATH,
+        BUFFER_SIZE_PER_CONNECTION,
+    ) {
+        Ok(endpoint) => endpoint,
+        Err(err) => {
+            let _ = channels
+                .network_debug_send
+                .send("Server Endpoint Creation Error!\n".to_string());
+            // Can add more detailed print here later
+            return;
+        }
+    };
 
     let mut server_state = ServerState::new(server_name, channels);
     server_state.send_debug_text("Starting Server Network!\n");
 
-    let mut rtc_handler = RtcQuicHandler::new(server_endpoint, &mut server_state);
+    let mut rtc_handler = RtcQuicHandler::new(
+        server_endpoint,
+        &mut server_state,
+        BUFFER_SIZE_PER_CONNECTION,
+    );
 
     match rtc_handler.run_event_loop(std::time::Duration::from_millis(5)) {
         Ok(_) => {}
@@ -1275,6 +1209,7 @@ pub fn client_thread(
     server_address: SocketAddr,
     user_name: String,
     channels: NetworkThreadChannels,
+    network_audio_out_channels: NetworkAudioOutputChannels,
 ) {
     let bind_address = match server_address.is_ipv6() {
         true => SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0)),
@@ -1287,7 +1222,7 @@ pub fn client_thread(
         CERT_PATH,
         server_address,
         SERVER_NAME,
-        4_194_304,
+        BUFFER_SIZE_PER_CONNECTION,
     ) {
         Ok(endpoint) => endpoint,
         Err(err) => {
@@ -1302,9 +1237,13 @@ pub fn client_thread(
     // Not ideal but works for now...
     let command_handler = channels.command_recv.clone();
 
-    let mut client_handler = ClientHandler::new(user_name, channels);
+    let mut client_handler = ClientHandler::new(user_name, channels, network_audio_out_channels);
     client_handler.send_debug_text("Starting Client Network!\n");
-    let mut rtc_handler = RtcQuicHandler::new(client_endpoint, &mut client_handler);
+    let mut rtc_handler = RtcQuicHandler::new(
+        client_endpoint,
+        &mut client_handler,
+        BUFFER_SIZE_PER_CONNECTION,
+    );
 
     loop {
         // If

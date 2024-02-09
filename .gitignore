@@ -5,6 +5,12 @@ debug/
 # Moved Executable
 bin/Swiftlet.exe
 
+# Created Package
+bin/Swiftlet.zip
+
+# Test Script
+bin/ConnectTest.bat
+
 # Ignored Wireshark security log file
 bin/security/key.log
 
