@@ -51,14 +51,14 @@ workspace = true
 
 
 # Example Dependencies
-#[dev-dependencies]
-#future-dependency
+[dev-dependencies]
+crossterm = "*"
 
-#[[example]]
-#name = "simple"
-#path = "examples/simple.rs"
-#crate-type = ["bin"]
-#doc = false
-#test = false
-#harness = false
-#bench = false
+[[example]]
+name = "simple"
+path = "examples/simple.rs"
+crate-type = ["bin"]
+doc = false
+test = false
+harness = false
+bench = false

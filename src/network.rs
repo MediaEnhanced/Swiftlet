@@ -21,9 +21,9 @@
 //SOFTWARE.
 
 // This file could be used as a template for using quic with a different aplication protocol negotiated with ALPN
-// The protocol used in this program is called "RealtimeMedia"
+// The protocol used in this program is called "swiftlet"
 
-const ALPN_NAME: &[u8] = b"RealtimeMedia"; // Application-Layer Protocol Negotiation Name used to define the Quic-Application Protocol used in this program
+const ALPN_NAME: &[u8] = b"swiftlet"; // Application-Layer Protocol Negotiation Name used to define the Quic-Application Protocol used in this program
 const SERVER_NAME: &str = "localhost"; // Server "Name" / Domain Name that should ideally be on the server certificate that the client connects to
 const CERT_PATH: &str = "security/cert.pem"; // Location of the certificate for the server to use (temporarily used by client to verify server)
 const PKEY_PATH: &str = "security/pkey.pem"; // Location of the private key for the server to use
