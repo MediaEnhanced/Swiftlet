@@ -1,0 +1,64 @@
+# Media Enhanced Swiftlet QUIC Cargo
+# Useful for Real-time Internet Communications
+
+[package]
+name = "swiftlet_quic"
+description = "real-time internet communications"
+version = "0.1.0"
+authors = ["MediaEnhanced"]
+repository = "https://github.com/MediaEnhanced/Swiftlet"
+
+# Future Readme:
+#readme = "README.md"
+
+edition = "2021"
+rust-version = "1.75"
+
+publish = false
+
+# Disable Automatic Discovery
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+
+[dependencies]
+mio = { version = "0.8.10", features = ["os-poll", "net"]}
+quiche = { version = "0.20.0" }
+ring = { version = "0.17.7" }
+
+
+[lib]
+# Unnecessary Name since it matches the package name
+#name = "swiftlet_quic"
+path = "src/lib.rs"
+# Rust Static Library:
+crate-type = ["rlib"]
+# No Documentation Yet
+doc = false
+# No Testing Yet
+test = false
+harness = false
+doctest = false
+bench = false
+# Not a proc-macro library
+proc-macro = false
+
+
+[lints]
+workspace = true
+
+
+# Example Dependencies
+#[dev-dependencies]
+#future-dependency
+
+#[[example]]
+#name = "simple"
+#path = "examples/simple.rs"
+#crate-type = ["bin"]
+#doc = false
+#test = false
+#harness = false
+#bench = false

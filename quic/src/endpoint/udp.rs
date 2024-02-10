@@ -20,7 +20,7 @@
 //OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //SOFTWARE.
 
-use crate::network::rtc::SocketAddr;
+use crate::SocketAddr;
 
 // UDP Management Intended for use with QUIC
 use std::collections::BinaryHeap;
@@ -224,7 +224,7 @@ impl UdpSocket {
     pub(super) fn sleep_till_recv_data(&mut self, timeout: std::time::Duration) -> bool {
         match self.poll.poll(&mut self.events, Some(timeout)) {
             Ok(_) => !self.events.is_empty(),
-            Err(e) => false,
+            Err(_) => false,
         }
     }
 

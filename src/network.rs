@@ -39,11 +39,7 @@ use crate::communication::{
     TryRecvError,
 };
 
-pub mod rtc;
-use rtc::endpoint::Endpoint;
-use rtc::SocketAddr;
-
-use self::rtc::{RtcQuicEvents, RtcQuicHandler};
+use swiftlet_quic::{endpoint::Endpoint, Events, Handler, SocketAddr};
 
 const MESSAGE_HEADER_SIZE: usize = 3;
 const MAX_MESSAGE_SIZE: usize = 65535;
@@ -621,7 +617,7 @@ impl ServerState {
     }
 }
 
-impl rtc::RtcQuicEvents for ServerState {
+impl Events for ServerState {
     fn connection_started(&mut self, endpoint: &mut Endpoint, conn_id: u64, verified_index: usize) {
         // Nothing to do until a server gets the first recv data from a potential client
     }
@@ -1029,7 +1025,7 @@ impl ClientHandler {
     }
 }
 
-impl rtc::RtcQuicEvents for ClientHandler {
+impl Events for ClientHandler {
     fn connection_started(&mut self, endpoint: &mut Endpoint, conn_id: u64, verified_index: usize) {
         let _ = self
             .channels
@@ -1153,7 +1149,7 @@ impl rtc::RtcQuicEvents for ClientHandler {
     }
 }
 
-pub fn server_thread(
+pub(crate) fn server_thread(
     use_ipv6: Option<bool>,
     port: u16,
     server_name: String,
@@ -1187,7 +1183,7 @@ pub fn server_thread(
     let mut server_state = ServerState::new(server_name, channels);
     server_state.send_debug_text("Starting Server Network!\n");
 
-    let mut rtc_handler = RtcQuicHandler::new(
+    let mut rtc_handler = Handler::new(
         server_endpoint,
         &mut server_state,
         BUFFER_SIZE_PER_CONNECTION,
@@ -1205,7 +1201,7 @@ pub fn server_thread(
     server_state.send_debug_text("Server Network Thread Exiting\n");
 }
 
-pub fn client_thread(
+pub(crate) fn client_thread(
     server_address: SocketAddr,
     user_name: String,
     channels: NetworkThreadChannels,
@@ -1239,7 +1235,7 @@ pub fn client_thread(
 
     let mut client_handler = ClientHandler::new(user_name, channels, network_audio_out_channels);
     client_handler.send_debug_text("Starting Client Network!\n");
-    let mut rtc_handler = RtcQuicHandler::new(
+    let mut rtc_handler = Handler::new(
         client_endpoint,
         &mut client_handler,
         BUFFER_SIZE_PER_CONNECTION,

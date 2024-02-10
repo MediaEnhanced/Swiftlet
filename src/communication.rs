@@ -21,23 +21,24 @@
 //SOFTWARE.
 
 use crossbeam::channel::bounded;
-pub use crossbeam::channel::{Receiver, Sender, TryRecvError};
+pub(crate) use crossbeam::channel::{Receiver, Sender, TryRecvError};
 
 use crate::audio;
 
-pub struct NetworkThreadChannels {
-    pub command_recv: Receiver<NetworkCommand>,
-    pub network_state_send: Sender<NetworkStateMessage>,
-    pub network_debug_send: Sender<String>, // String so that non-static debug messages can be made!
+pub(crate) struct NetworkThreadChannels {
+    pub(crate) command_recv: Receiver<NetworkCommand>,
+    pub(crate) network_state_send: Sender<NetworkStateMessage>,
+    pub(crate) network_debug_send: Sender<String>, // String so that non-static debug messages can be made!
 }
 
-pub struct ConsoleThreadChannels {
-    pub command_send: Sender<NetworkCommand>,
-    pub network_state_recv: Receiver<NetworkStateMessage>,
-    pub network_debug_recv: Receiver<String>,
+pub(crate) struct ConsoleThreadChannels {
+    pub(crate) command_send: Sender<NetworkCommand>,
+    pub(crate) network_state_recv: Receiver<NetworkStateMessage>,
+    pub(crate) network_debug_recv: Receiver<String>,
 }
 
-pub fn create_networking_console_channels() -> (NetworkThreadChannels, ConsoleThreadChannels) {
+pub(crate) fn create_networking_console_channels() -> (NetworkThreadChannels, ConsoleThreadChannels)
+{
     let (command_send, command_recv) = bounded(64);
     let (network_state_send, network_state_recv) = bounded(64);
     let (network_debug_send, network_debug_recv) = bounded(256);
@@ -56,52 +57,52 @@ pub fn create_networking_console_channels() -> (NetworkThreadChannels, ConsoleTh
     (network_channels, console_channels)
 }
 
-pub enum NetworkCommand {
+pub(crate) enum NetworkCommand {
     Stop(u64),
     Client(ClientCommand),
     Server(ServerCommand),
 }
 
-pub enum ClientCommand {
+pub(crate) enum ClientCommand {
     StateChange(u8),
-    ServerConnect(crate::network::rtc::SocketAddr),
+    ServerConnect(swiftlet_quic::SocketAddr),
     MusicTransfer(audio::OpusData),
 }
 
-pub enum ServerCommand {
+pub(crate) enum ServerCommand {
     ConnectionClose(usize),
 }
 
-pub enum NetworkStateMessage {
+pub(crate) enum NetworkStateMessage {
     ServerNameChange(String),
     ConnectionsRefresh((Option<usize>, Vec<NetworkStateConnection>)),
     NewConnection((String, u8)),
     StateChange((usize, u8)),
 }
 
-pub struct NetworkStateConnection {
-    pub name: String,
-    pub state: u8,
+pub(crate) struct NetworkStateConnection {
+    pub(crate) name: String,
+    pub(crate) state: u8,
 }
 
-pub struct AudioOutputThreadChannels {
-    pub command_recv: Receiver<ConsoleAudioCommands>,
-    pub packet_recv: Receiver<NetworkAudioPackets>,
-    pub state_send: Sender<AudioStateMessage>,
-    pub debug_send: Sender<&'static str>,
+pub(crate) struct AudioOutputThreadChannels {
+    pub(crate) command_recv: Receiver<ConsoleAudioCommands>,
+    pub(crate) packet_recv: Receiver<NetworkAudioPackets>,
+    pub(crate) state_send: Sender<AudioStateMessage>,
+    pub(crate) debug_send: Sender<&'static str>,
 }
 
-pub struct NetworkAudioOutputChannels {
-    pub packet_send: Sender<NetworkAudioPackets>,
+pub(crate) struct NetworkAudioOutputChannels {
+    pub(crate) packet_send: Sender<NetworkAudioPackets>,
 }
 
-pub struct ConsoleAudioOutputChannels {
-    pub command_send: Sender<ConsoleAudioCommands>,
-    pub state_recv: Receiver<AudioStateMessage>,
-    pub debug_recv: Receiver<&'static str>,
+pub(crate) struct ConsoleAudioOutputChannels {
+    pub(crate) command_send: Sender<ConsoleAudioCommands>,
+    pub(crate) state_recv: Receiver<AudioStateMessage>,
+    pub(crate) debug_recv: Receiver<&'static str>,
 }
 
-pub fn create_audio_output_channels() -> (
+pub(crate) fn create_audio_output_channels() -> (
     AudioOutputThreadChannels,
     NetworkAudioOutputChannels,
     ConsoleAudioOutputChannels,
@@ -134,15 +135,15 @@ pub fn create_audio_output_channels() -> (
     )
 }
 
-pub enum ConsoleAudioCommands {
+pub(crate) enum ConsoleAudioCommands {
     LoadOpus(audio::OpusData),
     PlayOpus(u64),
 }
 
-pub enum NetworkAudioPackets {
+pub(crate) enum NetworkAudioPackets {
     MusicPacket((u8, Vec<u8>)),
     MusicStop(u8),
     VoiceData(Vec<u8>),
 }
 
-pub enum AudioStateMessage {}
+pub(crate) enum AudioStateMessage {}

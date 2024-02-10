@@ -28,7 +28,7 @@ use crate::communication::{
     AudioOutputThreadChannels, AudioStateMessage, ConsoleAudioCommands, NetworkAudioPackets,
     Receiver, Sender, TryRecvError,
 };
-pub use cpal::Stream;
+pub(crate) use cpal::Stream;
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     BufferSize, SampleFormat, StreamConfig,
@@ -155,7 +155,7 @@ fn analyze_ogg_page_header(
     }
 }
 
-pub struct OpusData {
+pub(crate) struct OpusData {
     id: u64,
     stereo: bool, // 1 or 2 channels
     pre_skip: u16,
@@ -165,7 +165,7 @@ pub struct OpusData {
 }
 
 impl OpusData {
-    pub fn convert_ogg_opus_file(data: &[u8], id: u64) -> Option<Self> {
+    pub(crate) fn convert_ogg_opus_file(data: &[u8], id: u64) -> Option<Self> {
         let mut index = 0;
 
         let first_page_result = match &data[index..index + 26].try_into() {
@@ -340,7 +340,7 @@ impl OpusData {
         Some(opus_data)
     }
 
-    pub fn to_data(&self) -> (u8, usize, usize, Vec<u8>) {
+    pub(crate) fn to_data(&self) -> (u8, usize, usize, Vec<u8>) {
         let mut data = Vec::new();
 
         let stereo_byte = if self.stereo { 1 } else { 0 };
@@ -360,7 +360,7 @@ impl OpusData {
         )
     }
 
-    pub fn add_to_vec(&self, data: &mut Vec<u8>) {
+    pub(crate) fn add_to_vec(&self, data: &mut Vec<u8>) {
         if self.stereo {
             data.push(1);
         } else {
@@ -394,7 +394,7 @@ struct AudioOutputPlayback {
     opus_data_next_data: usize, // opus
 }
 
-pub fn start_audio_output(channels: AudioOutputThreadChannels) -> Option<Stream> {
+pub(crate) fn start_audio_output(channels: AudioOutputThreadChannels) -> Option<Stream> {
     let state_send = channels.state_send.clone();
     let debug_send = channels.debug_send.clone();
 

@@ -20,7 +20,7 @@
 //OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //SOFTWARE.
 
-use crate::network::rtc::SocketAddr;
+use crate::SocketAddr;
 use std::time::{Duration, Instant};
 
 use ring::rand::*;
@@ -41,7 +41,6 @@ use connection::{Config, Connection, RecvResult, TimeoutResult};
 pub struct Endpoint {
     udp: UdpSocket,
     max_payload_size: usize,
-    recv_data_capacity: usize,
     local_addr: SocketAddr,
     config: Config,
     next_connection_id: u64,
@@ -106,7 +105,7 @@ impl Endpoint {
                 65536,
             ) {
                 Ok(cfg) => cfg,
-                Err(err) => return Err(EndpointError::ConfigCreation),
+                Err(_) => return Err(EndpointError::ConfigCreation),
             };
 
             let rand = SystemRandom::new();
@@ -118,7 +117,6 @@ impl Endpoint {
             let endpoint_manager = Endpoint {
                 udp: socket_mgr,
                 max_payload_size,
-                recv_data_capacity: reliable_stream_buffer,
                 local_addr,
                 config,
                 next_connection_id: 1,
@@ -153,7 +151,7 @@ impl Endpoint {
                 65536,
             ) {
                 Ok(cfg) => cfg,
-                Err(err) => return Err(EndpointError::ConfigCreation),
+                Err(_) => return Err(EndpointError::ConfigCreation),
             };
 
             let rand = SystemRandom::new();
@@ -166,7 +164,6 @@ impl Endpoint {
             let endpoint_manager = Endpoint {
                 udp: socket_mgr,
                 max_payload_size,
-                recv_data_capacity: reliable_stream_buffer,
                 local_addr,
                 config,
                 next_connection_id: 1,
@@ -467,7 +464,7 @@ impl Endpoint {
                                         verified_index,
                                     )))
                                 }
-                                Ok(RecvResult::StreamReadable((conn_id, stream_id))) => {
+                                Ok(RecvResult::StreamReadable(_)) => {
                                     self.send(verified_index)?;
 
                                     // let stream_readable = StreamReadable {
@@ -565,7 +562,7 @@ impl Endpoint {
             self.find_connection_from_id_with_probable_index(conn_id, probable_index)
         {
             match self.connections[verified_index].stream_reliable_send(send_data) {
-                Ok(s) => self.send(verified_index),
+                Ok(_) => self.send(verified_index),
                 Err(_) => Err(EndpointError::StreamSend),
             }
         } else {

@@ -1,24 +1,31 @@
 # Media Enhanced Swiftlet Cargo
-# Used for Realtime Media Internet Communications using QUIC
+# Real-time Communication of Media over the Internet using QUIC
 
 [package]
 name = "swiftlet"
+description = "real-time communication of media over the internet using quic"
 version = "0.1.0"
 authors = ["MediaEnhanced"]
-edition = "2021"
-# Rust Version is set to be updated manually
+repository = "https://github.com/MediaEnhanced/Swiftlet"
+
+# Future Readme:
+#readme = "README.md"
+
 rust-version = "1.75"
-description = "Rust program that echos audio over a QUIC connection"
+edition = "2021"
+publish = false
+default-run = "swiftlet"
+
 # The build script informs the cargo builder of the dynamic library "./bin" location
 # neccessary for linking to dependencies in the future
 #build = "src/build.rs"
-publish = false
-default-run = "swiftlet"
+
 # Disable Automatic Discovery
 autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
+
 
 [dependencies]
 # Argument parsing
@@ -28,9 +35,7 @@ clap = { version = "4.4.18", features = ["derive"] }
 crossbeam = "*"
 
 # Network (Thread) Requirements:
-mio = { version = "*", features = ["os-poll", "net"]}
-quiche = { version = "*" }
-ring = { version = "*" }
+swiftlet_quic = { version = "*", path = "quic" }
 # Maybe use a serialization library in the future
 #bincode = { version = "2.0.0-rc.3" }
 
@@ -43,9 +48,31 @@ crossterm = "*"
 ratatui = "*"
 
 
+[workspace]
+resolver = "2"
+members = [
+  ".",
+  "quic",
+]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+single_use_lifetimes = "warn"
+#missing_debug_implementations = "warn"
+#rust_2018_idioms = "warn"
+
+[lints]
+workspace = true
+
+
 [[bin]]
 name = "swiftlet"
 path = "./src/main.rs"
+doc = false
+test = false
+harness = false
+bench = false
 
 [profile.release]
 opt-level = 3

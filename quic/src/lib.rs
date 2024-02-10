@@ -22,19 +22,19 @@
 
 // IPv6 Addresses and Sockets used when sending the client an initial connection addresss
 
-pub(crate) use std::net::SocketAddr;
+pub use std::net::SocketAddr;
 
 use std::time::{Duration, Instant};
 
 pub mod endpoint;
 use endpoint::{Endpoint, EndpointError, EndpointEvent};
 
-pub enum RtcQuicError {
+pub enum Error {
     Unexpected,
     EndpointError,
 }
 
-pub trait RtcQuicEvents {
+pub trait Events {
     fn connection_started(&mut self, endpoint: &mut Endpoint, conn_id: u64, verified_index: usize);
     fn connection_closing(&mut self, endpoint: &mut Endpoint, conn_id: u64);
     fn connection_closed(
@@ -56,20 +56,20 @@ pub trait RtcQuicEvents {
     //fn stream_started(&mut self, conn_id: u64, verified_index: usize);
 }
 
-pub struct RtcQuicHandler<'a> {
+pub struct Handler<'a> {
     current_tick: u64,
     endpoint: Endpoint,
-    events: &'a mut dyn RtcQuicEvents,
+    events: &'a mut dyn Events,
     initial_recv_buffer_size: usize,
 }
 
-impl<'a> RtcQuicHandler<'a> {
+impl<'a> Handler<'a> {
     pub fn new(
         endpoint: Endpoint,
-        events: &'a mut dyn RtcQuicEvents,
+        events: &'a mut dyn Events,
         initial_recv_buffer_size: usize,
     ) -> Self {
-        RtcQuicHandler {
+        Handler {
             current_tick: 0,
             endpoint,
             events,
@@ -81,7 +81,7 @@ impl<'a> RtcQuicHandler<'a> {
     pub fn run_event_loop(
         &mut self,
         tick_duration: Duration,
-    ) -> Result<Option<&mut Endpoint>, RtcQuicError> {
+    ) -> Result<Option<&mut Endpoint>, Error> {
         let start_instant = Instant::now();
         let mut next_tick_instant = start_instant;
 
@@ -123,13 +123,13 @@ impl<'a> RtcQuicHandler<'a> {
                 }
                 _ => {
                     self.events.debug_text("Unexpected Event Ok 1\n");
-                    return Err(RtcQuicError::Unexpected);
+                    return Err(Error::Unexpected);
                 }
             }
         }
     }
 
-    fn run_recv_loop(&mut self) -> Result<bool, RtcQuicError> {
+    fn run_recv_loop(&mut self) -> Result<bool, Error> {
         loop {
             match self.endpoint.recv() {
                 Ok(EndpointEvent::DoneReceiving) => {
@@ -173,7 +173,7 @@ impl<'a> RtcQuicHandler<'a> {
                                 break;
                             }
                         }
-                        Err(e) => {
+                        Err(_) => {
                             self.events.debug_text("Stream Read Error!\n");
                             break;
                         }
@@ -208,11 +208,11 @@ impl<'a> RtcQuicHandler<'a> {
                         EndpointError::StreamRecv => self.events.debug_text("Stream Recv Error!\n"),
                         _ => self.events.debug_text("General Endpoint Recv Error!\n"),
                     }
-                    return Err(RtcQuicError::EndpointError);
+                    return Err(Error::EndpointError);
                 }
                 Ok(_) => {
                     self.events.debug_text("Unexpected Event Ok 2\n");
-                    return Err(RtcQuicError::Unexpected);
+                    return Err(Error::Unexpected);
                 }
             }
         }

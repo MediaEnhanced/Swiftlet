@@ -20,7 +20,7 @@
 //OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //SOFTWARE.
 
-use crate::network::rtc::SocketAddr;
+use crate::SocketAddr;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -32,16 +32,16 @@ const MAIN_STREAM_ID: u64 = 0; // Bidirectional stream ID# used for reliable com
                                // This stream is started by the Client when it announces itself to the server when it connects to it
 
 const MAIN_STREAM_PRIORITY: u8 = 100;
-const SERVER_REALTIME_START_ID: u64 = 3;
-const CLIENT_REALTIME_START_ID: u64 = 2;
+//const SERVER_REALTIME_START_ID: u64 = 3;
+//const CLIENT_REALTIME_START_ID: u64 = 2;
 
-pub struct SendBuffer {
+struct SendBuffer {
     data: Vec<u8>,
     sent: usize,
 }
 
 impl SendBuffer {
-    pub fn new(data: Vec<u8>) -> Self {
+    fn new(data: Vec<u8>) -> Self {
         SendBuffer { data, sent: 0 }
     }
 }
@@ -336,7 +336,7 @@ impl Connection {
         from_addr: SocketAddr,
     ) -> Result<RecvResult, Error> {
         self.recv_info.from = from_addr;
-        let bytes_processed = self.connection.recv(data, self.recv_info)?;
+        let _ = self.connection.recv(data, self.recv_info)?;
         // Maybe check bytes_processed in future
         if self.established_once {
             if self.connection.is_closed() {
@@ -410,11 +410,8 @@ impl Connection {
     }
 
     pub(super) fn stream_reliable_send(&mut self, data_vec: Vec<u8>) -> Result<usize, Error> {
-        let send_buffer = SendBuffer {
-            data: data_vec,
-            sent: 0,
-        };
-        self.reliable_send_queue.push_back(send_buffer);
+        self.reliable_send_queue
+            .push_back(SendBuffer::new(data_vec));
         self.stream_reliable_send_next()
     }
 
@@ -463,24 +460,5 @@ impl Connection {
         } else {
             Err(Error::InvalidState) // Temporarily used to indicate No recv_data buffer
         }
-    }
-
-    #[inline]
-    pub(super) fn stream_send(
-        &mut self,
-        stream_id: u64,
-        data: &[u8],
-        fin: bool,
-    ) -> Result<usize, Error> {
-        self.connection.stream_send(stream_id, data, fin)
-    }
-
-    #[inline]
-    pub(super) fn stream_recv(
-        &mut self,
-        stream_id: u64,
-        data: &mut [u8],
-    ) -> Result<(usize, bool), Error> {
-        self.connection.stream_recv(stream_id, data)
     }
 }

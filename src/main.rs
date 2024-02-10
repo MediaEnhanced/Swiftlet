@@ -46,7 +46,7 @@ use communication::{
 
 mod network;
 use cpal::traits::StreamTrait;
-use network::rtc::SocketAddr;
+use swiftlet_quic::SocketAddr;
 
 mod audio;
 
@@ -321,48 +321,58 @@ fn run_console_client(
             if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
                 // Bool?
                 if key.kind == crossterm::event::KeyEventKind::Press {
-                    if key.code == crossterm::event::KeyCode::Char('q') {
-                        break;
-                    } else if key.code == crossterm::event::KeyCode::Up
-                        && state_common.debug_scroll > 0
-                    {
-                        state_common.debug_scroll -= 1;
-                        should_draw = true;
-                    } else if key.code == crossterm::event::KeyCode::Down
-                        && state_common.debug_scroll < (state_common.debug_lines - 1)
-                    {
-                        state_common.debug_scroll += 1;
-                        should_draw = true;
-                    } else if key.code == crossterm::event::KeyCode::Char('m') {
-                        if audio_out_stream.is_some() {
-                            let _ = audio_out_channels
-                                .command_send
-                                .send(ConsoleAudioCommands::PlayOpus(3));
-                        }
-                    } else if key.code == crossterm::event::KeyCode::Char('v') {
-                        if let Some(ind) = my_conn_index {
-                            let state_change = state_common.connections[ind].state ^ 4;
-                            let _ = channels.command_send.send(NetworkCommand::Client(
-                                ClientCommand::StateChange(state_change),
-                            ));
-                        }
-                    } else if key.code == crossterm::event::KeyCode::Char('t')
-                        && !already_transfered
-                    {
-                        if let Ok(bytes) = std::fs::read(std::path::Path::new(TRANSFER_AUDIO)) {
-                            if let Some(opus_data) = OpusData::convert_ogg_opus_file(&bytes, 45) {
-                                let _ = channels.command_send.send(NetworkCommand::Client(
-                                    ClientCommand::MusicTransfer(opus_data),
-                                ));
-                                already_transfered = true;
+                    match key.code {
+                        crossterm::event::KeyCode::Up => {
+                            if state_common.debug_scroll > 0 {
+                                state_common.debug_scroll -= 1;
+                                should_draw = true;
                             }
                         }
-                    } else if key.code == crossterm::event::KeyCode::Char('s') {
-                        if let Some(ind) = my_conn_index {
-                            let state_change = state_common.connections[ind].state ^ 2;
-                            let _ = channels.command_send.send(NetworkCommand::Client(
-                                ClientCommand::StateChange(state_change),
-                            ));
+                        crossterm::event::KeyCode::Down => {
+                            if state_common.debug_scroll < (state_common.debug_lines - 1) {
+                                state_common.debug_scroll += 1;
+                                should_draw = true;
+                            }
+                        }
+                        crossterm::event::KeyCode::Char(c) => {
+                            let uc = c.to_ascii_uppercase();
+                            if uc == 'Q' {
+                                break;
+                            } else if uc == 'M' && audio_out_stream.is_some() {
+                                let _ = audio_out_channels
+                                    .command_send
+                                    .send(ConsoleAudioCommands::PlayOpus(3));
+                            } else if uc == 'V' {
+                                if let Some(ind) = my_conn_index {
+                                    let state_change = state_common.connections[ind].state ^ 4;
+                                    let _ = channels.command_send.send(NetworkCommand::Client(
+                                        ClientCommand::StateChange(state_change),
+                                    ));
+                                }
+                            } else if uc == 'T' && !already_transfered {
+                                if let Ok(bytes) =
+                                    std::fs::read(std::path::Path::new(TRANSFER_AUDIO))
+                                {
+                                    if let Some(opus_data) =
+                                        OpusData::convert_ogg_opus_file(&bytes, 45)
+                                    {
+                                        let _ = channels.command_send.send(NetworkCommand::Client(
+                                            ClientCommand::MusicTransfer(opus_data),
+                                        ));
+                                        already_transfered = true;
+                                    }
+                                }
+                            } else if uc == 'S' {
+                                if let Some(ind) = my_conn_index {
+                                    let state_change = state_common.connections[ind].state ^ 2;
+                                    let _ = channels.command_send.send(NetworkCommand::Client(
+                                        ClientCommand::StateChange(state_change),
+                                    ));
+                                }
+                            }
+                        }
+                        _ => {
+                            // Handle more cases in future
                         }
                     }
                 }
