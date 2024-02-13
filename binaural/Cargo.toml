@@ -1,9 +1,9 @@
-# Media Enhanced Swiftlet QUIC Cargo
-# Useful for Real-time Internet Communications
+# Media Enhanced Swiftlet Binaural Cargo
+# Converts Audio for Binaural Playback using HRTF Data
 
 [package]
-name = "swiftlet_quic"
-description = "real-time internet communications"
+name = "swiftlet_binaural"
+description = "binaural audio conversion"
 version = "0.1.0"
 authors = ["MediaEnhanced"]
 repository = "https://github.com/MediaEnhanced/Swiftlet"
@@ -25,14 +25,13 @@ autobenches = false
 
 
 [dependencies]
-mio = { version = "0.8.10", features = ["os-poll", "net"]}
-quiche = { version = "0.20.0" }
-ring = { version = "0.17.7" }
+nalgebra = { version = "0.32.3" }
+rustfft = { version = "6.2.0" }
 
 
 [lib]
 # Unnecessary Name since it matches the package name
-#name = "swiftlet_quic"
+#name = "swiftlet_binaural"
 path = "src/lib.rs"
 # Rust Static Library:
 crate-type = ["rlib"]
@@ -53,11 +52,12 @@ workspace = true
 
 # Example Dependencies
 [dev-dependencies]
-crossterm = "*"
+cpal = "*"
+swiftlet_audio = { version = "*", path = "../audio" }
 
 [[example]]
-name = "simple"
-path = "examples/simple.rs"
+name = "demo"
+path = "examples/demo.rs"
 crate-type = ["bin"]
 doc = false
 test = false

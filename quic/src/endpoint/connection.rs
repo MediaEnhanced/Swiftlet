@@ -1,4 +1,4 @@
-//Media Enhanced Swiftlet Rust Realtime Media Internet Communications
+//Media Enhanced Swiftlet Quic Rust Library for Real-time Internet Communications
 //MIT License
 //Copyright (c) 2024 Jared Loewenthal
 //

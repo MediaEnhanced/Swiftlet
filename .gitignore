@@ -14,6 +14,9 @@ bin/ConnectTest.bat
 # Ignored Wireshark security log file
 bin/security/key.log
 
+# Ignored binaural resources:
+binaural/resources/
+
 # Executable Target
 Cargo.lock
 

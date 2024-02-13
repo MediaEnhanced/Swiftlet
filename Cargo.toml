@@ -7,6 +7,7 @@ description = "real-time communication of media over the internet using quic"
 version = "0.1.0"
 authors = ["MediaEnhanced"]
 repository = "https://github.com/MediaEnhanced/Swiftlet"
+license = "MIT"
 
 # Future Readme:
 #readme = "README.md"
@@ -42,6 +43,7 @@ swiftlet_quic = { version = "*", path = "quic" }
 # Audio Requirements:
 cpal = "*"
 opus = "*"
+#swiftlet_binaural = { version = "*", path = "binaural" }
 
 # Console Requirements:
 crossterm = "*"
@@ -53,6 +55,8 @@ resolver = "2"
 members = [
   ".",
   "quic",
+  "binaural",
+  "audio",
 ]
 
 [workspace.lints.rust]

@@ -1,9 +1,9 @@
-# Media Enhanced Swiftlet QUIC Cargo
-# Useful for Real-time Internet Communications
+# Media Enhanced Swiftlet Audio Cargo
+# Low Latency Audio OS I/O for Modern Platforms
 
 [package]
-name = "swiftlet_quic"
-description = "real-time internet communications"
+name = "swiftlet_audio"
+description = "low latency audio os i/o"
 version = "0.1.0"
 authors = ["MediaEnhanced"]
 repository = "https://github.com/MediaEnhanced/Swiftlet"
@@ -24,15 +24,23 @@ autotests = false
 autobenches = false
 
 
-[dependencies]
-mio = { version = "0.8.10", features = ["os-poll", "net"]}
-quiche = { version = "0.20.0" }
-ring = { version = "0.17.7" }
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.52.0", features = [
+	"Win32_System_Com",
+	"Win32_Media_Audio",
+	"Win32_Foundation",
+	"Win32_System_Com_StructuredStorage",
+	"Win32_System_Variant",
+	"Win32_Media_KernelStreaming",
+	"Win32_Media_Multimedia",
+	"Win32_System_Threading",
+	"Win32_Security",
+]}
 
 
 [lib]
 # Unnecessary Name since it matches the package name
-#name = "swiftlet_quic"
+#name = "swiftlet_audio"
 path = "src/lib.rs"
 # Rust Static Library:
 crate-type = ["rlib"]
@@ -46,20 +54,3 @@ bench = false
 # Not a proc-macro library
 proc-macro = false
 
-
-[lints]
-workspace = true
-
-
-# Example Dependencies
-[dev-dependencies]
-crossterm = "*"
-
-[[example]]
-name = "simple"
-path = "examples/simple.rs"
-crate-type = ["bin"]
-doc = false
-test = false
-harness = false
-bench = false

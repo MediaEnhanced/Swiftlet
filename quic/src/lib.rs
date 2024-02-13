@@ -1,4 +1,4 @@
-//Media Enhanced Swiftlet Rust Realtime Media Internet Communications
+//Media Enhanced Swiftlet Quic Rust Library for Real-time Internet Communications
 //MIT License
 //Copyright (c) 2024 Jared Loewenthal
 //
@@ -20,8 +20,7 @@
 //OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //SOFTWARE.
 
-// IPv6 Addresses and Sockets used when sending the client an initial connection addresss
-
+// SocketAddr structure expected for programs to use when interfacing with this library
 pub use std::net::SocketAddr;
 
 use std::time::{Duration, Instant};
