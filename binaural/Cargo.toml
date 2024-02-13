@@ -52,7 +52,6 @@ workspace = true
 
 # Example Dependencies
 [dev-dependencies]
-cpal = "*"
 swiftlet_audio = { version = "*", path = "../audio" }
 
 [[example]]

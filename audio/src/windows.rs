@@ -69,9 +69,10 @@ impl AudioDevice {
         }
     }
 
-    pub(super) fn create_or_edit_output(&mut self) -> Option<u32> {
+    // Returns number of channels on success
+    pub(super) fn create_or_edit_output(&mut self, desired_period: u32) -> Option<u32> {
         let _ = self.output.take();
-        self.output = AudioOutput::new(&self.enumerator);
+        self.output = AudioOutput::new(&self.enumerator, desired_period);
         self.output.as_ref().map(|out| out.channels)
     }
 
@@ -141,11 +142,13 @@ struct AudioOutput {
     channel_mask: u32,
     writer: Audio::IAudioRenderClient,
     event: Foundation::HANDLE,
+    buffer_size: u32,
+    frame_period: u32,
     volume_control: Audio::ISimpleAudioVolume,
 }
 
 impl AudioOutput {
-    fn new(enumerator: &Audio::IMMDeviceEnumerator) -> Option<Self> {
+    fn new(enumerator: &Audio::IMMDeviceEnumerator, desired_period: u32) -> Option<Self> {
         unsafe {
             let device = match enumerator.GetDefaultAudioEndpoint(Audio::eRender, Audio::eConsole) {
                 Ok(d) => d,
@@ -213,7 +216,7 @@ impl AudioOutput {
                         Some(closest_match_p_convert),
                     ) {
                         Foundation::S_OK => {
-                            println!("Format Found!");
+                            //println!("Format Found!");
                         }
                         Foundation::S_FALSE => {
                             println!("Got Closest Matching!");
@@ -235,7 +238,7 @@ impl AudioOutput {
                         &mut current_period as *mut u32,
                     ) {
                         Ok(_) => {
-                            if current_period != 480 {
+                            if current_period != desired_period {
                                 let mut default_period_in_frames: u32 = 0;
                                 let mut fundamental_period_in_frames: u32 = 0;
                                 let mut min_period_in_frames: u32 = 0;
@@ -249,8 +252,8 @@ impl AudioOutput {
                                     &mut max_period_in_frames as *mut u32,
                                 ) {
                                     Ok(_) => {
-                                        if (min_period_in_frames > 480)
-                                            || (max_period_in_frames < 480)
+                                        if (min_period_in_frames > desired_period)
+                                            || (max_period_in_frames < desired_period)
                                         {
                                             return None;
                                         }
@@ -265,7 +268,7 @@ impl AudioOutput {
                     if manager
                         .InitializeSharedAudioStream(
                             AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                            480,
+                            desired_period,
                             format_test,
                             None,
                         )
@@ -304,6 +307,16 @@ impl AudioOutput {
                 return None;
             }
 
+            let buffer_size = match manager.GetBufferSize() {
+                Ok(bs) => {
+                    if bs < desired_period {
+                        return None;
+                    }
+                    bs
+                }
+                Err(_) => return None,
+            };
+
             let volume_control = match manager.GetService() {
                 Ok(vc) => vc,
                 Err(_) => return None,
@@ -316,6 +329,8 @@ impl AudioOutput {
                 channel_mask,
                 writer,
                 event,
+                buffer_size,
+                frame_period: desired_period,
                 volume_control,
             };
 
@@ -331,7 +346,7 @@ impl AudioOutput {
                 Err(_) => return false,
             };
 
-            println!("Initial frames: {}", num_frames);
+            //println!("Initial frames: {}", num_frames);
 
             match self.writer.GetBuffer(num_frames) {
                 Ok(_) => {
@@ -383,7 +398,6 @@ impl AudioOutput {
                 Ok(b) => {
                     let num_floats = num_frames * self.channels;
                     let buffer = std::slice::from_raw_parts_mut(b as *mut f32, num_floats as usize);
-                    println!("Data Seems Valid");
                     Some((buffer, num_frames))
                 }
                 Err(_) => None,
@@ -396,65 +410,48 @@ impl AudioOutput {
         unsafe { self.writer.ReleaseBuffer(num_frames, 0).is_ok() }
     }
 
-    fn event_loop(&self, callback: &mut dyn FnMut(&mut [f32]) -> bool) {
+    fn event_loop(&self, callback: &mut dyn FnMut(&mut [f32]) -> bool) -> bool {
         unsafe {
             if !self.start() {
-                println!("Is False...?");
-                return;
+                return false;
             }
 
-            println!("Starting Event Loop!");
             loop {
                 match Threading::WaitForSingleObject(self.event, 15) {
                     Foundation::WAIT_OBJECT_0 => {
-                        //println!("Wait Finished!");
+                        //println!("Event Triggered!");
                     }
                     Foundation::WAIT_TIMEOUT => {
-                        break;
+                        println!("Wait Timeout!");
+                        return false;
                     }
                     Foundation::WAIT_FAILED => {
                         // Additional info with GetLastError
-                        return;
+                        return false;
                     }
-                    Foundation::WAIT_ABANDONED => {
-                        return;
-                    }
-                    _ => return,
+                    _ => return false, // Includes WAIT_ABANDONED
                 }
 
-                // GetNextPacketSize is for input
-                let num_frames = match self.manager.GetCurrentPadding() {
-                    Ok(f) => {
-                        if f == 0 {
-                            480
-                        } else {
-                            break;
-                        }
-                    }
-                    Err(_) => return,
-                };
-
-                //println!("Num frames: {}", num_frames);
-
-                match self.writer.GetBuffer(num_frames) {
+                // Can use get padding to determine if frame period will fit into it in the future
+                match self.writer.GetBuffer(self.frame_period) {
                     Ok(b) => {
-                        let num_floats = num_frames * self.channels;
+                        let num_floats = self.frame_period * self.channels;
                         let float_p = b as *mut f32;
                         let buffer = std::slice::from_raw_parts_mut(float_p, num_floats as usize);
 
                         let callback_quit = callback(buffer);
-                        if self.writer.ReleaseBuffer(num_frames, 0).is_err() {
-                            return;
+                        if self.writer.ReleaseBuffer(self.frame_period, 0).is_err() {
+                            return false;
                         }
                         if callback_quit {
                             break;
                         }
                     }
-                    Err(_) => return,
+                    Err(_) => return false,
                 }
             }
-            println!("Ending Event Loop!");
             self.stop();
+            true
         }
     }
 }

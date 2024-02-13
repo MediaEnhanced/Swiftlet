@@ -22,6 +22,8 @@
 
 #![allow(dead_code)] // Temporary
 
+pub mod raw;
+
 #[cfg_attr(target_os = "windows", path = "windows.rs")]
 mod os;
 use os::AudioDevice;
@@ -43,15 +45,11 @@ impl AudioIO {
         Ok(AudioIO { device })
     }
 
-    pub fn create_output(&mut self) -> Option<u32> {
-        self.device.create_or_edit_output()
+    pub fn create_output(&mut self, desired_period: u32) -> Option<u32> {
+        self.device.create_or_edit_output(desired_period)
     }
 
     pub fn run_output_event_loop(&self, callback: &mut dyn FnMut(&mut [f32]) -> bool) -> bool {
         self.device.event_loop_output(callback)
     }
-
-    // pub fn wait_for_next_output(&mut self) -> bool {
-    //     self.device.create_or_edit_output()
-    // }
 }
