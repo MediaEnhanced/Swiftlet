@@ -1,10 +1,9 @@
 cls
 @echo off
 
-cargo.exe build -r
+cargo.exe doc --no-deps
 IF %ERRORLEVEL% NEQ 0 EXIT /b %ERRORLEVEL%
-copy ..\target\release\swiftlet.exe .\Swiftlet.exe
-powershell Compress-Archive -Force -Path .\Swiftlet.exe, .\audio, .\security -DestinationPath .\Swiftlet.zip
+Robocopy.exe ..\target\doc\ ..\docs
 
 echo.
 exit 0
