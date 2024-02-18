@@ -20,31 +20,64 @@
 //OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //SOFTWARE.
 
+#![deny(missing_docs)]
+
+//! Swiftlet Quic Library
+//!
+//! Provides real-time internet communications using the quic protocol
+//!
+//!
+//!
+
 // SocketAddr structure expected for programs to use when interfacing with this library
 pub use std::net::SocketAddr;
 
 use std::time::{Duration, Instant};
 
+/// Quic Endpoint Module
 pub mod endpoint;
 use endpoint::{ConnectionId, Endpoint, EndpointError, EndpointEvent};
 
+/// Errors that the Quic Handler could return
 pub enum Error {
+    /// Not sure what the error is
     Unexpected,
+    /// The endpoint had an error
     EndpointError,
 }
 
+/// Required Quic Handler Event Callback Functions
+/// These functions will get called for their respective events
 pub trait Events {
+    /// Called when a new connection is started and is application ready
     fn connection_started(&mut self, endpoint: &mut Endpoint, cid: &ConnectionId);
+
+    /// Called when a connection has ended and should be cleaned up
+    /// Return true if you want the Handler event loop to exit
+    /// It will return the reference to the endpoint in that case
     fn connection_ended(
         &mut self,
         endpoint: &mut Endpoint,
         cid: &ConnectionId,
         remaining_connections: usize,
     ) -> bool;
+
+    /// Called when a connection is in the process of ending and allows an application to clean up relevant states earlier before it fully closes
     fn connection_ending_warning(&mut self, endpoint: &mut Endpoint, cid: &ConnectionId);
+
+    /// Called when the next tick occurrs based on the tick duration given to the run_event_loop call
     fn tick(&mut self, endpoint: &mut Endpoint) -> bool;
+
+    /// Temporary debug testing callback
+    /// Can be implemented blankly by the application
+    /// Might be removed from this trait in the future
     fn debug_text(&mut self, text: &'static str);
 
+    /// Called when there is something to read on the main stream
+    /// The read_data length will be the number of bytes asked for on the previous call
+    /// The first time it is called the length will be the number of bytes set by the Endpoint Config
+    /// Return the number of bytes you want to read the next time this callback is called
+    /// Returning a None will close the connection
     fn main_stream_recv(
         &mut self,
         endpoint: &mut Endpoint,
@@ -52,6 +85,11 @@ pub trait Events {
         read_data: &[u8],
     ) -> Option<usize>;
 
+    /// Called when there is something to read on the background stream
+    /// The read_data length will be the number of bytes asked for on the previous call
+    /// The first time it is called the length will be the number of bytes set by the Endpoint Config
+    /// Return the number of bytes you want to read the next time this callback is called
+    /// Returning a None will close the connection
     fn background_stream_recv(
         &mut self,
         endpoint: &mut Endpoint,
@@ -60,6 +98,7 @@ pub trait Events {
     ) -> Option<usize>;
 }
 
+/// Quic Handler Structure
 pub struct Handler<'a> {
     current_tick: u64,
     endpoint: Endpoint,
@@ -67,6 +106,7 @@ pub struct Handler<'a> {
 }
 
 impl<'a> Handler<'a> {
+    /// Create a Quic Handler by giving it an Endpoint and a mutable reference of a structure that implements the Quic Events Trait
     pub fn new(endpoint: Endpoint, events: &'a mut dyn Events) -> Self {
         Handler {
             current_tick: 0,
@@ -75,7 +115,11 @@ impl<'a> Handler<'a> {
         }
     }
 
-    // Returns true if the thread should maybe call this event loop again (ie. new Server to connect to via commands)
+    /// Quic Handler Event Loop
+    /// Allows the handler to take control of the thread
+    /// Communicates with the application code to the previously passed events
+    /// Returns the endpoint reference if this event loop function should be maybe called again
+    ///  (ie. run a client endpoint in "low power" mode when it has no connections)
     pub fn run_event_loop(
         &mut self,
         tick_duration: Duration,

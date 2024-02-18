@@ -31,17 +31,42 @@ use udp::{SocketError, UdpSocket};
 mod connection;
 use connection::{Connection, RecvResult, TimeoutResult};
 
+/// The Endpoint Configuration Structure
 pub struct Config {
+    /// The quic connection idle timeout in milliseconds
     pub idle_timeout_in_ms: u64,
+
+    /// The quic connection bidirectional stream receive buffer length in bytes
+    /// These streams are intended for communicating reliable information
+    /// Most applications should probably set this to a multiple of 65536
     pub reliable_stream_buffer: u64,
+
+    /// The quic connection unidirectional stream receive buffer length in bytes
+    /// These streams are intended for real-time unreliable information
+    /// Most applications should probably set this to a multiple of 65536
     pub unreliable_stream_buffer: u64,
+
+    /// The keep alive timeout duration
+    /// If there is a value and the duration has passed since the quic connection had recieved anything
+    /// the quic connection will send out a PING to try and keep the connection alive
     pub keep_alive_timeout: Option<Duration>,
+
+    /// The initial main stream recieve buffer size
+    /// This could be set to the max size of the expected data to process if there is enough RAM
     pub initial_main_recv_size: usize,
+
+    /// The number of bytes to receive on the main stream before calling main_stream_recv for the first time
     pub main_recv_first_bytes: usize,
+
+    /// The initial background stream recieve buffer size
+    /// This could be set to the max size of the expected data to process if there is enough RAM
     pub initial_background_recv_size: usize,
+
+    /// The number of bytes to receive on the background stream before calling main_stream_recv for the first time
     pub background_recv_first_bytes: usize,
 }
 
+/// The Quic Endpoint structure
 pub struct Endpoint {
     udp: UdpSocket,
     max_payload_size: usize,
@@ -55,6 +80,8 @@ pub struct Endpoint {
     conn_id_seed_key: ring::hmac::Key, // Value matters ONLY if is_server is true
 }
 
+/// A Connection ID structure to communicate with the endpoint about a specific connection
+/// Should be updated so that endpoint function calls are more efficient
 pub struct ConnectionId {
     id: u64,
     probable_index: usize,
@@ -76,29 +103,48 @@ impl Clone for ConnectionId {
 }
 
 impl ConnectionId {
-    // Check if this gets inlined
+    // Check if this function gets inlined in the future
+
+    /// A way to update the connection id
     pub fn update(&mut self, other: &Self) {
         self.probable_index = other.probable_index;
     }
 }
 
+/// Endpoint Errors
 pub enum EndpointError {
+    /// Error with the UDP socket creation
     SocketCreation,
+    /// Error with the Quic Config Creation
     ConfigCreation,
+    /// Error with creating or using the randomness structure / functions
     Randomness,
+    /// Error trying to perform a client Endpoint operation on a server Endpoint
     IsServer,
+    /// Error creating a connection
     ConnectionCreation,
+    /// Error closing a connection
     ConnectionClose,
+    /// Error getting send data from a connection
     ConnectionSend,
+    /// Error sending data on the UDP socket
     SocketSend,
+    /// Error receiving data on the UDP socket
     SocketRecv,
-    RecvTooMuchData,
+
+    // Error receiving too much data
+    //RecvTooMuchData,
+    /// Error having a connection process the received data
     ConnectionRecv,
+    /// Cannot find connection from Connection ID
     ConnectionNotFound,
+    /// Error finishing the connection establishment process and stream creation
     StreamCreation,
+    /// Error sending out a PING
     ConnectionPing,
+    /// Error sending data on the stream
     StreamSend,
-    StreamSendFilled,
+    /// Error receiving data from the stream
     StreamRecv,
 }
 
@@ -118,6 +164,8 @@ pub(super) enum EndpointEvent {
 
 impl Endpoint {
     // Maybe combine new_server and new_client together... but there is hardly any real benefit (and sacrifices readability)
+
+    /// Create a quic server Endpoint
     pub fn new_server(
         bind_addr: SocketAddr,
         alpn: &[u8],
@@ -166,6 +214,7 @@ impl Endpoint {
         }
     }
 
+    /// Create a quic client Endpoint
     pub fn new_client(
         bind_addr: SocketAddr,
         alpn: &[u8],
@@ -263,6 +312,7 @@ impl Endpoint {
         self.connections.remove(verified_index);
     }
 
+    /// Add a connection for a client Endpoint
     pub fn add_client_connection(
         &mut self,
         peer_addr: SocketAddr,
@@ -297,6 +347,7 @@ impl Endpoint {
         }
     }
 
+    /// Create a quic client Endpoint with an initial connection
     pub fn new_client_with_first_connection(
         bind_addr: SocketAddr,
         alpn: &[u8],
@@ -312,11 +363,14 @@ impl Endpoint {
         Ok(endpoint_mgr)
     }
 
+    /// Get the number of connections that the Endpoint is managing
     #[inline]
     pub fn get_num_connections(&self) -> usize {
         self.connections.len()
     }
 
+    /// Update the keep alive duration time
+    /// Will disable the keep alive functionality if set to None
     #[inline]
     pub fn update_keep_alive_duration(&mut self, duration_opt: Option<Duration>) {
         self.config.keep_alive_timeout = duration_opt;
@@ -610,7 +664,8 @@ impl Endpoint {
                         Ok(EndpointEvent::NoUpdate)
                     }
                 } else {
-                    Err(EndpointError::RecvTooMuchData)
+                    //Err(EndpointError::RecvTooMuchData)
+                    Ok(EndpointEvent::NoUpdate)
                 }
             }
             Err(SocketError::RecvBlocked) => Ok(EndpointEvent::DoneReceiving),
@@ -618,6 +673,7 @@ impl Endpoint {
         }
     }
 
+    /// Close a connection with a given error code number
     pub fn close_connection(
         &mut self,
         cid: &ConnectionId,
@@ -636,6 +692,8 @@ impl Endpoint {
         }
     }
 
+    /// Send data over the main stream
+    /// A reminder that the Endpoint connection will be taking ownership of the data so it can be sent out when possible
     pub fn main_stream_send(
         &mut self,
         cid: &ConnectionId,
@@ -679,6 +737,8 @@ impl Endpoint {
         }
     }
 
+    /// Send data over the background stream
+    /// A reminder that the Endpoint connection will be taking ownership of the data so it can be sent out when possible
     pub fn background_stream_send(
         &mut self,
         cid: &ConnectionId,

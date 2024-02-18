@@ -36,8 +36,7 @@ ring = { version = "0.17.7" }
 path = "src/lib.rs"
 # Rust Static Library:
 crate-type = ["rlib"]
-# No Documentation Yet
-doc = false
+doc = true
 # No Testing Yet
 test = false
 harness = false

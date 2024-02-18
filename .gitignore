@@ -1,6 +1,9 @@
 # Build Directories
-target/
+/target/*
 debug/
+
+# Allow Local Documentation
+!/target/doc
 
 # Moved Executable
 bin/Swiftlet.exe
