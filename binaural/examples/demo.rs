@@ -25,6 +25,8 @@
 use swiftlet_audio::raw::Raw;
 use swiftlet_binaural::hrtf::Hrtf;
 use swiftlet_binaural::ild::Ild;
+use swiftlet_binaural::source::Source;
+use swiftlet_binaural::{Listener, ListenerEffects};
 
 const HRTF_PATH: &str = "resources/hrtf/IRC1008.3dti-hrtf"; // Location of the HRTF Data
 const ILD_PATH: &str = "resources/ILD/HRTF_ILD_48000.3dti-ild"; // Location of the ILD Data
@@ -34,7 +36,7 @@ const WAV_PATH: &str = "resources/speech.wav"; // Location of the mono speech WA
 fn main() {
     println!("Binaural Demo Started!");
 
-    let _hrtf = match std::fs::read(std::path::Path::new(HRTF_PATH)) {
+    let hrtf = match std::fs::read(std::path::Path::new(HRTF_PATH)) {
         Ok(bytes) => match Hrtf::new_from_3dti_data(&bytes) {
             Some(h) => h,
             None => {
@@ -48,7 +50,7 @@ fn main() {
         }
     };
 
-    let _ild = match std::fs::read(std::path::Path::new(NFC_ILD_PATH)) {
+    let ild = match std::fs::read(std::path::Path::new(NFC_ILD_PATH)) {
         Ok(bytes) => match Ild::new_from_3dti_data(&bytes) {
             Some(i) => i,
             None => {
@@ -60,6 +62,13 @@ fn main() {
             println!("Could not find ild file!");
             return;
         }
+    };
+
+    let mut listener = Listener::new(hrtf, ild, None);
+    listener.rotate(90.0);
+    let effects = ListenerEffects {
+        far_distance: false,
+        distance_attenuation: false,
     };
 
     let raw_audio = match std::fs::read(std::path::Path::new(WAV_PATH)) {
@@ -77,37 +86,38 @@ fn main() {
     };
 
     // Convert raw audio_here in future
-
     if raw_audio.is_ideal_sample_rate() {
-        let mut audio_io = match swiftlet_audio::AudioIO::new() {
-            Ok(a) => a,
-            Err(_) => {
-                println!("Could not create Audio IO!");
-                return;
-            }
-        };
-        match audio_io.create_output(480) {
-            Some(channels) => {
-                if channels == 2 {
-                    if let Some(stereo_data) = raw_audio.get_stereo() {
-                        let mut stereo_position = 0;
-                        let mut callback_count = 0;
-                        let mut f = move |samples: &mut [f32]| {
-                            output_callback(
-                                samples,
-                                &mut stereo_position,
-                                &stereo_data,
-                                &mut callback_count,
-                            )
-                        };
+        if let Some(mono_audio) = raw_audio.get_mono() {
+            let source = Source::new(1.0, 1.0, 1.0, mono_audio);
+            let stereo_data = listener.process_source(&source, &effects);
 
-                        audio_io.run_output_event_loop(&mut f);
-                    }
+            let mut audio_io = match swiftlet_audio::AudioIO::new() {
+                Ok(a) => a,
+                Err(_) => {
+                    println!("Could not create Audio IO!");
+                    return;
                 }
-            }
-            None => {
-                println!("Could not create Audio IO Output!");
-                return;
+            };
+
+            match audio_io.create_output(480) {
+                Some(_channels) => {
+                    let mut stereo_position = 0;
+                    let mut callback_count = 0;
+                    let mut f = move |samples: &mut [f32]| {
+                        output_callback(
+                            samples,
+                            &mut stereo_position,
+                            &stereo_data,
+                            &mut callback_count,
+                        )
+                    };
+
+                    audio_io.run_output_event_loop(&mut f);
+                }
+                None => {
+                    println!("Could not create Audio IO Output!");
+                    return;
+                }
             }
         }
     }

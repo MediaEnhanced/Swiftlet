@@ -26,7 +26,7 @@ pub use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 pub mod endpoint;
-use endpoint::{Endpoint, EndpointError, EndpointEvent};
+use endpoint::{ConnectionId, Endpoint, EndpointError, EndpointEvent};
 
 pub enum Error {
     Unexpected,
@@ -34,45 +34,44 @@ pub enum Error {
 }
 
 pub trait Events {
-    fn connection_started(&mut self, endpoint: &mut Endpoint, conn_id: u64, verified_index: usize);
-    fn connection_closing(&mut self, endpoint: &mut Endpoint, conn_id: u64);
-    fn connection_closed(
+    fn connection_started(&mut self, endpoint: &mut Endpoint, cid: &ConnectionId);
+    fn connection_ended(
         &mut self,
         endpoint: &mut Endpoint,
-        conn_id: u64,
+        cid: &ConnectionId,
         remaining_connections: usize,
     ) -> bool;
+    fn connection_ending_warning(&mut self, endpoint: &mut Endpoint, cid: &ConnectionId);
     fn tick(&mut self, endpoint: &mut Endpoint) -> bool;
     fn debug_text(&mut self, text: &'static str);
 
-    fn reliable_stream_recv(
+    fn main_stream_recv(
         &mut self,
         endpoint: &mut Endpoint,
-        conn_id: u64,
-        verified_index: usize,
+        cid: &ConnectionId,
         read_data: &[u8],
     ) -> Option<usize>;
-    //fn stream_started(&mut self, conn_id: u64, verified_index: usize);
+
+    fn background_stream_recv(
+        &mut self,
+        endpoint: &mut Endpoint,
+        cid: &ConnectionId,
+        read_data: &[u8],
+    ) -> Option<usize>;
 }
 
 pub struct Handler<'a> {
     current_tick: u64,
     endpoint: Endpoint,
     events: &'a mut dyn Events,
-    initial_recv_buffer_size: usize,
 }
 
 impl<'a> Handler<'a> {
-    pub fn new(
-        endpoint: Endpoint,
-        events: &'a mut dyn Events,
-        initial_recv_buffer_size: usize,
-    ) -> Self {
+    pub fn new(endpoint: Endpoint, events: &'a mut dyn Events) -> Self {
         Handler {
             current_tick: 0,
             endpoint,
             events,
-            initial_recv_buffer_size,
         }
     }
 
@@ -100,19 +99,17 @@ impl<'a> Handler<'a> {
                         return Ok(None);
                     }
                 }
-                Ok(EndpointEvent::ConnectionClosing(conn_id)) => {
-                    // Need to process event for when a connection has StartedClosing instead here in future
-                    self.events.connection_closing(&mut self.endpoint, conn_id);
-                }
-                Ok(EndpointEvent::ConnectionClosed(conn_id)) => {
+                Ok(EndpointEvent::ConnectionClosed(cid)) => {
                     let remaining_connections = self.endpoint.get_num_connections();
-                    if self.events.connection_closed(
-                        &mut self.endpoint,
-                        conn_id,
-                        remaining_connections,
-                    ) {
+                    if self
+                        .events
+                        .connection_ended(&mut self.endpoint, &cid, remaining_connections)
+                    {
                         return Ok(Some(&mut self.endpoint));
                     }
+                }
+                Ok(EndpointEvent::ConnectionClosing(_cid)) => {
+                    // Do nothing right now...?
                 }
                 Ok(EndpointEvent::AlreadyHandled) => {
                     // Do Nothing and try to call get_next_event ASAP
@@ -134,38 +131,28 @@ impl<'a> Handler<'a> {
                 Ok(EndpointEvent::DoneReceiving) => {
                     return Ok(false);
                 }
-                Ok(EndpointEvent::ReliableStreamReceived((conn_id, verified_index))) => loop {
-                    match self
-                        .endpoint
-                        .recv_reliable_stream_data(conn_id, verified_index)
-                    {
+                Ok(EndpointEvent::MainStreamReceived(cid)) => loop {
+                    match self.endpoint.main_stream_recv(&cid) {
                         Ok((read_bytes_option, vec_option)) => {
                             if let Some(read_bytes) = read_bytes_option {
                                 let vec_data = match vec_option {
                                     Some(v) => v,
                                     None => {
-                                        // let mut v =
-                                        //     Vec::with_capacity(self.initial_recv_buffer_size);
-                                        // v.resize(self.initial_recv_buffer_size, 0);
-                                        // v
-                                        vec![0; self.initial_recv_buffer_size] // Faster according to clippy and github issue discussion but unsure why...?
+                                        vec![0; 4096] // Backup and shouldn't ever be called
                                     }
                                 };
-                                if let Some(next_recv_target) = self.events.reliable_stream_recv(
+                                if let Some(next_recv_target) = self.events.main_stream_recv(
                                     &mut self.endpoint,
-                                    conn_id,
-                                    verified_index,
+                                    &cid,
                                     &vec_data[..read_bytes],
                                 ) {
-                                    let _ = self.endpoint.set_reliable_stream_recv_target(
-                                        conn_id,
-                                        verified_index,
+                                    let _ = self.endpoint.main_stream_set_target(
+                                        &cid,
                                         next_recv_target,
                                         vec_data,
                                     );
                                 } else {
-                                    let _ =
-                                        self.endpoint.close_connection(conn_id, verified_index, 16);
+                                    let _ = self.endpoint.close_connection(&cid, 16);
                                     break;
                                 }
                             } else {
@@ -178,26 +165,54 @@ impl<'a> Handler<'a> {
                         }
                     }
                 },
-                Ok(EndpointEvent::ConnectionClosing(conn_id)) => {
-                    // Need to process event for when a connection has StartedClosing instead here in future
-                    self.events.connection_closing(&mut self.endpoint, conn_id);
-                }
-                Ok(EndpointEvent::ConnectionClosed(conn_id)) => {
+                Ok(EndpointEvent::BackgroundStreamReceived(cid)) => loop {
+                    match self.endpoint.background_stream_recv(&cid) {
+                        Ok((read_bytes_option, vec_option)) => {
+                            if let Some(read_bytes) = read_bytes_option {
+                                let vec_data = match vec_option {
+                                    Some(v) => v,
+                                    None => {
+                                        vec![0; 4096] // Backup and shouldn't ever be called
+                                    }
+                                };
+                                if let Some(next_recv_target) = self.events.background_stream_recv(
+                                    &mut self.endpoint,
+                                    &cid,
+                                    &vec_data[..read_bytes],
+                                ) {
+                                    let _ = self.endpoint.background_stream_set_target(
+                                        &cid,
+                                        next_recv_target,
+                                        vec_data,
+                                    );
+                                } else {
+                                    let _ = self.endpoint.close_connection(&cid, 16);
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            self.events.debug_text("Stream Read Error!\n");
+                            break;
+                        }
+                    }
+                },
+                Ok(EndpointEvent::ConnectionClosed(cid)) => {
                     let remaining_connections = self.endpoint.get_num_connections();
-                    if self.events.connection_closed(
-                        &mut self.endpoint,
-                        conn_id,
-                        remaining_connections,
-                    ) {
+                    if self
+                        .events
+                        .connection_ended(&mut self.endpoint, &cid, remaining_connections)
+                    {
                         return Ok(true);
                     }
                 }
-                Ok(EndpointEvent::EstablishedOnce((conn_id, verified_index))) => {
-                    self.events
-                        .connection_started(&mut self.endpoint, conn_id, verified_index);
+                Ok(EndpointEvent::ConnectionClosing(_cid)) => {
+                    // Do nothing right now...?
                 }
-                Ok(EndpointEvent::NewConnectionStarted) => {
-                    self.events.debug_text("New Connection!\n");
+                Ok(EndpointEvent::EstablishedOnce(cid)) => {
+                    self.events.connection_started(&mut self.endpoint, &cid);
                 }
                 Ok(EndpointEvent::NoUpdate) => {
                     // Do nothing and call recv again

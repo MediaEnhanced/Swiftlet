@@ -29,25 +29,57 @@ mod udp;
 use udp::{SocketError, UdpSocket};
 
 mod connection;
-use connection::{Config, Connection, RecvResult, TimeoutResult};
+use connection::{Connection, RecvResult, TimeoutResult};
 
-// pub struct StreamReadable {
-//     pub stream_id: u64,
-//     pub conn_id: u64,
-//     probable_index: usize,
-// }
+pub struct Config {
+    pub idle_timeout_in_ms: u64,
+    pub reliable_stream_buffer: u64,
+    pub unreliable_stream_buffer: u64,
+    pub keep_alive_timeout: Option<Duration>,
+    pub initial_main_recv_size: usize,
+    pub main_recv_first_bytes: usize,
+    pub initial_background_recv_size: usize,
+    pub background_recv_first_bytes: usize,
+}
 
-// QUIC Endpoint
 pub struct Endpoint {
     udp: UdpSocket,
     max_payload_size: usize,
     local_addr: SocketAddr,
-    config: Config,
+    connection_config: connection::Config,
     next_connection_id: u64,
     connections: Vec<Connection>,
     rand: SystemRandom,
+    config: Config,
     is_server: bool,
     conn_id_seed_key: ring::hmac::Key, // Value matters ONLY if is_server is true
+}
+
+pub struct ConnectionId {
+    id: u64,
+    probable_index: usize,
+}
+
+impl PartialEq for ConnectionId {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Clone for ConnectionId {
+    fn clone(&self) -> Self {
+        ConnectionId {
+            id: self.id,
+            probable_index: self.probable_index,
+        }
+    }
+}
+
+impl ConnectionId {
+    // Check if this gets inlined
+    pub fn update(&mut self, other: &Self) {
+        self.probable_index = other.probable_index;
+    }
 }
 
 pub enum EndpointError {
@@ -56,6 +88,7 @@ pub enum EndpointError {
     Randomness,
     IsServer,
     ConnectionCreation,
+    ConnectionClose,
     ConnectionSend,
     SocketSend,
     SocketRecv,
@@ -69,17 +102,17 @@ pub enum EndpointError {
     StreamRecv,
 }
 
-pub enum EndpointEvent {
+pub(super) enum EndpointEvent {
     NextTick,
-    ConnectionClosing(u64),
-    ConnectionClosed(u64),
+    ConnectionClosing(ConnectionId),
+    ConnectionClosed(ConnectionId),
     AlreadyHandled,
     ReceivedData,
     DoneReceiving,
     NoUpdate,
-    NewConnectionStarted,
-    EstablishedOnce((u64, usize)),
-    ReliableStreamReceived((u64, usize)),
+    EstablishedOnce(ConnectionId),
+    MainStreamReceived(ConnectionId),
+    BackgroundStreamReceived(ConnectionId),
     //StreamReceivedData(StreamReadable),
 }
 
@@ -90,19 +123,19 @@ impl Endpoint {
         alpn: &[u8],
         cert_path: &str,
         pkey_path: &str,
-        reliable_stream_buffer: usize,
+        config: Config,
     ) -> Result<Self, EndpointError> {
         if let Ok((socket_mgr, local_addr)) = UdpSocket::new(bind_addr) {
             let max_payload_size = udp::TARGET_MAX_DATAGRAM_SIZE;
 
-            let config = match Connection::create_config(
+            let connection_config = match Connection::create_config(
                 &[alpn],
                 cert_path,
                 Some(pkey_path),
-                5000,
+                config.idle_timeout_in_ms,
                 max_payload_size,
-                reliable_stream_buffer as u64,
-                65536,
+                config.reliable_stream_buffer,
+                config.unreliable_stream_buffer,
             ) {
                 Ok(cfg) => cfg,
                 Err(_) => return Err(EndpointError::ConfigCreation),
@@ -118,10 +151,11 @@ impl Endpoint {
                 udp: socket_mgr,
                 max_payload_size,
                 local_addr,
-                config,
+                connection_config,
                 next_connection_id: 1,
                 connections: Vec::new(),
                 rand,
+                config,
                 is_server: true,
                 conn_id_seed_key,
             };
@@ -136,19 +170,19 @@ impl Endpoint {
         bind_addr: SocketAddr,
         alpn: &[u8],
         cert_path: &str,
-        reliable_stream_buffer: usize,
+        config: Config,
     ) -> Result<Self, EndpointError> {
         if let Ok((socket_mgr, local_addr)) = UdpSocket::new(bind_addr) {
             let max_payload_size = udp::TARGET_MAX_DATAGRAM_SIZE;
 
-            let config = match Connection::create_config(
+            let connection_config = match Connection::create_config(
                 &[alpn],
                 cert_path,
                 None,
-                5000,
+                config.idle_timeout_in_ms,
                 max_payload_size,
-                reliable_stream_buffer as u64,
-                65536,
+                config.reliable_stream_buffer,
+                config.unreliable_stream_buffer,
             ) {
                 Ok(cfg) => cfg,
                 Err(_) => return Err(EndpointError::ConfigCreation),
@@ -165,10 +199,11 @@ impl Endpoint {
                 udp: socket_mgr,
                 max_payload_size,
                 local_addr,
-                config,
+                connection_config,
                 next_connection_id: 1,
                 connections: Vec::new(),
                 rand,
+                config,
                 is_server: false,
                 conn_id_seed_key,
             };
@@ -180,23 +215,16 @@ impl Endpoint {
     }
 
     #[inline]
-    fn find_connection_from_id(&self, id: u64) -> Option<usize> {
-        // To be changed to binary search later
-        self.connections.iter().position(|conn| conn.matches_id(id))
-    }
-
-    #[inline]
-    fn find_connection_from_id_with_probable_index(
-        &self,
-        id: u64,
-        probable_index: usize,
-    ) -> Option<usize> {
-        if probable_index < self.connections.len()
-            && self.connections[probable_index].matches_id(id)
+    fn find_connection_from_cid(&self, cid: &ConnectionId) -> Option<usize> {
+        if cid.probable_index < self.connections.len()
+            && self.connections[cid.probable_index].matches_id(cid.id)
         {
-            Some(probable_index)
+            Some(cid.probable_index)
         } else {
-            self.find_connection_from_id(id)
+            // To be changed to binary search later
+            self.connections
+                .iter()
+                .position(|conn| conn.matches_id(cid.id))
         }
     }
 
@@ -252,7 +280,7 @@ impl Endpoint {
                 Some(server_name),
                 self.local_addr,
                 &scid_data,
-                &mut self.config,
+                &mut self.connection_config,
                 None,
             ) {
                 Ok(conn_mgr) => {
@@ -275,10 +303,9 @@ impl Endpoint {
         cert_path: &str,
         peer_addr: SocketAddr,
         server_name: &str,
-        reliable_stream_buffer: usize,
+        config: Config,
     ) -> Result<Self, EndpointError> {
-        let mut endpoint_mgr =
-            Endpoint::new_client(bind_addr, alpn, cert_path, reliable_stream_buffer)?;
+        let mut endpoint_mgr = Endpoint::new_client(bind_addr, alpn, cert_path, config)?;
 
         endpoint_mgr.add_client_connection(peer_addr, server_name)?;
 
@@ -290,6 +317,31 @@ impl Endpoint {
         self.connections.len()
     }
 
+    #[inline]
+    pub fn update_keep_alive_duration(&mut self, duration_opt: Option<Duration>) {
+        self.config.keep_alive_timeout = duration_opt;
+    }
+
+    fn keep_alive(&mut self) -> Result<u64, EndpointError> {
+        let mut num_pings = 0;
+        if let Some(duration) = self.config.keep_alive_timeout {
+            let before_instant = Instant::now() - duration;
+            for verified_index in 0..self.connections.len() {
+                match self.connections[verified_index].send_ping_if_before_instant(before_instant) {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        self.send(verified_index)?;
+                        num_pings += 1;
+                    }
+                    Err(_) => {
+                        return Err(EndpointError::ConnectionPing);
+                    }
+                }
+            }
+        }
+        Ok(num_pings)
+    }
+
     pub(super) fn get_next_event(
         &mut self,
         next_tick_instant: Instant,
@@ -297,6 +349,7 @@ impl Endpoint {
         let mut next_instant = if next_tick_instant > Instant::now() {
             next_tick_instant
         } else {
+            self.keep_alive()?;
             return Ok(EndpointEvent::NextTick);
         };
         let mut conn_timeout_opt = None;
@@ -304,6 +357,7 @@ impl Endpoint {
         match self.udp.send_check() {
             Ok(send_count) => {
                 if send_count > 0 && next_tick_instant <= Instant::now() {
+                    self.keep_alive()?;
                     return Ok(EndpointEvent::NextTick);
                 }
             }
@@ -322,10 +376,16 @@ impl Endpoint {
                 }
                 TimeoutResult::Closed(conn_id) => {
                     self.remove_connection(verified_index);
-                    return Ok(EndpointEvent::ConnectionClosed(conn_id));
+                    return Ok(EndpointEvent::ConnectionClosed(ConnectionId {
+                        id: conn_id,
+                        probable_index: verified_index,
+                    }));
                 }
                 TimeoutResult::Draining(conn_id) => {
-                    return Ok(EndpointEvent::ConnectionClosing(conn_id));
+                    return Ok(EndpointEvent::ConnectionClosing(ConnectionId {
+                        id: conn_id,
+                        probable_index: verified_index,
+                    }));
                 }
                 TimeoutResult::Happened => {
                     self.send(verified_index)?;
@@ -341,16 +401,27 @@ impl Endpoint {
                                         }
                                         TimeoutResult::Closed(conn_id) => {
                                             self.remove_connection(vi);
-                                            return Ok(EndpointEvent::ConnectionClosed(conn_id));
+                                            return Ok(EndpointEvent::ConnectionClosed(
+                                                ConnectionId {
+                                                    id: conn_id,
+                                                    probable_index: verified_index,
+                                                },
+                                            ));
                                         }
                                         TimeoutResult::Draining(conn_id) => {
-                                            return Ok(EndpointEvent::ConnectionClosing(conn_id));
+                                            return Ok(EndpointEvent::ConnectionClosing(
+                                                ConnectionId {
+                                                    id: conn_id,
+                                                    probable_index: verified_index,
+                                                },
+                                            ));
                                         }
                                         _ => {
                                             return Ok(EndpointEvent::AlreadyHandled);
                                         }
                                     }
                                 } else {
+                                    self.keep_alive()?;
                                     return Ok(EndpointEvent::NextTick);
                                 }
                             }
@@ -363,18 +434,6 @@ impl Endpoint {
                 _ => {}
             }
         }
-
-        // match self.udp.has_data_to_recv() {
-        //     Ok(false) => {
-        //         // Most likely case... could copy remaining function contents into this...
-        //     }
-        //     Ok(true) => {
-        //         return Ok(EndpointEvent::ReceivedData);
-        //     }
-        //     Err(_) => {
-        //         return Err(EndpointError::SocketRecv);
-        //     }
-        // }
 
         let mut send_check_timeout = false;
         if let Some(next_send_check_instant) = self.udp.next_send_instant() {
@@ -400,12 +459,21 @@ impl Endpoint {
                 }
                 TimeoutResult::Closed(conn_id) => {
                     self.remove_connection(vi);
-                    Ok(EndpointEvent::ConnectionClosed(conn_id))
+                    Ok(EndpointEvent::ConnectionClosed(ConnectionId {
+                        id: conn_id,
+                        probable_index: vi,
+                    }))
                 }
-                TimeoutResult::Draining(conn_id) => Ok(EndpointEvent::ConnectionClosing(conn_id)),
+                TimeoutResult::Draining(conn_id) => {
+                    Ok(EndpointEvent::ConnectionClosing(ConnectionId {
+                        id: conn_id,
+                        probable_index: vi,
+                    }))
+                }
                 _ => Ok(EndpointEvent::AlreadyHandled),
             }
         } else {
+            self.keep_alive()?;
             Ok(EndpointEvent::NextTick)
         }
     }
@@ -441,7 +509,7 @@ impl Endpoint {
                                 None,
                                 self.local_addr,
                                 scid_data,
-                                &mut self.config,
+                                &mut self.connection_config,
                                 writer_opt,
                             ) {
                                 Ok(conn_mgr) => {
@@ -457,15 +525,66 @@ impl Endpoint {
                             match self.connections[verified_index]
                                 .recv_data_process(recv_data, from_addr)
                             {
-                                Ok(RecvResult::ReliableReadTarget(conn_id)) => {
+                                Ok(RecvResult::MainStreamReadable(conn_id)) => {
                                     self.send(verified_index)?;
-                                    Ok(EndpointEvent::ReliableStreamReceived((
-                                        conn_id,
-                                        verified_index,
-                                    )))
+                                    Ok(EndpointEvent::MainStreamReceived(ConnectionId {
+                                        id: conn_id,
+                                        probable_index: verified_index,
+                                    }))
+                                }
+                                Ok(RecvResult::BkgdStreamReadable(conn_id)) => {
+                                    self.send(verified_index)?;
+                                    Ok(EndpointEvent::BackgroundStreamReceived(ConnectionId {
+                                        id: conn_id,
+                                        probable_index: verified_index,
+                                    }))
+                                }
+                                Ok(RecvResult::Closed(conn_id)) => {
+                                    self.remove_connection(verified_index);
+                                    Ok(EndpointEvent::ConnectionClosed(ConnectionId {
+                                        id: conn_id,
+                                        probable_index: verified_index,
+                                    }))
+                                }
+                                Ok(RecvResult::Draining(conn_id)) => {
+                                    Ok(EndpointEvent::ConnectionClosing(ConnectionId {
+                                        id: conn_id,
+                                        probable_index: verified_index,
+                                    }))
+                                }
+                                Ok(RecvResult::Established(conn_id)) => {
+                                    self.send(verified_index)?;
+
+                                    // let mut main_recv_data_old =
+                                    //     Vec::with_capacity(self.config.initial_main_recv_size);
+                                    // main_recv_data_old
+                                    //     .resize(self.config.initial_main_recv_size, 0);
+                                    let main_recv_data =
+                                        vec![0; self.config.initial_main_recv_size]; // Faster according to clippy and github issue discussion but unsure why...?
+
+                                    let background_recv_data =
+                                        vec![0; self.config.initial_background_recv_size];
+
+                                    if self.connections[verified_index]
+                                        .finish_establishment(
+                                            main_recv_data,
+                                            self.config.main_recv_first_bytes,
+                                            background_recv_data,
+                                            self.config.background_recv_first_bytes,
+                                        )
+                                        .is_err()
+                                    {
+                                        return Err(EndpointError::StreamCreation);
+                                    }
+
+                                    Ok(EndpointEvent::EstablishedOnce(ConnectionId {
+                                        id: conn_id,
+                                        probable_index: verified_index,
+                                    }))
                                 }
                                 Ok(RecvResult::StreamReadable(_)) => {
                                     self.send(verified_index)?;
+                                    //Maybe error out here and close connection in future?
 
                                     // let stream_readable = StreamReadable {
                                     //     stream_id,
@@ -476,18 +595,6 @@ impl Endpoint {
                                     // Ok(EndpointEvent::StreamReceivedData(stream_readable))
 
                                     Ok(EndpointEvent::NoUpdate)
-                                }
-                                Ok(RecvResult::Closed(conn_id)) => {
-                                    self.remove_connection(verified_index);
-                                    Ok(EndpointEvent::ConnectionClosed(conn_id))
-                                }
-                                Ok(RecvResult::Draining(conn_id)) => {
-                                    Ok(EndpointEvent::ConnectionClosing(conn_id))
-                                }
-                                Ok(RecvResult::Established(conn_id)) => {
-                                    self.send(verified_index)?;
-
-                                    Ok(EndpointEvent::EstablishedOnce((conn_id, verified_index)))
                                 }
                                 Ok(_) => {
                                     self.send(verified_index)?;
@@ -513,55 +620,29 @@ impl Endpoint {
 
     pub fn close_connection(
         &mut self,
-        conn_id: u64,
-        probable_index: usize,
+        cid: &ConnectionId,
         error_code: u64,
     ) -> Result<bool, EndpointError> {
-        if let Some(verified_index) =
-            self.find_connection_from_id_with_probable_index(conn_id, probable_index)
-        {
+        if let Some(verified_index) = self.find_connection_from_cid(cid) {
             match self.connections[verified_index].close(error_code, b"reason") {
                 Ok(_) => match self.send(verified_index) {
                     Ok(_) => Ok(true),
                     Err(e) => Err(e),
                 },
-                Err(_) => Err(EndpointError::StreamCreation),
+                Err(_) => Err(EndpointError::ConnectionClose),
             }
         } else {
             Err(EndpointError::ConnectionNotFound)
         }
     }
 
-    pub fn send_out_ping_past_duration(
+    pub fn main_stream_send(
         &mut self,
-        duration: Duration,
-    ) -> Result<u64, EndpointError> {
-        let mut num_pings = 0;
-        for verified_index in 0..self.connections.len() {
-            match self.connections[verified_index].send_ping_if_neccessary(duration) {
-                Ok(false) => {}
-                Ok(true) => {
-                    self.send(verified_index)?;
-                    num_pings += 1;
-                }
-                Err(_) => {
-                    return Err(EndpointError::ConnectionPing);
-                }
-            }
-        }
-        Ok(num_pings)
-    }
-
-    pub fn send_reliable_stream_data(
-        &mut self,
-        conn_id: u64,
-        probable_index: usize,
+        cid: &ConnectionId,
         send_data: Vec<u8>,
     ) -> Result<(u64, u64), EndpointError> {
-        if let Some(verified_index) =
-            self.find_connection_from_id_with_probable_index(conn_id, probable_index)
-        {
-            match self.connections[verified_index].stream_reliable_send(send_data) {
+        if let Some(verified_index) = self.find_connection_from_cid(cid) {
+            match self.connections[verified_index].main_stream_send(send_data) {
                 Ok(_) => self.send(verified_index),
                 Err(_) => Err(EndpointError::StreamSend),
             }
@@ -570,15 +651,12 @@ impl Endpoint {
         }
     }
 
-    pub(super) fn recv_reliable_stream_data(
+    pub(super) fn main_stream_recv(
         &mut self,
-        conn_id: u64,
-        probable_index: usize,
+        cid: &ConnectionId,
     ) -> Result<(Option<usize>, Option<Vec<u8>>), EndpointError> {
-        if let Some(verified_index) =
-            self.find_connection_from_id_with_probable_index(conn_id, probable_index)
-        {
-            match self.connections[verified_index].stream_reliable_read() {
+        if let Some(verified_index) = self.find_connection_from_cid(cid) {
+            match self.connections[verified_index].main_stream_read() {
                 Ok((x, y)) => Ok((x, y)),
                 Err(_) => Err(EndpointError::StreamSend),
             }
@@ -587,64 +665,60 @@ impl Endpoint {
         }
     }
 
-    pub(super) fn set_reliable_stream_recv_target(
+    pub(super) fn main_stream_set_target(
         &mut self,
-        conn_id: u64,
-        probable_index: usize,
+        cid: &ConnectionId,
         next_target: usize,
         vec_data_return: Vec<u8>,
     ) -> Result<(), EndpointError> {
-        if let Some(verified_index) =
-            self.find_connection_from_id_with_probable_index(conn_id, probable_index)
-        {
-            self.connections[verified_index]
-                .stream_reliable_next_read_target(next_target, vec_data_return);
+        if let Some(verified_index) = self.find_connection_from_cid(cid) {
+            self.connections[verified_index].main_stream_next_target(next_target, vec_data_return);
             Ok(())
         } else {
             Err(EndpointError::ConnectionNotFound)
         }
     }
 
-    // pub fn send_stream_data(
-    //     &mut self,
-    //     conn_id: u64,
-    //     stream_id: u64,
-    //     data: &[u8],
-    //     is_final: bool,
-    // ) -> Result<(u64, u64), EndpointError> {
-    //     if let Some(verified_index) = self.find_connection_from_id(conn_id) {
-    //         match self.connections[verified_index].stream_send(stream_id, data, is_final) {
-    //             Ok(bytes_sent) => {
-    //                 // Check bytes sent against data.len() in future
-    //                 self.send(verified_index)
-    //             }
-    //             Err(Error::Done) => Err(EndpointError::StreamSendFilled),
-    //             Err(_) => Err(EndpointError::StreamSend),
-    //         }
-    //     } else {
-    //         Err(EndpointError::ConnectionNotFound)
-    //     }
-    // }
+    pub fn background_stream_send(
+        &mut self,
+        cid: &ConnectionId,
+        send_data: Vec<u8>,
+    ) -> Result<(u64, u64), EndpointError> {
+        if let Some(verified_index) = self.find_connection_from_cid(cid) {
+            match self.connections[verified_index].bkgd_stream_send(send_data) {
+                Ok(_) => self.send(verified_index),
+                Err(_) => Err(EndpointError::StreamSend),
+            }
+        } else {
+            Err(EndpointError::ConnectionNotFound)
+        }
+    }
 
-    // pub fn recv_stream_data(
-    //     &mut self,
-    //     stream_readable: &StreamReadable,
-    //     data: &mut [u8],
-    // ) -> Result<(usize, bool), EndpointError> {
-    //     if let Some(verified_index) = self.find_connection_from_id_with_probable_index(
-    //         stream_readable.conn_id,
-    //         stream_readable.probable_index,
-    //     ) {
-    //         match self.connections[verified_index].stream_recv(stream_readable.stream_id, data) {
-    //             Ok((bytes_recv, finished)) => match self.send(verified_index) {
-    //                 Ok(_) => Ok((bytes_recv, finished)),
-    //                 Err(e) => Err(e),
-    //             },
-    //             Err(Error::Done) => Ok((0, false)),
-    //             Err(_) => Err(EndpointError::StreamRecv),
-    //         }
-    //     } else {
-    //         Err(EndpointError::ConnectionNotFound)
-    //     }
-    // }
+    pub(super) fn background_stream_recv(
+        &mut self,
+        cid: &ConnectionId,
+    ) -> Result<(Option<usize>, Option<Vec<u8>>), EndpointError> {
+        if let Some(verified_index) = self.find_connection_from_cid(cid) {
+            match self.connections[verified_index].bkgd_stream_read() {
+                Ok((x, y)) => Ok((x, y)),
+                Err(_) => Err(EndpointError::StreamSend),
+            }
+        } else {
+            Err(EndpointError::ConnectionNotFound)
+        }
+    }
+
+    pub(super) fn background_stream_set_target(
+        &mut self,
+        cid: &ConnectionId,
+        next_target: usize,
+        vec_data_return: Vec<u8>,
+    ) -> Result<(), EndpointError> {
+        if let Some(verified_index) = self.find_connection_from_cid(cid) {
+            self.connections[verified_index].bkgd_stream_next_target(next_target, vec_data_return);
+            Ok(())
+        } else {
+            Err(EndpointError::ConnectionNotFound)
+        }
+    }
 }

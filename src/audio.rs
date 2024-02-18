@@ -678,6 +678,9 @@ fn audio_output_callback(
     }
 
     if samples.len() != 960 {
+        let _ = channels
+            .debug_send
+            .send("Not the right amount of samples!\n");
         return;
     }
 

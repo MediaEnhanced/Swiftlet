@@ -167,6 +167,25 @@ impl Raw {
         self.samples_per_sec == 48000
     }
 
+    pub fn get_mono(&self) -> Option<Vec<f32>> {
+        if self.channel_count == 1 {
+            Some(self.data[0].clone())
+        } else if self.channel_count == 2 {
+            let num_samples = self.data[0].len();
+            if num_samples != self.data[1].len() {
+                return None;
+            }
+            let mut mono = Vec::with_capacity(num_samples);
+            for i in 0..num_samples {
+                let avg_sample = (self.data[0][i] + self.data[1][i]) * 0.5;
+                mono.push(avg_sample);
+            }
+            Some(mono)
+        } else {
+            None
+        }
+    }
+
     pub fn get_stereo(&self) -> Option<Vec<f32>> {
         if self.channel_count == 1 {
             let mut stereo = Vec::with_capacity(self.data[0].len() * 2);

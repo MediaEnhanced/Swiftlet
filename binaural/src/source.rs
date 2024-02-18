@@ -20,4 +20,29 @@
 //OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //SOFTWARE.
 
-pub struct Source {}
+pub struct Source {
+    position: nalgebra::Point3<f32>,
+    mono_audio: Vec<f32>,
+}
+
+impl Source {
+    pub fn new(x_pos: f32, y_pos: f32, z_pos: f32, mono_audio: Vec<f32>) -> Self {
+        Source {
+            position: nalgebra::Point3::new(x_pos, y_pos, z_pos),
+            mono_audio,
+        }
+    }
+
+    pub(super) fn get_distance_from_position(&self, p2: &nalgebra::Point3<f32>) -> f32 {
+        nalgebra::distance(&self.position, p2)
+    }
+
+    pub fn get_stereo(&self) -> Vec<f32> {
+        let mut stereo = Vec::with_capacity(self.mono_audio.len() * 2);
+        for m in &self.mono_audio {
+            stereo.push(*m);
+            stereo.push(*m);
+        }
+        stereo
+    }
+}

@@ -23,49 +23,63 @@
 // Based on the 3dti_AudioToolkit library
 // https://github.com/3DTune-In/3dti_AudioToolkit
 
+// Only supports a sampling rate of 48000 Hz for right now
+
 #![allow(dead_code)] // Temporary
 
 pub mod hrtf;
 pub mod ild;
 pub mod source;
 
-pub struct Core {
-    audio_state: AudioState,
-    resampling_step: i32,
-    listener: Listener,
+use hrtf::Hrtf;
+use ild::Ild;
+use source::Source;
+
+pub struct ListenerEffects {
+    pub far_distance: bool,
+    pub distance_attenuation: bool,
 }
 
-impl Core {
-    pub fn new(sample_rate: u32, buffer_size: u32, resampling_step: i32) -> Self {
-        Core {
-            audio_state: AudioState::new(sample_rate, buffer_size),
-            resampling_step,
-            listener: Listener::new(0.0875),
-        }
-    }
-}
-
-struct Listener {
+pub struct Listener {
+    hrtf: Hrtf,
+    ild: Ild,
     head_radius: f32,
+    position: nalgebra::Point3<f32>,
+    orientation: nalgebra::Quaternion<f32>,
 }
 
 impl Listener {
-    fn new(head_radius: f32) -> Self {
-        Listener { head_radius }
-    }
-}
-
-// Can add a default later maybe...
-struct AudioState {
-    sample_rate: u32, // Sample Rate in Hz
-    buffer_size: u32, // Number of samples for each channel
-}
-
-impl AudioState {
-    fn new(sample_rate: u32, buffer_size: u32) -> Self {
-        AudioState {
-            sample_rate,
-            buffer_size,
+    pub fn new(hrtf: Hrtf, ild: Ild, head_radius_option: Option<f32>) -> Self {
+        let head_radius = head_radius_option.unwrap_or(0.0875);
+        Listener {
+            hrtf,
+            ild,
+            head_radius,
+            position: nalgebra::Point3::new(0.0, 0.0, 0.0),
+            //orientation: nalgebra::Quaternion::new(0.0, 0.0, 0.0, 0.0),
+            orientation: nalgebra::Quaternion::default(),
         }
+    }
+
+    pub fn rotate(&mut self, degrees: f32) {
+        self.orientation.i = degrees;
+    }
+
+    pub fn process_source(&self, source: &Source, effects: &ListenerEffects) -> Vec<f32> {
+        if source.get_distance_from_position(&self.position) <= self.head_radius {
+            return source.get_stereo();
+        }
+
+        let stereo_data = Vec::new();
+
+        if effects.far_distance {
+            // Do something here in future
+        }
+
+        if effects.distance_attenuation {
+            // Do something here in future
+        }
+
+        stereo_data
     }
 }

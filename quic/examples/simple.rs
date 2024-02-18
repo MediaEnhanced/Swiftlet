@@ -27,7 +27,10 @@ const PKEY_PATH: &str = "security/pkey.pem"; // Location of the private key for 
 
 use std::time::Duration;
 
-use swiftlet_quic::{endpoint::Endpoint, Events, Handler, SocketAddr};
+use swiftlet_quic::{
+    endpoint::{Config, ConnectionId, Endpoint},
+    Events, Handler, SocketAddr,
+};
 
 const MESSAGE_HEADER_SIZE: usize = 3;
 const BUFFER_SIZE_PER_CONNECTION: usize = 65536; // 16 KiB
@@ -63,29 +66,31 @@ fn server_thread(port: u16, server_name: String) {
         0,
     ));
 
-    let server_endpoint = match Endpoint::new_server(
-        bind_address,
-        ALPN_NAME,
-        CERT_PATH,
-        PKEY_PATH,
-        BUFFER_SIZE_PER_CONNECTION,
-    ) {
-        Ok(endpoint) => endpoint,
-        Err(_) => {
-            println!("Server Endpoint Creation Error!");
-            // Can add more detailed print here later
-            return;
-        }
+    let config = Config {
+        idle_timeout_in_ms: 5000,
+        reliable_stream_buffer: 65536,
+        unreliable_stream_buffer: 65536,
+        keep_alive_timeout: None,
+        initial_main_recv_size: BUFFER_SIZE_PER_CONNECTION,
+        main_recv_first_bytes: MESSAGE_HEADER_SIZE,
+        initial_background_recv_size: BUFFER_SIZE_PER_CONNECTION,
+        background_recv_first_bytes: MESSAGE_HEADER_SIZE,
     };
+
+    let server_endpoint =
+        match Endpoint::new_server(bind_address, ALPN_NAME, CERT_PATH, PKEY_PATH, config) {
+            Ok(endpoint) => endpoint,
+            Err(_) => {
+                println!("Server Endpoint Creation Error!");
+                // Can add more detailed print here later
+                return;
+            }
+        };
 
     let mut server_state = ServerState::new(server_name);
     server_state.send_debug_text("Starting Server Network!\n");
 
-    let mut rtc_handler = Handler::new(
-        server_endpoint,
-        &mut server_state,
-        BUFFER_SIZE_PER_CONNECTION,
-    );
+    let mut rtc_handler = Handler::new(server_endpoint, &mut server_state);
 
     match rtc_handler.run_event_loop(std::time::Duration::from_millis(5)) {
         Ok(_) => {}
@@ -105,13 +110,24 @@ fn client_thread(server_address: SocketAddr, user_name: String) {
         0,
     ));
 
+    let config = Config {
+        idle_timeout_in_ms: 5000,
+        reliable_stream_buffer: 65536,
+        unreliable_stream_buffer: 65536,
+        keep_alive_timeout: Some(Duration::from_millis(2000)),
+        initial_main_recv_size: BUFFER_SIZE_PER_CONNECTION,
+        main_recv_first_bytes: MESSAGE_HEADER_SIZE,
+        initial_background_recv_size: BUFFER_SIZE_PER_CONNECTION,
+        background_recv_first_bytes: MESSAGE_HEADER_SIZE,
+    };
+
     let client_endpoint = match Endpoint::new_client_with_first_connection(
         bind_address,
         ALPN_NAME,
         CERT_PATH,
         server_address,
         SERVER_NAME,
-        BUFFER_SIZE_PER_CONNECTION,
+        config,
     ) {
         Ok(endpoint) => endpoint,
         Err(_) => {
@@ -123,11 +139,7 @@ fn client_thread(server_address: SocketAddr, user_name: String) {
 
     let mut client_handler = ClientHandler::new(user_name);
     client_handler.send_debug_text("Starting Client Network!\n");
-    let mut rtc_handler = Handler::new(
-        client_endpoint,
-        &mut client_handler,
-        BUFFER_SIZE_PER_CONNECTION,
-    );
+    let mut rtc_handler = Handler::new(client_endpoint, &mut client_handler);
 
     // If
     match rtc_handler.run_event_loop(std::time::Duration::from_millis(5)) {
@@ -152,12 +164,6 @@ enum StreamMsgType {
     NewClientAnnounce, // ClientNameLen, ClientName
 }
 
-enum IntendedFor {
-    Nobody,
-    Client,
-    Server,
-}
-
 impl StreamMsgType {
     #[inline] // Verbose but compiles down to minimal instructions
     fn from_u8(byte: u8) -> Self {
@@ -175,18 +181,21 @@ impl StreamMsgType {
             StreamMsgType::ServerStateRefresh => StreamMsgType::ServerStateRefresh as u8,
             StreamMsgType::NewClient => StreamMsgType::NewClient as u8,
             StreamMsgType::NewClientAnnounce => StreamMsgType::NewClientAnnounce as u8,
-            _ => IntendedFor::Nobody as u8,
+            _ => StreamMsgType::InvalidType as u8,
         }
     }
 
     #[inline]
-    fn intended_for(&self) -> IntendedFor {
-        match self {
-            StreamMsgType::ServerStateRefresh => IntendedFor::Client,
-            StreamMsgType::NewClient => IntendedFor::Client,
-            StreamMsgType::NewClientAnnounce => IntendedFor::Server,
-            _ => IntendedFor::Nobody,
-        }
+    fn intended_for_client(&self) -> bool {
+        matches!(
+            self,
+            StreamMsgType::ServerStateRefresh | StreamMsgType::NewClient
+        )
+    }
+
+    #[inline]
+    fn intended_for_server(&self) -> bool {
+        matches!(self, StreamMsgType::NewClientAnnounce)
     }
 
     #[inline]
@@ -210,20 +219,20 @@ fn get_stream_msg_size(read_data: &[u8]) -> usize {
 const MAX_CHAR_LENGTH: usize = 32;
 
 struct ClientState {
-    id: u64,
-    probable_index: usize,
-    msg_type_recv: Option<StreamMsgType>,
+    cid: ConnectionId,
+    main_recv_type: Option<StreamMsgType>,
+    bkgd_recv_type: Option<StreamMsgType>,
     user_name: [u8; MAX_CHAR_LENGTH * 4],
     user_name_len: usize,
     state: u8, // Doesn't represent anything
 }
 
 impl ClientState {
-    fn new(conn_id: u64, probable_index: usize, user_name_bytes: &[u8]) -> Option<Self> {
+    fn new(cid: ConnectionId, user_name_bytes: &[u8]) -> Option<Self> {
         let mut cs = ClientState {
-            id: conn_id,
-            probable_index,
-            msg_type_recv: None,
+            cid,
+            main_recv_type: None,
+            bkgd_recv_type: None,
             user_name: [0; MAX_CHAR_LENGTH * 4],
             user_name_len: 0,
             state: 0,
@@ -262,7 +271,7 @@ struct ServerState {
     name: [u8; MAX_CHAR_LENGTH * 4],
     name_len: usize,
     command_handler_tick: u64,
-    potential_clients: Vec<u64>,
+    potential_clients: Vec<ConnectionId>,
     client_states: Vec<ClientState>,
 }
 
@@ -302,36 +311,33 @@ impl ServerState {
     }
 
     #[inline]
-    fn find_connection_index(&self, conn_id: u64) -> Option<usize> {
+    fn find_connection_index_from_cid(&self, cid: &ConnectionId) -> Option<usize> {
         // Can use binary search later since the client states are ordered by id#
-        self.client_states.iter().position(|cs| cs.id == conn_id)
+        self.client_states.iter().position(|cs| cs.cid == *cid)
     }
 
     fn add_new_verified_connection(
         &mut self,
         endpoint: &mut Endpoint,
-        conn_id: u64,
-        verified_index: usize,
+        cid: &ConnectionId,
         read_data: &[u8],
     ) -> bool {
         let username_len = read_data[0] as usize;
-        if let Some(cs) = ClientState::new(conn_id, verified_index, &read_data[1..username_len + 1])
-        {
+        if let Some(cs) = ClientState::new(cid.clone(), &read_data[1..username_len + 1]) {
             let cs_ind = self.client_states.len();
             self.client_states.push(cs);
 
             // Send new client a state refresh
             let mut send_data = self.create_refresh_data(cs_ind);
             set_stream_msg_size(&mut send_data);
-            let _ = endpoint.send_reliable_stream_data(conn_id, verified_index, send_data);
+            let _ = endpoint.main_stream_send(cid, send_data);
 
             // Send all other clients a msg about the new client
             for (ind, conn) in self.client_states.iter().enumerate() {
                 if ind != cs_ind {
                     let mut send_data = self.create_new_client_data(cs_ind);
                     set_stream_msg_size(&mut send_data);
-                    let _ =
-                        endpoint.send_reliable_stream_data(conn.id, conn.probable_index, send_data);
+                    let _ = endpoint.main_stream_send(&conn.cid, send_data);
                 }
             }
             true
@@ -340,8 +346,8 @@ impl ServerState {
         }
     }
 
-    fn remove_connection_state(&mut self, conn_id: u64) -> bool {
-        if let Some(verified_index) = self.find_connection_index(conn_id) {
+    fn remove_connection_state(&mut self, cid: &ConnectionId) -> bool {
+        if let Some(verified_index) = self.find_connection_index_from_cid(cid) {
             self.client_states.remove(verified_index);
             true
         } else {
@@ -379,49 +385,29 @@ impl ServerState {
 }
 
 impl Events for ServerState {
-    fn connection_started(
-        &mut self,
-        _endpoint: &mut Endpoint,
-        _conn_id: u64,
-        _verified_index: usize,
-    ) {
+    fn connection_started(&mut self, _endpoint: &mut Endpoint, _cid: &ConnectionId) {
         // Nothing to do until a server gets the first recv data from a potential client
     }
 
-    fn connection_closing(&mut self, endpoint: &mut Endpoint, conn_id: u64) {
-        if self.remove_connection_state(conn_id) {
-            // Temporarily (inefficiently) used for removing of clients
-            for vi in 0..self.client_states.len() {
-                let mut send_data = self.create_refresh_data(vi);
-                set_stream_msg_size(&mut send_data);
-                let _ = endpoint.send_reliable_stream_data(
-                    self.client_states[vi].id,
-                    self.client_states[vi].probable_index,
-                    send_data,
-                );
-            }
-        }
-    }
-
-    fn connection_closed(
+    fn connection_ended(
         &mut self,
         endpoint: &mut Endpoint,
-        conn_id: u64,
+        cid: &ConnectionId,
         _remaining_connections: usize,
     ) -> bool {
-        if self.remove_connection_state(conn_id) {
+        if self.remove_connection_state(cid) {
             // Temporarily (inefficiently) used for removing of clients
             for vi in 0..self.client_states.len() {
                 let mut send_data = self.create_refresh_data(vi);
                 set_stream_msg_size(&mut send_data);
-                let _ = endpoint.send_reliable_stream_data(
-                    self.client_states[vi].id,
-                    self.client_states[vi].probable_index,
-                    send_data,
-                );
+                let _ = endpoint.main_stream_send(&self.client_states[vi].cid, send_data);
             }
         }
         false
+    }
+
+    fn connection_ending_warning(&mut self, _endpoint: &mut Endpoint, _cid: &ConnectionId) {
+        // COULD end earlier in future
     }
 
     fn tick(&mut self, _endpoint: &mut Endpoint) -> bool {
@@ -454,46 +440,45 @@ impl Events for ServerState {
         self.send_debug_text(text);
     }
 
-    fn reliable_stream_recv(
+    fn main_stream_recv(
         &mut self,
         endpoint: &mut Endpoint,
-        conn_id: u64,
-        verified_index: usize,
+        cid: &ConnectionId,
         read_data: &[u8],
     ) -> Option<usize> {
-        if let Some(vi) = self.find_connection_index(conn_id) {
-            self.client_states[vi].probable_index = verified_index;
-            if self.client_states[vi].msg_type_recv.take().is_some() {
-                // Process messages here that aren't the initial Client Announce
-                Some(MESSAGE_HEADER_SIZE)
+        if let Some(vi) = self.find_connection_index_from_cid(cid) {
+            self.client_states[vi].cid.update(cid);
+            if let Some(_msg_type) = self.client_states[vi].main_recv_type.take() {
+                // if self.handle_stream_msg(endpoint, vi, msg_type, read_data) {
+                //     Some(MESSAGE_HEADER_SIZE)
+                // } else {
+                None // Close Connection
+                     // }
             } else {
                 let new_msg_type = StreamMsgType::from_u8(read_data[0]);
-                match new_msg_type.intended_for() {
-                    IntendedFor::Server => {
-                        self.client_states[vi].msg_type_recv = Some(new_msg_type);
-                        Some(get_stream_msg_size(read_data))
-                    }
-                    _ => {
-                        None // Close Connection
-                    }
+                if new_msg_type.intended_for_server() {
+                    self.client_states[vi].main_recv_type = Some(new_msg_type);
+                    Some(get_stream_msg_size(read_data))
+                } else {
+                    None
                 }
             }
         } else if let Some(pot_ind) = self
             .potential_clients
             .iter()
-            .position(|p_cid| *p_cid == conn_id)
+            .position(|p_cid| *p_cid == *cid)
         {
             self.potential_clients.remove(pot_ind);
-            if self.add_new_verified_connection(endpoint, conn_id, verified_index, read_data) {
+            if self.add_new_verified_connection(endpoint, cid, read_data) {
                 Some(MESSAGE_HEADER_SIZE)
             } else {
                 None // Close Connection
             }
-        } else if read_data.len() >= MESSAGE_HEADER_SIZE {
+        } else if read_data.len() == MESSAGE_HEADER_SIZE {
             // Check to see if it's a new valid server
             match StreamMsgType::from_u8(read_data[0]) {
                 StreamMsgType::NewClientAnnounce => {
-                    self.potential_clients.push(conn_id);
+                    self.potential_clients.push(cid.clone());
                     Some(get_stream_msg_size(read_data))
                 }
                 _ => {
@@ -501,7 +486,35 @@ impl Events for ServerState {
                 }
             }
         } else {
-            Some(MESSAGE_HEADER_SIZE - read_data.len())
+            None // Close Connection
+        }
+    }
+
+    fn background_stream_recv(
+        &mut self,
+        _endpoint: &mut Endpoint,
+        cid: &ConnectionId,
+        read_data: &[u8],
+    ) -> Option<usize> {
+        if let Some(vi) = self.find_connection_index_from_cid(cid) {
+            self.client_states[vi].cid.update(cid);
+            if let Some(_msg_type) = self.client_states[vi].bkgd_recv_type.take() {
+                // if self.handle_stream_msg(endpoint, vi, msg_type, read_data) {
+                //     Some(MESSAGE_HEADER_SIZE)
+                // } else {
+                None // Close Connection
+                     // }
+            } else {
+                let new_msg_type = StreamMsgType::from_u8(read_data[0]);
+                if new_msg_type.intended_for_server() {
+                    self.client_states[vi].bkgd_recv_type = Some(new_msg_type);
+                    Some(get_stream_msg_size(read_data))
+                } else {
+                    None
+                }
+            }
+        } else {
+            None // Close Connection
         }
     }
 }
@@ -509,9 +522,9 @@ impl Events for ServerState {
 struct ClientHandler {
     user_name: String,
     command_handler_tick: u64,
-    connection_id: Option<u64>, // Focus Connection ID
-    probable_index: usize,      // Only valid if connection_id.is_some()
-    msg_type_recv: Option<StreamMsgType>,
+    cid_option: Option<ConnectionId>, // Focus Connection ID
+    main_recv_type: Option<StreamMsgType>,
+    background_recv_type: Option<StreamMsgType>,
 }
 
 impl ClientHandler {
@@ -519,9 +532,9 @@ impl ClientHandler {
         ClientHandler {
             user_name,
             command_handler_tick: 0,
-            connection_id: None,
-            probable_index: 0,
-            msg_type_recv: None,
+            cid_option: None,
+            main_recv_type: None,
+            background_recv_type: None,
         }
     }
 
@@ -533,7 +546,7 @@ impl ClientHandler {
     fn handle_stream_msg(
         &mut self,
         _endpoint: &mut Endpoint,
-        _conn_id: u64,
+        _cid: &ConnectionId,
         msg_type: StreamMsgType,
         _read_data: &[u8],
     ) -> bool {
@@ -574,34 +587,23 @@ impl ClientHandler {
 }
 
 impl Events for ClientHandler {
-    fn connection_started(&mut self, endpoint: &mut Endpoint, conn_id: u64, verified_index: usize) {
-        self.send_debug_text("Announcing Self to Server!\n");
+    fn connection_started(&mut self, endpoint: &mut Endpoint, cid: &ConnectionId) {
+        println!("Announcing Self to Server!");
         let mut send_data = self.create_announce_data();
         set_stream_msg_size(&mut send_data);
-        let _ = endpoint.send_reliable_stream_data(conn_id, verified_index, send_data);
+        let _ = endpoint.main_stream_send(cid, send_data);
     }
 
-    fn connection_closing(&mut self, _endpoint: &mut Endpoint, conn_id: u64) {
-        if let Some(my_conn_id) = self.connection_id {
-            if my_conn_id == conn_id {
-                self.connection_id = None;
-                self.probable_index = 0;
-                self.msg_type_recv = None;
-            }
-        }
-    }
-
-    fn connection_closed(
+    fn connection_ended(
         &mut self,
         _endpoint: &mut Endpoint,
-        conn_id: u64,
+        cid: &ConnectionId,
         remaining_connections: usize,
     ) -> bool {
-        if let Some(my_conn_id) = self.connection_id {
-            if my_conn_id == conn_id {
-                self.connection_id = None;
-                self.probable_index = 0;
-                self.msg_type_recv = None;
+        if let Some(my_conn_id) = &self.cid_option {
+            if *my_conn_id == *cid {
+                self.cid_option = None;
+                self.main_recv_type = None;
             }
         }
 
@@ -609,9 +611,16 @@ impl Events for ClientHandler {
         remaining_connections == 0
     }
 
-    fn tick(&mut self, endpoint: &mut Endpoint) -> bool {
-        let _ = endpoint.send_out_ping_past_duration(Duration::from_millis(2000));
+    fn connection_ending_warning(&mut self, _endpoint: &mut Endpoint, cid: &ConnectionId) {
+        if let Some(my_conn_id) = &self.cid_option {
+            if *my_conn_id == *cid {
+                self.cid_option = None;
+                self.main_recv_type = None;
+            }
+        }
+    }
 
+    fn tick(&mut self, _endpoint: &mut Endpoint) -> bool {
         self.command_handler_tick += 1;
         if self.command_handler_tick >= 10 {
             if crossterm::event::poll(std::time::Duration::from_millis(0)).is_ok_and(|v| v) {
@@ -641,44 +650,40 @@ impl Events for ClientHandler {
         self.send_debug_text(text);
     }
 
-    fn reliable_stream_recv(
+    fn main_stream_recv(
         &mut self,
         endpoint: &mut Endpoint,
-        conn_id: u64,
-        verified_index: usize,
+        cid: &ConnectionId,
         read_data: &[u8],
     ) -> Option<usize> {
-        if let Some(my_conn_id) = self.connection_id {
-            if my_conn_id == conn_id {
-                self.probable_index = verified_index;
-                if let Some(msg_type) = self.msg_type_recv.take() {
-                    if self.handle_stream_msg(endpoint, conn_id, msg_type, read_data) {
+        if let Some(my_cid) = &mut self.cid_option {
+            if *my_cid == *cid {
+                my_cid.update(cid);
+                if let Some(msg_type) = self.main_recv_type.take() {
+                    if self.handle_stream_msg(endpoint, cid, msg_type, read_data) {
                         Some(MESSAGE_HEADER_SIZE)
                     } else {
                         None // Close Connection
                     }
                 } else {
                     let new_msg_type = StreamMsgType::from_u8(read_data[0]);
-                    match new_msg_type.intended_for() {
-                        IntendedFor::Client => {
-                            self.msg_type_recv = Some(new_msg_type);
-                            Some(get_stream_msg_size(read_data))
-                        }
-                        _ => {
-                            None // Close Connection
-                        }
+                    if new_msg_type.intended_for_client() {
+                        self.main_recv_type = Some(new_msg_type);
+                        Some(get_stream_msg_size(read_data))
+                    } else {
+                        None // Close Connection
                     }
                 }
             } else {
                 // Weird state to be in considering logic below...
                 None // Close Connection
             }
-        } else if read_data.len() >= MESSAGE_HEADER_SIZE {
+        } else if read_data.len() == MESSAGE_HEADER_SIZE {
             // Check to see if it's a new valid server
             match StreamMsgType::from_u8(read_data[0]) {
                 StreamMsgType::ServerStateRefresh => {
-                    self.connection_id = Some(conn_id);
-                    self.msg_type_recv = Some(StreamMsgType::ServerStateRefresh);
+                    self.cid_option = Some(cid.clone());
+                    self.main_recv_type = Some(StreamMsgType::ServerStateRefresh);
                     Some(get_stream_msg_size(read_data))
                 }
                 _ => {
@@ -686,7 +691,39 @@ impl Events for ClientHandler {
                 }
             }
         } else {
-            Some(MESSAGE_HEADER_SIZE - read_data.len())
+            None // Close Connection
+        }
+    }
+
+    fn background_stream_recv(
+        &mut self,
+        endpoint: &mut Endpoint,
+        cid: &ConnectionId,
+        read_data: &[u8],
+    ) -> Option<usize> {
+        if let Some(my_cid) = &mut self.cid_option {
+            if *my_cid == *cid {
+                my_cid.update(cid);
+                if let Some(msg_type) = self.background_recv_type.take() {
+                    if self.handle_stream_msg(endpoint, cid, msg_type, read_data) {
+                        Some(MESSAGE_HEADER_SIZE)
+                    } else {
+                        None // Close Connection
+                    }
+                } else {
+                    let new_msg_type = StreamMsgType::from_u8(read_data[0]);
+                    if new_msg_type.intended_for_client() {
+                        self.background_recv_type = Some(new_msg_type);
+                        Some(get_stream_msg_size(read_data))
+                    } else {
+                        None // Close Connection
+                    }
+                }
+            } else {
+                None // Close Connection
+            }
+        } else {
+            None // Close Connection
         }
     }
 }

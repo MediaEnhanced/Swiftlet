@@ -39,7 +39,10 @@ use crate::communication::{
     TryRecvError,
 };
 
-use swiftlet_quic::{endpoint::Endpoint, Events, Handler, SocketAddr};
+use swiftlet_quic::{
+    endpoint::{Config, ConnectionId, Endpoint},
+    Events, Handler, SocketAddr,
+};
 
 const MESSAGE_HEADER_SIZE: usize = 3;
 const MAX_MESSAGE_SIZE: usize = 65535;
@@ -57,22 +60,15 @@ enum StreamMsgType {
     MusicIdReady,       // MusicID (1 byte)
     NextMusicPacket,    // Stereo, Music Packet
 
-    // Client Messages:
-    NewClientAnnounce, // ClientNameLen, ClientName
-    NewStateRequest,   // RequestedState
-    MusicRequest,      // MusicID (1 byte)
-
     // General Messages:
     TransferRequest,  // Data_Len_Size (3), TransferIntention (1)
     TransferResponse, // Transfer ID (2)
     TransferData,     // Header (Includes Transfer ID instead of Size) TransferData
-}
 
-enum IntendedFor {
-    Nobody,
-    Client,
-    Server,
-    Anyone,
+    // Client Messages:
+    NewClientAnnounce, // ClientNameLen, ClientName
+    NewStateRequest,   // RequestedState
+    MusicRequest,      // MusicID (1 byte)
 }
 
 impl StreamMsgType {
@@ -115,29 +111,37 @@ impl StreamMsgType {
             StreamMsgType::TransferRequest => StreamMsgType::TransferRequest as u8,
             StreamMsgType::TransferResponse => StreamMsgType::TransferResponse as u8,
             StreamMsgType::TransferData => StreamMsgType::TransferData as u8,
-            _ => IntendedFor::Nobody as u8,
+            _ => StreamMsgType::InvalidType as u8,
         }
     }
 
     #[inline]
-    fn intended_for(&self) -> IntendedFor {
-        match self {
-            StreamMsgType::ServerStateRefresh => IntendedFor::Client,
-            StreamMsgType::NewClient => IntendedFor::Client,
-            StreamMsgType::RemoveClient => IntendedFor::Client,
-            StreamMsgType::ClientNewState => IntendedFor::Client,
-            StreamMsgType::MusicIdReady => IntendedFor::Client,
-            StreamMsgType::NextMusicPacket => IntendedFor::Client,
+    fn intended_for_client(&self) -> bool {
+        matches!(
+            self,
+            StreamMsgType::ServerStateRefresh
+                | StreamMsgType::NewClient
+                | StreamMsgType::RemoveClient
+                | StreamMsgType::ClientNewState
+                | StreamMsgType::MusicIdReady
+                | StreamMsgType::NextMusicPacket
+                | StreamMsgType::TransferRequest
+                | StreamMsgType::TransferResponse
+                | StreamMsgType::TransferData
+        )
+    }
 
-            StreamMsgType::NewClientAnnounce => IntendedFor::Server,
-            StreamMsgType::NewStateRequest => IntendedFor::Server,
-            StreamMsgType::MusicRequest => IntendedFor::Server,
-
-            StreamMsgType::TransferRequest => IntendedFor::Anyone,
-            StreamMsgType::TransferResponse => IntendedFor::Anyone,
-            StreamMsgType::TransferData => IntendedFor::Anyone,
-            _ => IntendedFor::Nobody,
-        }
+    #[inline]
+    fn intended_for_server(&self) -> bool {
+        matches!(
+            self,
+            StreamMsgType::TransferRequest
+                | StreamMsgType::TransferResponse
+                | StreamMsgType::TransferData
+                | StreamMsgType::NewClientAnnounce
+                | StreamMsgType::NewStateRequest
+                | StreamMsgType::MusicRequest
+        )
     }
 
     #[inline]
@@ -265,9 +269,9 @@ struct TransferInfo {
 }
 
 struct ClientState {
-    id: u64,
-    probable_index: usize,
-    msg_type_recv: Option<StreamMsgType>,
+    cid: ConnectionId,
+    main_recv_type: Option<StreamMsgType>,
+    bkgd_recv_type: Option<StreamMsgType>,
     transfers: Vec<TransferInfo>,
     transfer_id_recv: Option<u16>,
     user_name: [u8; MAX_CHAR_LENGTH * 4],
@@ -276,11 +280,11 @@ struct ClientState {
 }
 
 impl ClientState {
-    fn new(conn_id: u64, probable_index: usize, user_name_bytes: &[u8]) -> Option<Self> {
+    fn new(cid: ConnectionId, user_name_bytes: &[u8]) -> Option<Self> {
         let mut cs = ClientState {
-            id: conn_id,
-            probable_index,
-            msg_type_recv: None,
+            cid,
+            main_recv_type: None,
+            bkgd_recv_type: None,
             transfers: Vec::new(),
             transfer_id_recv: None,
             user_name: [0; MAX_CHAR_LENGTH * 4],
@@ -322,7 +326,7 @@ struct ServerState {
     name_len: usize,
     channels: NetworkThreadChannels,
     command_handler_tick: u64,
-    potential_clients: Vec<u64>,
+    potential_clients: Vec<ConnectionId>,
     client_states: Vec<ClientState>,
     next_transfer_id: u16,
     music_storage: Vec<MusicStorage>,
@@ -369,24 +373,9 @@ impl ServerState {
     }
 
     #[inline]
-    fn find_connection_index(&self, conn_id: u64) -> Option<usize> {
+    fn find_connection_index_from_cid(&self, cid: &ConnectionId) -> Option<usize> {
         // Can use binary search later since the client states are ordered by id#
-        self.client_states.iter().position(|cs| cs.id == conn_id)
-    }
-
-    #[inline]
-    fn find_connection_index_with_probable(
-        &self,
-        conn_id: u64,
-        probable_index: usize,
-    ) -> Option<usize> {
-        if probable_index < self.client_states.len()
-            && self.client_states[probable_index].id == conn_id
-        {
-            Some(probable_index)
-        } else {
-            self.client_states.iter().position(|cs| cs.id == conn_id)
-        }
+        self.client_states.iter().position(|cs| cs.cid == *cid)
     }
 
     fn handle_commands(&self, endpoint: &mut Endpoint, cmd: ServerCommand) {
@@ -402,7 +391,7 @@ impl ServerState {
         set_stream_msg_size(&mut send_data);
 
         for cs in self.client_states.iter() {
-            let _ = endpoint.send_reliable_stream_data(cs.id, cs.probable_index, send_data.clone());
+            let _ = endpoint.main_stream_send(&cs.cid, send_data.clone());
         }
 
         self.state_change_update(verified_index);
@@ -458,11 +447,8 @@ impl ServerState {
                     send_data.push(trans_id_bytes[1]);
                     set_stream_msg_size(&mut send_data);
 
-                    let _ = endpoint.send_reliable_stream_data(
-                        self.client_states[verified_index].id,
-                        self.client_states[verified_index].probable_index,
-                        send_data,
-                    );
+                    let _ = endpoint
+                        .main_stream_send(&self.client_states[verified_index].cid, send_data);
                 }
             }
             StreamMsgType::TransferData => {
@@ -485,11 +471,7 @@ impl ServerState {
                                 set_stream_msg_size(&mut send_data);
 
                                 for cs in self.client_states.iter() {
-                                    let _ = endpoint.send_reliable_stream_data(
-                                        cs.id,
-                                        cs.probable_index,
-                                        send_data.clone(),
-                                    );
+                                    let _ = endpoint.main_stream_send(&cs.cid, send_data.clone());
                                 }
                             }
                             _ => {
@@ -509,28 +491,25 @@ impl ServerState {
     fn add_new_verified_connection(
         &mut self,
         endpoint: &mut Endpoint,
-        conn_id: u64,
-        verified_index: usize,
+        cid: &ConnectionId,
         read_data: &[u8],
     ) -> bool {
         let username_len = read_data[0] as usize;
-        if let Some(cs) = ClientState::new(conn_id, verified_index, &read_data[1..username_len + 1])
-        {
+        if let Some(cs) = ClientState::new(cid.clone(), &read_data[1..username_len + 1]) {
             let cs_ind = self.client_states.len();
             self.client_states.push(cs);
 
             // Send new client a state refresh
             let mut send_data = self.create_refresh_data(cs_ind);
             set_stream_msg_size(&mut send_data);
-            let _ = endpoint.send_reliable_stream_data(conn_id, verified_index, send_data);
+            let _ = endpoint.main_stream_send(cid, send_data);
 
             // Send all other clients a msg about the new client
             for (ind, conn) in self.client_states.iter().enumerate() {
                 if ind != cs_ind {
                     let mut send_data = self.create_new_client_data(cs_ind);
                     set_stream_msg_size(&mut send_data);
-                    let _ =
-                        endpoint.send_reliable_stream_data(conn.id, conn.probable_index, send_data);
+                    let _ = endpoint.main_stream_send(&conn.cid, send_data);
                 }
             }
 
@@ -542,8 +521,8 @@ impl ServerState {
         }
     }
 
-    fn remove_connection_state(&mut self, conn_id: u64) -> bool {
-        if let Some(verified_index) = self.find_connection_index(conn_id) {
+    fn remove_connection_state(&mut self, cid: &ConnectionId) -> bool {
+        if let Some(verified_index) = self.find_connection_index_from_cid(cid) {
             self.client_states.remove(verified_index);
             true
         } else {
@@ -618,46 +597,30 @@ impl ServerState {
 }
 
 impl Events for ServerState {
-    fn connection_started(&mut self, endpoint: &mut Endpoint, conn_id: u64, verified_index: usize) {
+    fn connection_started(&mut self, endpoint: &mut Endpoint, cid: &ConnectionId) {
         // Nothing to do until a server gets the first recv data from a potential client
     }
 
-    fn connection_closing(&mut self, endpoint: &mut Endpoint, conn_id: u64) {
-        if self.remove_connection_state(conn_id) {
-            // Temporarily (inefficiently) used for removing of clients
-            for vi in 0..self.client_states.len() {
-                let mut send_data = self.create_refresh_data(vi);
-                set_stream_msg_size(&mut send_data);
-                let _ = endpoint.send_reliable_stream_data(
-                    self.client_states[vi].id,
-                    self.client_states[vi].probable_index,
-                    send_data,
-                );
-            }
-            self.refresh_update();
-        }
-    }
-
-    fn connection_closed(
+    fn connection_ended(
         &mut self,
         endpoint: &mut Endpoint,
-        conn_id: u64,
+        cid: &ConnectionId,
         remaining_connections: usize,
     ) -> bool {
-        if self.remove_connection_state(conn_id) {
+        if self.remove_connection_state(cid) {
             // Temporarily (inefficiently) used for removing of clients
             for vi in 0..self.client_states.len() {
                 let mut send_data = self.create_refresh_data(vi);
                 set_stream_msg_size(&mut send_data);
-                let _ = endpoint.send_reliable_stream_data(
-                    self.client_states[vi].id,
-                    self.client_states[vi].probable_index,
-                    send_data,
-                );
+                let _ = endpoint.main_stream_send(&self.client_states[vi].cid, send_data);
             }
             self.refresh_update();
         }
         false
+    }
+
+    fn connection_ending_warning(&mut self, endpoint: &mut Endpoint, cid: &ConnectionId) {
+        // COULD end earlier in future
     }
 
     fn tick(&mut self, endpoint: &mut Endpoint) -> bool {
@@ -689,9 +652,8 @@ impl Events for ServerState {
                 let mut num_listeners = 0;
                 for cs in self.client_states.iter() {
                     if (cs.state & 2) > 0 {
-                        let _ = endpoint.send_reliable_stream_data(
-                            cs.id,
-                            cs.probable_index,
+                        let _ = endpoint.main_stream_send(
+                            &cs.cid,
                             send_data.clone(), // Makes copies here which isn't ideal
                                                // Especially one more than number of sends
                         );
@@ -727,16 +689,15 @@ impl Events for ServerState {
         self.send_debug_text(text);
     }
 
-    fn reliable_stream_recv(
+    fn main_stream_recv(
         &mut self,
         endpoint: &mut Endpoint,
-        conn_id: u64,
-        verified_index: usize,
+        cid: &ConnectionId,
         read_data: &[u8],
     ) -> Option<usize> {
-        if let Some(vi) = self.find_connection_index(conn_id) {
-            self.client_states[vi].probable_index = verified_index;
-            if let Some(msg_type) = self.client_states[vi].msg_type_recv.take() {
+        if let Some(vi) = self.find_connection_index_from_cid(cid) {
+            self.client_states[vi].cid.update(cid);
+            if let Some(msg_type) = self.client_states[vi].main_recv_type.take() {
                 if self.handle_stream_msg(endpoint, vi, msg_type, read_data) {
                     Some(MESSAGE_HEADER_SIZE)
                 } else {
@@ -744,60 +705,53 @@ impl Events for ServerState {
                 }
             } else {
                 let new_msg_type = StreamMsgType::from_u8(read_data[0]);
-                match new_msg_type.intended_for() {
-                    IntendedFor::Server => {
-                        self.client_states[vi].msg_type_recv = Some(new_msg_type);
-                        Some(get_stream_msg_size(read_data))
-                    }
-                    IntendedFor::Anyone => {
-                        match new_msg_type {
-                            StreamMsgType::TransferData => {
-                                let trans_id = u16::from_ne_bytes([read_data[1], read_data[2]]);
-                                let trans_size_opt = self.client_states[vi]
-                                    .transfers
-                                    .iter()
-                                    .find(|ti| ti.id == trans_id)
-                                    .map(|trans_info| trans_info.size);
+                if new_msg_type.intended_for_server() {
+                    match new_msg_type {
+                        StreamMsgType::TransferData => {
+                            let trans_id = u16::from_ne_bytes([read_data[1], read_data[2]]);
+                            let trans_size_opt = self.client_states[vi]
+                                .transfers
+                                .iter()
+                                .find(|ti| ti.id == trans_id)
+                                .map(|trans_info| trans_info.size);
 
-                                if let Some(trans_size) = trans_size_opt {
-                                    self.client_states[vi].msg_type_recv = Some(new_msg_type);
-                                    self.client_states[vi].transfer_id_recv = Some(trans_id);
+                            if let Some(trans_size) = trans_size_opt {
+                                self.client_states[vi].main_recv_type = Some(new_msg_type);
+                                self.client_states[vi].transfer_id_recv = Some(trans_id);
 
-                                    self.client_states[vi].state |= 0x01;
-                                    self.update_client_state(endpoint, vi);
+                                self.client_states[vi].state |= 0x01;
+                                self.update_client_state(endpoint, vi);
 
-                                    Some(trans_size)
-                                } else {
-                                    None // Close Connection
-                                }
-                            }
-                            _ => {
-                                self.client_states[vi].msg_type_recv = Some(new_msg_type);
-                                Some(get_stream_msg_size(read_data))
+                                Some(trans_size)
+                            } else {
+                                None // Close Connection
                             }
                         }
+                        _ => {
+                            self.client_states[vi].main_recv_type = Some(new_msg_type);
+                            Some(get_stream_msg_size(read_data))
+                        }
                     }
-                    _ => {
-                        None // Close Connection
-                    }
+                } else {
+                    None
                 }
             }
         } else if let Some(pot_ind) = self
             .potential_clients
             .iter()
-            .position(|p_cid| *p_cid == conn_id)
+            .position(|p_cid| *p_cid == *cid)
         {
             self.potential_clients.remove(pot_ind);
-            if self.add_new_verified_connection(endpoint, conn_id, verified_index, read_data) {
+            if self.add_new_verified_connection(endpoint, cid, read_data) {
                 Some(MESSAGE_HEADER_SIZE)
             } else {
                 None // Close Connection
             }
-        } else if read_data.len() >= MESSAGE_HEADER_SIZE {
+        } else if read_data.len() == MESSAGE_HEADER_SIZE {
             // Check to see if it's a new valid server
             match StreamMsgType::from_u8(read_data[0]) {
                 StreamMsgType::NewClientAnnounce => {
-                    self.potential_clients.push(conn_id);
+                    self.potential_clients.push(cid.clone());
                     Some(get_stream_msg_size(read_data))
                 }
                 _ => {
@@ -805,7 +759,59 @@ impl Events for ServerState {
                 }
             }
         } else {
-            Some(MESSAGE_HEADER_SIZE - read_data.len())
+            None // Close Connection
+        }
+    }
+
+    fn background_stream_recv(
+        &mut self,
+        endpoint: &mut Endpoint,
+        cid: &ConnectionId,
+        read_data: &[u8],
+    ) -> Option<usize> {
+        if let Some(vi) = self.find_connection_index_from_cid(cid) {
+            self.client_states[vi].cid.update(cid);
+            if let Some(msg_type) = self.client_states[vi].bkgd_recv_type.take() {
+                if self.handle_stream_msg(endpoint, vi, msg_type, read_data) {
+                    Some(MESSAGE_HEADER_SIZE)
+                } else {
+                    None // Close Connection
+                }
+            } else {
+                let new_msg_type = StreamMsgType::from_u8(read_data[0]);
+                if new_msg_type.intended_for_server() {
+                    match new_msg_type {
+                        StreamMsgType::TransferData => {
+                            let trans_id = u16::from_ne_bytes([read_data[1], read_data[2]]);
+                            let trans_size_opt = self.client_states[vi]
+                                .transfers
+                                .iter()
+                                .find(|ti| ti.id == trans_id)
+                                .map(|trans_info| trans_info.size);
+
+                            if let Some(trans_size) = trans_size_opt {
+                                self.client_states[vi].bkgd_recv_type = Some(new_msg_type);
+                                self.client_states[vi].transfer_id_recv = Some(trans_id);
+
+                                self.client_states[vi].state |= 0x01;
+                                self.update_client_state(endpoint, vi);
+
+                                Some(trans_size)
+                            } else {
+                                None // Close Connection
+                            }
+                        }
+                        _ => {
+                            self.client_states[vi].bkgd_recv_type = Some(new_msg_type);
+                            Some(get_stream_msg_size(read_data))
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+        } else {
+            None // Close Connection
         }
     }
 }
@@ -814,9 +820,9 @@ struct ClientHandler {
     user_name: String,
     channels: NetworkThreadChannels,
     command_handler_tick: u64,
-    connection_id: Option<u64>, // Focus Connection ID
-    probable_index: usize,      // Only valid if connection_id.is_some()
-    msg_type_recv: Option<StreamMsgType>,
+    cid_option: Option<ConnectionId>, // Focus Connection ID
+    main_recv_type: Option<StreamMsgType>,
+    background_recv_type: Option<StreamMsgType>,
     transfer_data: Option<Vec<u8>>,
     audio_channels: NetworkAudioOutputChannels,
 }
@@ -831,9 +837,9 @@ impl ClientHandler {
             user_name,
             channels,
             command_handler_tick: 0,
-            connection_id: None,
-            probable_index: 0,
-            msg_type_recv: None,
+            cid_option: None,
+            main_recv_type: None,
+            background_recv_type: None,
             transfer_data: None,
             audio_channels,
         }
@@ -847,19 +853,18 @@ impl ClientHandler {
     fn handle_commands(&mut self, endpoint: &mut Endpoint, cmd: ClientCommand) {
         match cmd {
             ClientCommand::StateChange(new_state_requested) => {
-                if let Some(conn_id) = self.connection_id {
+                if let Some(cid) = &self.cid_option {
                     let mut send_data = StreamMsgType::NewStateRequest.get_stream_msg();
                     send_data.push(new_state_requested);
                     set_stream_msg_size(&mut send_data);
-                    let _ =
-                        endpoint.send_reliable_stream_data(conn_id, self.probable_index, send_data);
+                    let _ = endpoint.main_stream_send(cid, send_data);
                 }
             }
             ClientCommand::ServerConnect(server_address) => {
                 let _ = endpoint.add_client_connection(server_address, SERVER_NAME);
             }
             ClientCommand::MusicTransfer(od) => {
-                if let Some(conn_id) = self.connection_id {
+                if let Some(cid) = &self.cid_option {
                     if self.transfer_data.is_none() {
                         let mut transfer_data = StreamMsgType::TransferData.get_stream_msg();
                         od.add_to_vec(&mut transfer_data);
@@ -875,11 +880,7 @@ impl ClientHandler {
                         self.transfer_data = Some(transfer_data);
 
                         set_stream_msg_size(&mut send_data);
-                        let _ = endpoint.send_reliable_stream_data(
-                            conn_id,
-                            self.probable_index,
-                            send_data,
-                        );
+                        let _ = endpoint.main_stream_send(cid, send_data);
                     }
                 }
             }
@@ -905,7 +906,7 @@ impl ClientHandler {
     fn handle_stream_msg(
         &mut self,
         endpoint: &mut Endpoint,
-        conn_id: u64,
+        cid: &ConnectionId,
         msg_type: StreamMsgType,
         read_data: &[u8],
     ) -> bool {
@@ -925,8 +926,7 @@ impl ClientHandler {
                     //self.send_debug_text("Got Here\n");
                     t_data[1] = read_data[0];
                     t_data[2] = read_data[1];
-                    let _ =
-                        endpoint.send_reliable_stream_data(conn_id, self.probable_index, t_data);
+                    let _ = endpoint.main_stream_send(cid, t_data);
                 }
             }
             StreamMsgType::MusicIdReady => {
@@ -1026,37 +1026,26 @@ impl ClientHandler {
 }
 
 impl Events for ClientHandler {
-    fn connection_started(&mut self, endpoint: &mut Endpoint, conn_id: u64, verified_index: usize) {
+    fn connection_started(&mut self, endpoint: &mut Endpoint, cid: &ConnectionId) {
         let _ = self
             .channels
             .network_debug_send
             .send("Announcing Self to Server!\n".to_string());
         let mut send_data = self.create_announce_data();
         set_stream_msg_size(&mut send_data);
-        let _ = endpoint.send_reliable_stream_data(conn_id, verified_index, send_data);
+        let _ = endpoint.main_stream_send(cid, send_data);
     }
 
-    fn connection_closing(&mut self, endpoint: &mut Endpoint, conn_id: u64) {
-        if let Some(my_conn_id) = self.connection_id {
-            if my_conn_id == conn_id {
-                self.connection_id = None;
-                self.probable_index = 0;
-                self.msg_type_recv = None;
-            }
-        }
-    }
-
-    fn connection_closed(
+    fn connection_ended(
         &mut self,
         endpoint: &mut Endpoint,
-        conn_id: u64,
+        cid: &ConnectionId,
         remaining_connections: usize,
     ) -> bool {
-        if let Some(my_conn_id) = self.connection_id {
-            if my_conn_id == conn_id {
-                self.connection_id = None;
-                self.probable_index = 0;
-                self.msg_type_recv = None;
+        if let Some(my_conn_id) = &self.cid_option {
+            if *my_conn_id == *cid {
+                self.cid_option = None;
+                self.main_recv_type = None;
             }
         }
 
@@ -1064,8 +1053,17 @@ impl Events for ClientHandler {
         remaining_connections == 0
     }
 
+    fn connection_ending_warning(&mut self, endpoint: &mut Endpoint, cid: &ConnectionId) {
+        if let Some(my_conn_id) = &self.cid_option {
+            if *my_conn_id == *cid {
+                self.cid_option = None;
+                self.main_recv_type = None;
+            }
+        }
+    }
+
     fn tick(&mut self, endpoint: &mut Endpoint) -> bool {
-        let _ = endpoint.send_out_ping_past_duration(Duration::from_millis(2000));
+        //let _ = endpoint.send_out_ping_past_duration(Duration::from_millis(2000));
 
         self.command_handler_tick += 1;
         if self.command_handler_tick >= 10 {
@@ -1076,8 +1074,8 @@ impl Events for ClientHandler {
                         self.handle_commands(endpoint, client_cmd);
                     }
                     Ok(NetworkCommand::Stop(int)) => {
-                        if let Some(conn_id) = self.connection_id {
-                            let _ = endpoint.close_connection(conn_id, self.probable_index, 8);
+                        if let Some(cid) = &self.cid_option {
+                            let _ = endpoint.close_connection(cid, 8);
                         }
                         return true;
                     }
@@ -1095,48 +1093,40 @@ impl Events for ClientHandler {
         self.send_debug_text(text);
     }
 
-    fn reliable_stream_recv(
+    fn main_stream_recv(
         &mut self,
         endpoint: &mut Endpoint,
-        conn_id: u64,
-        verified_index: usize,
+        cid: &ConnectionId,
         read_data: &[u8],
     ) -> Option<usize> {
-        if let Some(my_conn_id) = self.connection_id {
-            if my_conn_id == conn_id {
-                self.probable_index = verified_index;
-                if let Some(msg_type) = self.msg_type_recv.take() {
-                    if self.handle_stream_msg(endpoint, conn_id, msg_type, read_data) {
+        if let Some(my_cid) = &mut self.cid_option {
+            if *my_cid == *cid {
+                my_cid.update(cid);
+                if let Some(msg_type) = self.main_recv_type.take() {
+                    if self.handle_stream_msg(endpoint, cid, msg_type, read_data) {
                         Some(MESSAGE_HEADER_SIZE)
                     } else {
                         None // Close Connection
                     }
                 } else {
                     let new_msg_type = StreamMsgType::from_u8(read_data[0]);
-                    match new_msg_type.intended_for() {
-                        IntendedFor::Client => {
-                            self.msg_type_recv = Some(new_msg_type);
-                            Some(get_stream_msg_size(read_data))
-                        }
-                        IntendedFor::Anyone => {
-                            self.msg_type_recv = Some(new_msg_type);
-                            Some(get_stream_msg_size(read_data))
-                        }
-                        _ => {
-                            None // Close Connection
-                        }
+                    if new_msg_type.intended_for_client() {
+                        self.main_recv_type = Some(new_msg_type);
+                        Some(get_stream_msg_size(read_data))
+                    } else {
+                        None // Close Connection
                     }
                 }
             } else {
                 // Weird state to be in considering logic below...
                 None // Close Connection
             }
-        } else if read_data.len() >= MESSAGE_HEADER_SIZE {
+        } else if read_data.len() == MESSAGE_HEADER_SIZE {
             // Check to see if it's a new valid server
             match StreamMsgType::from_u8(read_data[0]) {
                 StreamMsgType::ServerStateRefresh => {
-                    self.connection_id = Some(conn_id);
-                    self.msg_type_recv = Some(StreamMsgType::ServerStateRefresh);
+                    self.cid_option = Some(cid.clone());
+                    self.main_recv_type = Some(StreamMsgType::ServerStateRefresh);
                     Some(get_stream_msg_size(read_data))
                 }
                 _ => {
@@ -1144,7 +1134,39 @@ impl Events for ClientHandler {
                 }
             }
         } else {
-            Some(MESSAGE_HEADER_SIZE - read_data.len())
+            None // Close Connection
+        }
+    }
+
+    fn background_stream_recv(
+        &mut self,
+        endpoint: &mut Endpoint,
+        cid: &ConnectionId,
+        read_data: &[u8],
+    ) -> Option<usize> {
+        if let Some(my_cid) = &mut self.cid_option {
+            if *my_cid == *cid {
+                my_cid.update(cid);
+                if let Some(msg_type) = self.background_recv_type.take() {
+                    if self.handle_stream_msg(endpoint, cid, msg_type, read_data) {
+                        Some(MESSAGE_HEADER_SIZE)
+                    } else {
+                        None // Close Connection
+                    }
+                } else {
+                    let new_msg_type = StreamMsgType::from_u8(read_data[0]);
+                    if new_msg_type.intended_for_client() {
+                        self.background_recv_type = Some(new_msg_type);
+                        Some(get_stream_msg_size(read_data))
+                    } else {
+                        None // Close Connection
+                    }
+                }
+            } else {
+                None // Close Connection
+            }
+        } else {
+            None // Close Connection
         }
     }
 }
@@ -1163,31 +1185,33 @@ pub(crate) fn server_thread(
         None => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)),
     };
 
-    let server_endpoint = match Endpoint::new_server(
-        bind_address,
-        ALPN_NAME,
-        CERT_PATH,
-        PKEY_PATH,
-        BUFFER_SIZE_PER_CONNECTION,
-    ) {
-        Ok(endpoint) => endpoint,
-        Err(err) => {
-            let _ = channels
-                .network_debug_send
-                .send("Server Endpoint Creation Error!\n".to_string());
-            // Can add more detailed print here later
-            return;
-        }
+    let config = Config {
+        idle_timeout_in_ms: 5000,
+        reliable_stream_buffer: 65536,
+        unreliable_stream_buffer: 65536,
+        keep_alive_timeout: None,
+        initial_main_recv_size: BUFFER_SIZE_PER_CONNECTION,
+        main_recv_first_bytes: MESSAGE_HEADER_SIZE,
+        initial_background_recv_size: 65536,
+        background_recv_first_bytes: MESSAGE_HEADER_SIZE,
     };
+
+    let server_endpoint =
+        match Endpoint::new_server(bind_address, ALPN_NAME, CERT_PATH, PKEY_PATH, config) {
+            Ok(endpoint) => endpoint,
+            Err(err) => {
+                let _ = channels
+                    .network_debug_send
+                    .send("Server Endpoint Creation Error!\n".to_string());
+                // Can add more detailed print here later
+                return;
+            }
+        };
 
     let mut server_state = ServerState::new(server_name, channels);
     server_state.send_debug_text("Starting Server Network!\n");
 
-    let mut rtc_handler = Handler::new(
-        server_endpoint,
-        &mut server_state,
-        BUFFER_SIZE_PER_CONNECTION,
-    );
+    let mut rtc_handler = Handler::new(server_endpoint, &mut server_state);
 
     match rtc_handler.run_event_loop(std::time::Duration::from_millis(5)) {
         Ok(_) => {}
@@ -1212,13 +1236,23 @@ pub(crate) fn client_thread(
         false => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)),
     };
 
+    let config = Config {
+        idle_timeout_in_ms: 5000,
+        reliable_stream_buffer: 65536,
+        unreliable_stream_buffer: 65536,
+        keep_alive_timeout: Some(Duration::from_millis(2000)),
+        initial_main_recv_size: BUFFER_SIZE_PER_CONNECTION,
+        main_recv_first_bytes: MESSAGE_HEADER_SIZE,
+        initial_background_recv_size: 65536,
+        background_recv_first_bytes: MESSAGE_HEADER_SIZE,
+    };
     let client_endpoint = match Endpoint::new_client_with_first_connection(
         bind_address,
         ALPN_NAME,
         CERT_PATH,
         server_address,
         SERVER_NAME,
-        BUFFER_SIZE_PER_CONNECTION,
+        config,
     ) {
         Ok(endpoint) => endpoint,
         Err(err) => {
@@ -1235,11 +1269,7 @@ pub(crate) fn client_thread(
 
     let mut client_handler = ClientHandler::new(user_name, channels, network_audio_out_channels);
     client_handler.send_debug_text("Starting Client Network!\n");
-    let mut rtc_handler = Handler::new(
-        client_endpoint,
-        &mut client_handler,
-        BUFFER_SIZE_PER_CONNECTION,
-    );
+    let mut rtc_handler = Handler::new(client_endpoint, &mut client_handler);
 
     loop {
         // If

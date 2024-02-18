@@ -22,7 +22,7 @@
 
 use crate::SocketAddr;
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 pub(super) use quiche::Config;
 pub(super) use quiche::Error;
@@ -32,8 +32,26 @@ const MAIN_STREAM_ID: u64 = 0; // Bidirectional stream ID# used for reliable com
                                // This stream is started by the Client when it announces itself to the server when it connects to it
 
 const MAIN_STREAM_PRIORITY: u8 = 100;
+const BACKGROUND_STREAM_ID: u64 = 4;
+const BACKGROUND_STREAM_PRIORITY: u8 = 200;
 //const SERVER_REALTIME_START_ID: u64 = 3;
 //const CLIENT_REALTIME_START_ID: u64 = 2;
+
+struct StreamRecv {
+    captured: usize,
+    target: usize,
+    data: Option<Vec<u8>>,
+}
+
+impl StreamRecv {
+    fn new() -> Self {
+        StreamRecv {
+            captured: 0,
+            target: 0,
+            data: None,
+        }
+    }
+}
 
 struct SendBuffer {
     data: Vec<u8>,
@@ -55,10 +73,10 @@ pub(super) struct Connection {
     last_send_instant: Instant, // Used for sending PING / ACK_Elicting if it's been a while
     next_timeout_instant: Option<Instant>,
     established_once: bool,
-    recv_captured: usize,
-    recv_target: usize,
-    recv_data: Option<Vec<u8>>,
-    reliable_send_queue: VecDeque<SendBuffer>,
+    main_recv: StreamRecv,
+    main_send_queue: VecDeque<SendBuffer>,
+    background_recv: StreamRecv,
+    bkgd_send_queue: VecDeque<SendBuffer>,
 }
 
 pub(super) enum RecvResult {
@@ -66,9 +84,10 @@ pub(super) enum RecvResult {
     Draining(u64),
     Established(u64),
     Nothing,
-    ReliableReadTarget(u64),
     Closing(u64),
     ReliableBufferMissing,
+    MainStreamReadable(u64),
+    BkgdStreamReadable(u64),
     StreamReadable((u64, u64)),
 }
 
@@ -193,10 +212,10 @@ impl Connection {
                 last_send_instant: Instant::now(),
                 next_timeout_instant: None,
                 established_once: false,
-                recv_captured: 0,
-                recv_target: 0,
-                recv_data: None,
-                reliable_send_queue: VecDeque::new(),
+                main_recv: StreamRecv::new(),
+                main_send_queue: VecDeque::new(),
+                background_recv: StreamRecv::new(),
+                bkgd_send_queue: VecDeque::new(),
             };
 
             Ok(conn_mgr)
@@ -224,10 +243,10 @@ impl Connection {
                 last_send_instant: Instant::now(),
                 next_timeout_instant: None,
                 established_once: false,
-                recv_captured: 0,
-                recv_target: 0,
-                recv_data: None,
-                reliable_send_queue: VecDeque::new(),
+                main_recv: StreamRecv::new(),
+                main_send_queue: VecDeque::new(),
+                background_recv: StreamRecv::new(),
+                bkgd_send_queue: VecDeque::new(),
             };
 
             Ok(conn_mgr)
@@ -250,12 +269,6 @@ impl Connection {
     ) -> Result<Option<(usize, SocketAddr, Instant)>, Error> {
         match self.connection.send(packet_data) {
             Ok((packet_len, send_info)) => {
-                // let current_instant = Instant::now();
-                // if send_info.at > current_instant {
-                //     self.last_send_instant = send_info.at;
-                // } else {
-                //     self.last_send_instant = current_instant;
-                // }
                 if send_info.at > self.last_send_instant {
                     self.last_send_instant = send_info.at;
                 }
@@ -299,10 +312,10 @@ impl Connection {
         }
     }
 
-    fn stream_reliable_send_next(&mut self) -> Result<usize, Error> {
+    fn main_stream_send_next(&mut self) -> Result<usize, Error> {
         let mut total_bytes_sent = 0;
         loop {
-            if let Some(send_buf) = self.reliable_send_queue.front_mut() {
+            if let Some(send_buf) = self.main_send_queue.front_mut() {
                 match self.connection.stream_send(
                     MAIN_STREAM_ID,
                     &send_buf.data[send_buf.sent..],
@@ -312,7 +325,38 @@ impl Connection {
                         total_bytes_sent += bytes_sent;
                         send_buf.sent += bytes_sent;
                         if send_buf.sent >= send_buf.data.len() {
-                            self.reliable_send_queue.pop_front();
+                            self.main_send_queue.pop_front();
+                        } else {
+                            return Ok(total_bytes_sent);
+                        }
+                    }
+                    Err(Error::Done) => {
+                        return Ok(total_bytes_sent);
+                    }
+                    Err(e) => {
+                        return Err(e);
+                    }
+                }
+            } else {
+                return Ok(total_bytes_sent);
+            }
+        }
+    }
+
+    fn bkgd_stream_send_next(&mut self) -> Result<usize, Error> {
+        let mut total_bytes_sent = 0;
+        loop {
+            if let Some(send_buf) = self.bkgd_send_queue.front_mut() {
+                match self.connection.stream_send(
+                    BACKGROUND_STREAM_ID,
+                    &send_buf.data[send_buf.sent..],
+                    false,
+                ) {
+                    Ok(bytes_sent) => {
+                        total_bytes_sent += bytes_sent;
+                        send_buf.sent += bytes_sent;
+                        if send_buf.sent >= send_buf.data.len() {
+                            self.bkgd_send_queue.pop_front();
                         } else {
                             return Ok(total_bytes_sent);
                         }
@@ -344,26 +388,50 @@ impl Connection {
             } else if self.connection.is_draining() {
                 Ok(RecvResult::Draining(self.id))
             } else {
-                self.stream_reliable_send_next()?;
+                self.main_stream_send_next()?;
+                self.bkgd_stream_send_next()?;
 
                 if let Some(next_readable_stream) = self.connection.stream_readable_next() {
                     if next_readable_stream == MAIN_STREAM_ID {
-                        if self.recv_captured >= self.recv_target {
-                            Ok(RecvResult::ReliableReadTarget(self.id))
-                        } else if let Some(recv_data) = &mut self.recv_data {
+                        if self.main_recv.captured >= self.main_recv.target {
+                            Ok(RecvResult::MainStreamReadable(self.id))
+                        } else if let Some(recv_data) = &mut self.main_recv.data {
                             let (bytes_read, is_finished) = self.connection.stream_recv(
                                 MAIN_STREAM_ID,
-                                &mut recv_data[self.recv_captured..self.recv_target],
+                                &mut recv_data[self.main_recv.captured..self.main_recv.target],
                             )?; // Shouldn't throw a done since it was stated to be readable
                             if !is_finished {
-                                self.recv_captured += bytes_read;
-                                if self.recv_captured >= self.recv_target {
-                                    Ok(RecvResult::ReliableReadTarget(self.id))
+                                self.main_recv.captured += bytes_read;
+                                if self.main_recv.captured >= self.main_recv.target {
+                                    Ok(RecvResult::MainStreamReadable(self.id))
                                 } else {
                                     Ok(RecvResult::Nothing)
                                 }
                             } else {
                                 self.connection.close(false, 1, b"Stream0Finished")?;
+                                Ok(RecvResult::Closing(self.id))
+                            }
+                        } else {
+                            Ok(RecvResult::Nothing)
+                        }
+                    } else if next_readable_stream == BACKGROUND_STREAM_ID {
+                        if self.background_recv.captured >= self.background_recv.target {
+                            Ok(RecvResult::BkgdStreamReadable(self.id))
+                        } else if let Some(recv_data) = &mut self.background_recv.data {
+                            let (bytes_read, is_finished) = self.connection.stream_recv(
+                                BACKGROUND_STREAM_ID,
+                                &mut recv_data
+                                    [self.background_recv.captured..self.background_recv.target],
+                            )?; // Shouldn't throw a done since it was stated to be readable
+                            if !is_finished {
+                                self.background_recv.captured += bytes_read;
+                                if self.background_recv.captured >= self.background_recv.target {
+                                    Ok(RecvResult::BkgdStreamReadable(self.id))
+                                } else {
+                                    Ok(RecvResult::Nothing)
+                                }
+                            } else {
+                                self.connection.close(false, 1, b"Stream4Finished")?;
                                 Ok(RecvResult::Closing(self.id))
                             }
                         } else {
@@ -377,13 +445,6 @@ impl Connection {
                 }
             }
         } else if self.connection.is_established() {
-            self.established_once = true;
-            // Create Streams if it is a Client!
-            if !self.connection.is_server() {
-                // Reliable Stream:
-                self.connection
-                    .stream_priority(MAIN_STREAM_ID, MAIN_STREAM_PRIORITY, true)?;
-            }
             Ok(RecvResult::Established(self.id))
         } else if self.connection.is_closed() {
             Ok(RecvResult::Closed(self.id))
@@ -394,60 +455,132 @@ impl Connection {
         }
     }
 
+    pub(super) fn finish_establishment(
+        &mut self,
+        main_recv_data: Vec<u8>,
+        main_recv_bytes: usize,
+        background_recv_data: Vec<u8>,
+        background_recv_bytes: usize,
+    ) -> Result<(), Error> {
+        // Create streams depending on connection type:
+        if !self.connection.is_server() {
+            self.connection
+                .stream_priority(MAIN_STREAM_ID, MAIN_STREAM_PRIORITY, true)?;
+            self.connection.stream_priority(
+                BACKGROUND_STREAM_ID,
+                BACKGROUND_STREAM_PRIORITY,
+                true,
+            )?;
+        }
+
+        self.main_recv.target = main_recv_bytes;
+        self.main_recv.data = Some(main_recv_data);
+        self.background_recv.target = background_recv_bytes;
+        self.background_recv.data = Some(background_recv_data);
+
+        self.established_once = true;
+        Ok(())
+    }
+
     #[inline]
     pub(super) fn close(&mut self, err: u64, reason: &[u8]) -> Result<bool, Error> {
         self.connection.close(false, err, reason)?;
         Ok(true)
     }
 
-    pub(super) fn send_ping_if_neccessary(&mut self, duration: Duration) -> Result<bool, Error> {
-        if self.last_send_instant + duration <= Instant::now() {
+    pub(super) fn send_ping_if_before_instant(&mut self, instant: Instant) -> Result<bool, Error> {
+        if self.last_send_instant > instant {
+            Ok(false)
+        } else {
             self.connection.send_ack_eliciting()?;
             Ok(true)
-        } else {
-            Ok(false)
         }
     }
 
-    pub(super) fn stream_reliable_send(&mut self, data_vec: Vec<u8>) -> Result<usize, Error> {
-        self.reliable_send_queue
-            .push_back(SendBuffer::new(data_vec));
-        self.stream_reliable_send_next()
+    pub(super) fn main_stream_send(&mut self, data_vec: Vec<u8>) -> Result<usize, Error> {
+        self.main_send_queue.push_back(SendBuffer::new(data_vec));
+        self.main_stream_send_next()
     }
 
-    pub(super) fn stream_reliable_next_read_target(
-        &mut self,
-        next_target: usize,
-        mut data_vec: Vec<u8>,
-    ) {
+    pub(super) fn main_stream_next_target(&mut self, next_target: usize, mut data_vec: Vec<u8>) {
         if next_target > data_vec.len() {
             data_vec.resize(next_target, 0);
         }
-        self.recv_captured = 0;
-        self.recv_target = next_target;
-        self.recv_data = Some(data_vec);
+        self.main_recv.captured = 0;
+        self.main_recv.target = next_target;
+        self.main_recv.data = Some(data_vec);
     }
 
-    pub(super) fn stream_reliable_read(
-        &mut self,
-    ) -> Result<(Option<usize>, Option<Vec<u8>>), Error> {
-        if self.recv_captured >= self.recv_target {
-            Ok((Some(self.recv_target), self.recv_data.take()))
-        } else if let Some(recv_data) = &mut self.recv_data {
+    pub(super) fn main_stream_read(&mut self) -> Result<(Option<usize>, Option<Vec<u8>>), Error> {
+        if self.main_recv.captured >= self.main_recv.target {
+            Ok((Some(self.main_recv.target), self.main_recv.data.take()))
+        } else if let Some(recv_data) = &mut self.main_recv.data {
             match self.connection.stream_recv(
                 MAIN_STREAM_ID,
-                &mut recv_data[self.recv_captured..self.recv_target],
+                &mut recv_data[self.main_recv.captured..self.main_recv.target],
             ) {
                 Ok((bytes_read, is_finished)) => {
                     if !is_finished {
-                        self.recv_captured += bytes_read;
-                        if self.recv_captured >= self.recv_target {
-                            Ok((Some(self.recv_target), self.recv_data.take()))
+                        self.main_recv.captured += bytes_read;
+                        if self.main_recv.captured >= self.main_recv.target {
+                            Ok((Some(self.main_recv.target), self.main_recv.data.take()))
                         } else {
                             Ok((None, None))
                         }
                     } else {
                         self.connection.close(false, 1, b"Stream0Finished")?;
+
+                        // Maybe add closing awareness here later
+                        //Ok(RecvResult::Closing(self.id))
+                        Ok((None, None))
+                    }
+                }
+                Err(Error::Done) => Ok((None, None)),
+                Err(e) => Err(e),
+            }
+        } else {
+            Err(Error::InvalidState) // Temporarily used to indicate No recv_data buffer
+        }
+    }
+
+    pub(super) fn bkgd_stream_send(&mut self, data_vec: Vec<u8>) -> Result<usize, Error> {
+        self.bkgd_send_queue.push_back(SendBuffer::new(data_vec));
+        self.bkgd_stream_send_next()
+    }
+
+    pub(super) fn bkgd_stream_next_target(&mut self, next_target: usize, mut data_vec: Vec<u8>) {
+        if next_target > data_vec.len() {
+            data_vec.resize(next_target, 0);
+        }
+        self.background_recv.captured = 0;
+        self.background_recv.target = next_target;
+        self.background_recv.data = Some(data_vec);
+    }
+
+    pub(super) fn bkgd_stream_read(&mut self) -> Result<(Option<usize>, Option<Vec<u8>>), Error> {
+        if self.background_recv.captured >= self.background_recv.target {
+            Ok((
+                Some(self.background_recv.target),
+                self.background_recv.data.take(),
+            ))
+        } else if let Some(recv_data) = &mut self.background_recv.data {
+            match self.connection.stream_recv(
+                MAIN_STREAM_ID,
+                &mut recv_data[self.background_recv.captured..self.background_recv.target],
+            ) {
+                Ok((bytes_read, is_finished)) => {
+                    if !is_finished {
+                        self.background_recv.captured += bytes_read;
+                        if self.background_recv.captured >= self.background_recv.target {
+                            Ok((
+                                Some(self.background_recv.target),
+                                self.background_recv.data.take(),
+                            ))
+                        } else {
+                            Ok((None, None))
+                        }
+                    } else {
+                        self.connection.close(false, 1, b"Stream4Finished")?;
 
                         // Maybe add closing awareness here later
                         //Ok(RecvResult::Closing(self.id))
