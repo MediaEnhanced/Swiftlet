@@ -95,7 +95,7 @@ pub struct EndpointHandler<'a> {
 
 impl<'a> EndpointHandler<'a> {
     /// Create a QUIC Endpoint Handler by giving it an already created Endpoint
-    /// and a mutable reference of a structure that implements the Endpoint Events Callback trait.
+    /// and a mutable reference of a structure that implements the Endpoint Event Callbacks trait.
     pub fn new(endpoint: Endpoint, events: &'a mut dyn EndpointEventCallbacks) -> Self {
         EndpointHandler {
             current_tick: 0,

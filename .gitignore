@@ -13,6 +13,7 @@ bin/ConnectTest.bat
 
 # Ignored Wireshark security log file
 bin/security/key.log
+quic/examples/security/key.log
 
 # Ignored binaural resources:
 binaural/resources/
