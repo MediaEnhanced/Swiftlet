@@ -20,7 +20,8 @@
 //OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //SOFTWARE.
 
-use crate::SocketAddr;
+// Socket Address format used within the library
+pub use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use ring::rand::*;
@@ -32,37 +33,44 @@ mod connection;
 use connection::{Connection, RecvResult, TimeoutResult};
 
 /// The Endpoint Configuration Structure
+///
+/// Used when creating a new Endpoint
 pub struct Config {
-    /// The quic connection idle timeout in milliseconds
+    /// The quic connection idle timeout in milliseconds.
     pub idle_timeout_in_ms: u64,
 
-    /// The quic connection bidirectional stream receive buffer length in bytes
-    /// These streams are intended for communicating reliable information
+    /// The quic connection bidirectional stream receive buffer length in bytes.
+    ///
+    /// These streams are intended for communicating reliable information.
     /// Most applications should probably set this to a multiple of 65536
     pub reliable_stream_buffer: u64,
 
-    /// The quic connection unidirectional stream receive buffer length in bytes
-    /// These streams are intended for real-time unreliable information
+    /// The quic connection unidirectional stream receive buffer length in bytes.
+    ///
+    /// These streams are intended for real-time unreliable information.
     /// Most applications should probably set this to a multiple of 65536
     pub unreliable_stream_buffer: u64,
 
-    /// The keep alive timeout duration
+    /// The keep alive timeout duration.
+    ///
     /// If there is a value and the duration has passed since the quic connection had recieved anything
-    /// the quic connection will send out a PING to try and keep the connection alive
+    /// the quic connection will send out a PING to try and keep the connection alive.
     pub keep_alive_timeout: Option<Duration>,
 
-    /// The initial main stream recieve buffer size
-    /// This could be set to the max size of the expected data to process if there is enough RAM
+    /// The initial main stream recieve buffer size.
+    ///
+    /// This could be set to the max size of the expected data to process if there is enough RAM.
     pub initial_main_recv_size: usize,
 
-    /// The number of bytes to receive on the main stream before calling main_stream_recv for the first time
+    /// The number of bytes to receive on the main stream before calling main_stream_recv for the first time.
     pub main_recv_first_bytes: usize,
 
-    /// The initial background stream recieve buffer size
-    /// This could be set to the max size of the expected data to process if there is enough RAM
+    /// The initial background stream recieve buffer size.
+    ///
+    /// This could be set to the max size of the expected data to process if there is enough RAM.
     pub initial_background_recv_size: usize,
 
-    /// The number of bytes to receive on the background stream before calling main_stream_recv for the first time
+    /// The number of bytes to receive on the background stream before calling main_stream_recv for the first time.
     pub background_recv_first_bytes: usize,
 }
 
@@ -80,7 +88,8 @@ pub struct Endpoint {
     conn_id_seed_key: ring::hmac::Key, // Value matters ONLY if is_server is true
 }
 
-/// A Connection ID structure to communicate with the endpoint about a specific connection
+/// A Connection ID structure to communicate with the endpoint about a specific connection.
+///
 /// Should be updated so that endpoint function calls are more efficient
 pub struct ConnectionId {
     id: u64,
@@ -105,14 +114,14 @@ impl Clone for ConnectionId {
 impl ConnectionId {
     // Check if this function gets inlined in the future
 
-    /// A way to update the connection id
+    /// A way to update the Connection ID
     pub fn update(&mut self, other: &Self) {
         self.probable_index = other.probable_index;
     }
 }
 
-/// Endpoint Errors
-pub enum EndpointError {
+/// Errors that the QUIC Endpoint can return
+pub enum Error {
     /// Error with the UDP socket creation
     SocketCreation,
     /// Error with the Quic Config Creation
@@ -165,14 +174,14 @@ pub(super) enum EndpointEvent {
 impl Endpoint {
     // Maybe combine new_server and new_client together... but there is hardly any real benefit (and sacrifices readability)
 
-    /// Create a quic server Endpoint
+    /// Create a QUIC Server Endpoint
     pub fn new_server(
         bind_addr: SocketAddr,
         alpn: &[u8],
         cert_path: &str,
         pkey_path: &str,
         config: Config,
-    ) -> Result<Self, EndpointError> {
+    ) -> Result<Self, Error> {
         if let Ok((socket_mgr, local_addr)) = UdpSocket::new(bind_addr) {
             let max_payload_size = udp::TARGET_MAX_DATAGRAM_SIZE;
 
@@ -186,13 +195,13 @@ impl Endpoint {
                 config.unreliable_stream_buffer,
             ) {
                 Ok(cfg) => cfg,
-                Err(_) => return Err(EndpointError::ConfigCreation),
+                Err(_) => return Err(Error::ConfigCreation),
             };
 
             let rand = SystemRandom::new();
             let conn_id_seed_key = match ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rand) {
                 Ok(key) => key,
-                Err(_) => return Err(EndpointError::Randomness),
+                Err(_) => return Err(Error::Randomness),
             };
 
             let endpoint_manager = Endpoint {
@@ -210,17 +219,17 @@ impl Endpoint {
 
             Ok(endpoint_manager)
         } else {
-            Err(EndpointError::SocketCreation)
+            Err(Error::SocketCreation)
         }
     }
 
-    /// Create a quic client Endpoint
+    /// Create a QUIC Client Endpoint
     pub fn new_client(
         bind_addr: SocketAddr,
         alpn: &[u8],
         cert_path: &str,
         config: Config,
-    ) -> Result<Self, EndpointError> {
+    ) -> Result<Self, Error> {
         if let Ok((socket_mgr, local_addr)) = UdpSocket::new(bind_addr) {
             let max_payload_size = udp::TARGET_MAX_DATAGRAM_SIZE;
 
@@ -234,14 +243,14 @@ impl Endpoint {
                 config.unreliable_stream_buffer,
             ) {
                 Ok(cfg) => cfg,
-                Err(_) => return Err(EndpointError::ConfigCreation),
+                Err(_) => return Err(Error::ConfigCreation),
             };
 
             let rand = SystemRandom::new();
             // Following value doesn't matter but its useful for making sure the SystemRandom is working... I guess
             let conn_id_seed_key = match ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rand) {
                 Ok(key) => key,
-                Err(_) => return Err(EndpointError::Randomness),
+                Err(_) => return Err(Error::Randomness),
             };
 
             let endpoint_manager = Endpoint {
@@ -259,7 +268,7 @@ impl Endpoint {
 
             Ok(endpoint_manager)
         } else {
-            Err(EndpointError::SocketCreation)
+            Err(Error::SocketCreation)
         }
     }
 
@@ -277,7 +286,7 @@ impl Endpoint {
         }
     }
 
-    fn send(&mut self, verified_index: usize) -> Result<(u64, u64), EndpointError> {
+    fn send(&mut self, verified_index: usize) -> Result<(u64, u64), Error> {
         let mut immediate_sends = 0;
         let mut delayed_sends = 0;
         loop {
@@ -292,7 +301,7 @@ impl Endpoint {
                             delayed_sends += 1;
                         }
                         Err(_) => {
-                            return Err(EndpointError::SocketSend);
+                            return Err(Error::SocketSend);
                         }
                     }
                 }
@@ -300,7 +309,7 @@ impl Endpoint {
                     return Ok((immediate_sends, delayed_sends));
                 }
                 Err(_) => {
-                    return Err(EndpointError::ConnectionSend);
+                    return Err(Error::ConnectionSend);
                 }
             }
         }
@@ -312,16 +321,18 @@ impl Endpoint {
         self.connections.remove(verified_index);
     }
 
-    /// Add a connection for a client Endpoint
+    /// Add a connection for a Client Endpoint
+    ///
+    /// Must be used on a Client and not a Server otherwise an error will be thrown
     pub fn add_client_connection(
         &mut self,
         peer_addr: SocketAddr,
         server_name: &str,
-    ) -> Result<(), EndpointError> {
+    ) -> Result<(), Error> {
         if !self.is_server {
             let mut scid_data = Connection::get_empty_cid();
             if self.rand.fill(&mut scid_data).is_err() {
-                return Err(EndpointError::Randomness);
+                return Err(Error::Randomness);
             }
 
             match Connection::new(
@@ -340,14 +351,14 @@ impl Endpoint {
                     self.send(verified_index)?;
                     Ok(())
                 }
-                Err(_) => Err(EndpointError::ConnectionCreation),
+                Err(_) => Err(Error::ConnectionCreation),
             }
         } else {
-            Err(EndpointError::IsServer)
+            Err(Error::IsServer)
         }
     }
 
-    /// Create a quic client Endpoint with an initial connection
+    /// Create a QUIC Client Endpoint with an initial connection
     pub fn new_client_with_first_connection(
         bind_addr: SocketAddr,
         alpn: &[u8],
@@ -355,7 +366,7 @@ impl Endpoint {
         peer_addr: SocketAddr,
         server_name: &str,
         config: Config,
-    ) -> Result<Self, EndpointError> {
+    ) -> Result<Self, Error> {
         let mut endpoint_mgr = Endpoint::new_client(bind_addr, alpn, cert_path, config)?;
 
         endpoint_mgr.add_client_connection(peer_addr, server_name)?;
@@ -370,13 +381,14 @@ impl Endpoint {
     }
 
     /// Update the keep alive duration time
+    ///
     /// Will disable the keep alive functionality if set to None
     #[inline]
     pub fn update_keep_alive_duration(&mut self, duration_opt: Option<Duration>) {
         self.config.keep_alive_timeout = duration_opt;
     }
 
-    fn keep_alive(&mut self) -> Result<u64, EndpointError> {
+    fn keep_alive(&mut self) -> Result<u64, Error> {
         let mut num_pings = 0;
         if let Some(duration) = self.config.keep_alive_timeout {
             let before_instant = Instant::now() - duration;
@@ -388,7 +400,7 @@ impl Endpoint {
                         num_pings += 1;
                     }
                     Err(_) => {
-                        return Err(EndpointError::ConnectionPing);
+                        return Err(Error::ConnectionPing);
                     }
                 }
             }
@@ -399,7 +411,7 @@ impl Endpoint {
     pub(super) fn get_next_event(
         &mut self,
         next_tick_instant: Instant,
-    ) -> Result<EndpointEvent, EndpointError> {
+    ) -> Result<EndpointEvent, Error> {
         let mut next_instant = if next_tick_instant > Instant::now() {
             next_tick_instant
         } else {
@@ -416,7 +428,7 @@ impl Endpoint {
                 }
             }
             Err(_) => {
-                return Err(EndpointError::SocketSend);
+                return Err(Error::SocketSend);
             }
         }
 
@@ -481,7 +493,7 @@ impl Endpoint {
                             }
                         }
                         Err(_) => {
-                            return Err(EndpointError::SocketSend);
+                            return Err(Error::SocketSend);
                         }
                     }
                 }
@@ -503,7 +515,7 @@ impl Endpoint {
         } else if send_check_timeout {
             match self.udp.send_check() {
                 Ok(_) => Ok(EndpointEvent::AlreadyHandled),
-                Err(_) => Err(EndpointError::SocketSend),
+                Err(_) => Err(Error::SocketSend),
             }
         } else if let Some(vi) = conn_timeout_opt {
             match self.connections[vi].handle_possible_timeout() {
@@ -532,7 +544,7 @@ impl Endpoint {
         }
     }
 
-    pub(super) fn recv(&mut self) -> Result<EndpointEvent, EndpointError> {
+    pub(super) fn recv(&mut self) -> Result<EndpointEvent, Error> {
         match self.udp.get_next_recv_data() {
             Ok((recv_data, from_addr)) => {
                 // Only bother to look at a datagram that is less than or equal to the target
@@ -628,7 +640,7 @@ impl Endpoint {
                                         )
                                         .is_err()
                                     {
-                                        return Err(EndpointError::StreamCreation);
+                                        return Err(Error::StreamCreation);
                                     }
 
                                     Ok(EndpointEvent::EstablishedOnce(ConnectionId {
@@ -655,7 +667,7 @@ impl Endpoint {
                                     Ok(EndpointEvent::NoUpdate)
                                 }
 
-                                Err(_) => Err(EndpointError::ConnectionRecv),
+                                Err(_) => Err(Error::ConnectionRecv),
                             }
                         } else {
                             Ok(EndpointEvent::NoUpdate)
@@ -669,57 +681,54 @@ impl Endpoint {
                 }
             }
             Err(SocketError::RecvBlocked) => Ok(EndpointEvent::DoneReceiving),
-            Err(_) => Err(EndpointError::SocketRecv),
+            Err(_) => Err(Error::SocketRecv),
         }
     }
 
-    /// Close a connection with a given error code number
-    pub fn close_connection(
-        &mut self,
-        cid: &ConnectionId,
-        error_code: u64,
-    ) -> Result<bool, EndpointError> {
+    /// Close a connection with a given error code value
+    pub fn close_connection(&mut self, cid: &ConnectionId, error_code: u64) -> Result<bool, Error> {
         if let Some(verified_index) = self.find_connection_from_cid(cid) {
             match self.connections[verified_index].close(error_code, b"reason") {
                 Ok(_) => match self.send(verified_index) {
                     Ok(_) => Ok(true),
                     Err(e) => Err(e),
                 },
-                Err(_) => Err(EndpointError::ConnectionClose),
+                Err(_) => Err(Error::ConnectionClose),
             }
         } else {
-            Err(EndpointError::ConnectionNotFound)
+            Err(Error::ConnectionNotFound)
         }
     }
 
     /// Send data over the main stream
+    ///
     /// A reminder that the Endpoint connection will be taking ownership of the data so it can be sent out when possible
     pub fn main_stream_send(
         &mut self,
         cid: &ConnectionId,
         send_data: Vec<u8>,
-    ) -> Result<(u64, u64), EndpointError> {
+    ) -> Result<(u64, u64), Error> {
         if let Some(verified_index) = self.find_connection_from_cid(cid) {
             match self.connections[verified_index].main_stream_send(send_data) {
                 Ok(_) => self.send(verified_index),
-                Err(_) => Err(EndpointError::StreamSend),
+                Err(_) => Err(Error::StreamSend),
             }
         } else {
-            Err(EndpointError::ConnectionNotFound)
+            Err(Error::ConnectionNotFound)
         }
     }
 
     pub(super) fn main_stream_recv(
         &mut self,
         cid: &ConnectionId,
-    ) -> Result<(Option<usize>, Option<Vec<u8>>), EndpointError> {
+    ) -> Result<(Option<usize>, Option<Vec<u8>>), Error> {
         if let Some(verified_index) = self.find_connection_from_cid(cid) {
             match self.connections[verified_index].main_stream_read() {
                 Ok((x, y)) => Ok((x, y)),
-                Err(_) => Err(EndpointError::StreamSend),
+                Err(_) => Err(Error::StreamSend),
             }
         } else {
-            Err(EndpointError::ConnectionNotFound)
+            Err(Error::ConnectionNotFound)
         }
     }
 
@@ -728,43 +737,44 @@ impl Endpoint {
         cid: &ConnectionId,
         next_target: usize,
         vec_data_return: Vec<u8>,
-    ) -> Result<(), EndpointError> {
+    ) -> Result<(), Error> {
         if let Some(verified_index) = self.find_connection_from_cid(cid) {
             self.connections[verified_index].main_stream_next_target(next_target, vec_data_return);
             Ok(())
         } else {
-            Err(EndpointError::ConnectionNotFound)
+            Err(Error::ConnectionNotFound)
         }
     }
 
     /// Send data over the background stream
+    ///
     /// A reminder that the Endpoint connection will be taking ownership of the data so it can be sent out when possible
     pub fn background_stream_send(
         &mut self,
         cid: &ConnectionId,
         send_data: Vec<u8>,
-    ) -> Result<(u64, u64), EndpointError> {
+    ) -> Result<(u64, u64), Error> {
         if let Some(verified_index) = self.find_connection_from_cid(cid) {
             match self.connections[verified_index].bkgd_stream_send(send_data) {
                 Ok(_) => self.send(verified_index),
-                Err(_) => Err(EndpointError::StreamSend),
+                Err(_) => Err(Error::StreamSend),
             }
         } else {
-            Err(EndpointError::ConnectionNotFound)
+            Err(Error::ConnectionNotFound)
         }
     }
 
     pub(super) fn background_stream_recv(
         &mut self,
         cid: &ConnectionId,
-    ) -> Result<(Option<usize>, Option<Vec<u8>>), EndpointError> {
+    ) -> Result<(Option<usize>, Option<Vec<u8>>), Error> {
         if let Some(verified_index) = self.find_connection_from_cid(cid) {
             match self.connections[verified_index].bkgd_stream_read() {
                 Ok((x, y)) => Ok((x, y)),
-                Err(_) => Err(EndpointError::StreamSend),
+                Err(_) => Err(Error::StreamSend),
             }
         } else {
-            Err(EndpointError::ConnectionNotFound)
+            Err(Error::ConnectionNotFound)
         }
     }
 
@@ -773,12 +783,12 @@ impl Endpoint {
         cid: &ConnectionId,
         next_target: usize,
         vec_data_return: Vec<u8>,
-    ) -> Result<(), EndpointError> {
+    ) -> Result<(), Error> {
         if let Some(verified_index) = self.find_connection_from_cid(cid) {
             self.connections[verified_index].bkgd_stream_next_target(next_target, vec_data_return);
             Ok(())
         } else {
-            Err(EndpointError::ConnectionNotFound)
+            Err(Error::ConnectionNotFound)
         }
     }
 }

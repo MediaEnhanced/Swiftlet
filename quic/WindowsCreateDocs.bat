@@ -3,7 +3,7 @@ cls
 
 cargo.exe doc --no-deps
 IF %ERRORLEVEL% NEQ 0 EXIT /b %ERRORLEVEL%
-Robocopy.exe ..\target\doc\ ..\docs
+Robocopy.exe /E /IS ..\target\doc\ ..\docs
 
 echo.
 exit 0

@@ -45,7 +45,7 @@ use communication::{
 
 mod network;
 use cpal::traits::StreamTrait;
-use swiftlet_quic::SocketAddr;
+use swiftlet_quic::endpoint::SocketAddr;
 
 mod audio;
 

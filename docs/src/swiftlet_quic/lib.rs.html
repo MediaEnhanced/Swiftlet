@@ -259,23 +259,6 @@
 <a href="#259" id="259">259</a>
 <a href="#260" id="260">260</a>
 <a href="#261" id="261">261</a>
-<a href="#262" id="262">262</a>
-<a href="#263" id="263">263</a>
-<a href="#264" id="264">264</a>
-<a href="#265" id="265">265</a>
-<a href="#266" id="266">266</a>
-<a href="#267" id="267">267</a>
-<a href="#268" id="268">268</a>
-<a href="#269" id="269">269</a>
-<a href="#270" id="270">270</a>
-<a href="#271" id="271">271</a>
-<a href="#272" id="272">272</a>
-<a href="#273" id="273">273</a>
-<a href="#274" id="274">274</a>
-<a href="#275" id="275">275</a>
-<a href="#276" id="276">276</a>
-<a href="#277" id="277">277</a>
-<a href="#278" id="278">278</a>
 </pre></div><pre class="rust"><code><span class="comment">//Media Enhanced Swiftlet Quic Rust Library for Real-time Internet Communications
 //MIT License
 //Copyright (c) 2024 Jared Loewenthal
@@ -300,39 +283,30 @@
 
 </span><span class="attr">#![deny(missing_docs)]
 
-</span><span class="doccomment">//! Swiftlet Quic Library
+</span><span class="doccomment">//! Providing real-time internet communications using the QUIC protocol!
 //!
-//! Provides real-time internet communications using the quic protocol
-//!
-//!
-//!
+//! Using this QUIC swiftlet sub-library makes it easy to create a single-threaded QUIC endpoint
+//! (server or client) and run an application protocol in response to various events. Both reliable
+//! (time-insensitive) and unreliable (real-time communication) messages are possible to be sent and
+//! received using this library.
 
-</span><span class="comment">// SocketAddr structure expected for programs to use when interfacing with this library
-</span><span class="kw">pub use </span>std::net::SocketAddr;
+/// QUIC Endpoint Module
+</span><span class="kw">pub mod </span>endpoint;
+<span class="kw">use </span>endpoint::{ConnectionId, Endpoint, EndpointEvent, Error};
 
 <span class="kw">use </span>std::time::{Duration, Instant};
 
-<span class="doccomment">/// Quic Endpoint Module
-</span><span class="kw">pub mod </span>endpoint;
-<span class="kw">use </span>endpoint::{ConnectionId, Endpoint, EndpointError, EndpointEvent};
-
-<span class="doccomment">/// Errors that the Quic Handler could return
-</span><span class="kw">pub enum </span>Error {
-    <span class="doccomment">/// Not sure what the error is
-    </span>Unexpected,
-    <span class="doccomment">/// The endpoint had an error
-    </span>EndpointError,
-}
-
-<span class="doccomment">/// Required Quic Handler Event Callback Functions
-/// These functions will get called for their respective events
-</span><span class="kw">pub trait </span>Events {
-    <span class="doccomment">/// Called when a new connection is started and is application ready
+<span class="doccomment">/// Required QUIC Endpoint Handler Event Callback Functions
+///
+/// These functions will get called for their respective events!
+</span><span class="kw">pub trait </span>EndpointEventCallbacks {
+    <span class="doccomment">/// Called when a new connection is started and is application ready.
     </span><span class="kw">fn </span>connection_started(<span class="kw-2">&amp;mut </span><span class="self">self</span>, endpoint: <span class="kw-2">&amp;mut </span>Endpoint, cid: <span class="kw-2">&amp;</span>ConnectionId);
 
-    <span class="doccomment">/// Called when a connection has ended and should be cleaned up
-    /// Return true if you want the Handler event loop to exit
-    /// It will return the reference to the endpoint in that case
+    <span class="doccomment">/// Called when a connection has ended and should be cleaned up.
+    ///
+    /// Return true if you want the Handler event loop to exit.
+    /// It will return the reference to the endpoint in that case.
     </span><span class="kw">fn </span>connection_ended(
         <span class="kw-2">&amp;mut </span><span class="self">self</span>,
         endpoint: <span class="kw-2">&amp;mut </span>Endpoint,
@@ -340,22 +314,18 @@
         remaining_connections: usize,
     ) -&gt; bool;
 
-    <span class="doccomment">/// Called when a connection is in the process of ending and allows an application to clean up relevant states earlier before it fully closes
+    <span class="doccomment">/// Called when a connection is in the process of ending and allows an application to clean up relevant states earlier before it fully closes.
     </span><span class="kw">fn </span>connection_ending_warning(<span class="kw-2">&amp;mut </span><span class="self">self</span>, endpoint: <span class="kw-2">&amp;mut </span>Endpoint, cid: <span class="kw-2">&amp;</span>ConnectionId);
 
-    <span class="doccomment">/// Called when the next tick occurrs based on the tick duration given to the run_event_loop call
+    <span class="doccomment">/// Called when the next tick occurrs based on the tick duration given to the run_event_loop call.
     </span><span class="kw">fn </span>tick(<span class="kw-2">&amp;mut </span><span class="self">self</span>, endpoint: <span class="kw-2">&amp;mut </span>Endpoint) -&gt; bool;
 
-    <span class="doccomment">/// Temporary debug testing callback
-    /// Can be implemented blankly by the application
-    /// Might be removed from this trait in the future
-    </span><span class="kw">fn </span>debug_text(<span class="kw-2">&amp;mut </span><span class="self">self</span>, text: <span class="kw-2">&amp;</span><span class="lifetime">&#39;static </span>str);
-
-    <span class="doccomment">/// Called when there is something to read on the main stream
-    /// The read_data length will be the number of bytes asked for on the previous call
-    /// The first time it is called the length will be the number of bytes set by the Endpoint Config
-    /// Return the number of bytes you want to read the next time this callback is called
-    /// Returning a None will close the connection
+    <span class="doccomment">/// Called when there is something to read on the main stream.
+    ///
+    /// The read_data length will be the number of bytes asked for on the previous call.
+    /// The first time it is called the length will be the number of bytes set by the Endpoint Config.
+    /// Return the number of bytes you want to read the next time this callback is called.
+    /// Returning a None will close the connection.
     </span><span class="kw">fn </span>main_stream_recv(
         <span class="kw-2">&amp;mut </span><span class="self">self</span>,
         endpoint: <span class="kw-2">&amp;mut </span>Endpoint,
@@ -363,11 +333,12 @@
         read_data: <span class="kw-2">&amp;</span>[u8],
     ) -&gt; <span class="prelude-ty">Option</span>&lt;usize&gt;;
 
-    <span class="doccomment">/// Called when there is something to read on the background stream
-    /// The read_data length will be the number of bytes asked for on the previous call
-    /// The first time it is called the length will be the number of bytes set by the Endpoint Config
-    /// Return the number of bytes you want to read the next time this callback is called
-    /// Returning a None will close the connection
+    <span class="doccomment">/// Called when there is something to read on the background stream.
+    ///
+    /// The read_data length will be the number of bytes asked for on the previous call.
+    /// The first time it is called the length will be the number of bytes set by the Endpoint Config.
+    /// Return the number of bytes you want to read the next time this callback is called.
+    /// Returning a None will close the connection.
     </span><span class="kw">fn </span>background_stream_recv(
         <span class="kw-2">&amp;mut </span><span class="self">self</span>,
         endpoint: <span class="kw-2">&amp;mut </span>Endpoint,
@@ -376,26 +347,32 @@
     ) -&gt; <span class="prelude-ty">Option</span>&lt;usize&gt;;
 }
 
-<span class="doccomment">/// Quic Handler Structure
-</span><span class="kw">pub struct </span>Handler&lt;<span class="lifetime">&#39;a</span>&gt; {
+<span class="doccomment">/// Main library structure that handles the QUIC Endpoint
+</span><span class="kw">pub struct </span>EndpointHandler&lt;<span class="lifetime">&#39;a</span>&gt; {
     current_tick: u64,
     endpoint: Endpoint,
-    events: <span class="kw-2">&amp;</span><span class="lifetime">&#39;a </span><span class="kw-2">mut </span><span class="kw">dyn </span>Events,
+    events: <span class="kw-2">&amp;</span><span class="lifetime">&#39;a </span><span class="kw-2">mut </span><span class="kw">dyn </span>EndpointEventCallbacks,
 }
 
-<span class="kw">impl</span>&lt;<span class="lifetime">&#39;a</span>&gt; Handler&lt;<span class="lifetime">&#39;a</span>&gt; {
-    <span class="doccomment">/// Create a Quic Handler by giving it an Endpoint and a mutable reference of a structure that implements the Quic Events Trait
-    </span><span class="kw">pub fn </span>new(endpoint: Endpoint, events: <span class="kw-2">&amp;</span><span class="lifetime">&#39;a </span><span class="kw-2">mut </span><span class="kw">dyn </span>Events) -&gt; <span class="self">Self </span>{
-        Handler {
+<span class="kw">impl</span>&lt;<span class="lifetime">&#39;a</span>&gt; EndpointHandler&lt;<span class="lifetime">&#39;a</span>&gt; {
+    <span class="doccomment">/// Create a QUIC Endpoint Handler by giving it an already created Endpoint
+    /// and a mutable reference of a structure that implements the Endpoint Events Callback trait.
+    </span><span class="kw">pub fn </span>new(endpoint: Endpoint, events: <span class="kw-2">&amp;</span><span class="lifetime">&#39;a </span><span class="kw-2">mut </span><span class="kw">dyn </span>EndpointEventCallbacks) -&gt; <span class="self">Self </span>{
+        EndpointHandler {
             current_tick: <span class="number">0</span>,
             endpoint,
             events,
         }
     }
 
-    <span class="doccomment">/// Quic Handler Event Loop
-    /// Allows the handler to take control of the thread
-    /// Communicates with the application code to the previously passed events
+    <span class="doccomment">/// QUIC Endpoint Handler Event Loop
+    ///
+    /// Allows the endpoint handler to take control of the thread!
+    ///
+    /// Communicates with the application code with the previously passed event callbacks
+    ///
+    /// Tick &quot;0&quot; callback will happen immediately
+    ///
     /// Returns the endpoint reference if this event loop function should be maybe called again
     ///  (ie. run a client endpoint in &quot;low power&quot; mode when it has no connections)
     </span><span class="kw">pub fn </span>run_event_loop(
@@ -430,19 +407,21 @@
                         <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="prelude-val">Some</span>(<span class="kw-2">&amp;mut </span><span class="self">self</span>.endpoint));
                     }
                 }
-                <span class="prelude-val">Ok</span>(EndpointEvent::ConnectionClosing(_cid)) =&gt; {
-                    <span class="comment">// Do nothing right now...?
-                </span>}
+                <span class="prelude-val">Ok</span>(EndpointEvent::ConnectionClosing(cid)) =&gt; {
+                    <span class="self">self</span>.events
+                        .connection_ending_warning(<span class="kw-2">&amp;mut </span><span class="self">self</span>.endpoint, <span class="kw-2">&amp;</span>cid);
+                }
                 <span class="prelude-val">Ok</span>(EndpointEvent::AlreadyHandled) =&gt; {
                     <span class="comment">// Do Nothing and try to call get_next_event ASAP
                 </span>}
-                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; {
-                    <span class="self">self</span>.events.debug_text(<span class="string">&quot;Event Loop Endpoint Error&quot;</span>);
+                <span class="prelude-val">Err</span>(e) =&gt; {
+                    <span class="kw">return </span><span class="prelude-val">Err</span>(e);
                 }
                 <span class="kw">_ </span>=&gt; {
-                    <span class="self">self</span>.events.debug_text(<span class="string">&quot;Unexpected Event Ok 1\n&quot;</span>);
-                    <span class="kw">return </span><span class="prelude-val">Err</span>(Error::Unexpected);
-                }
+                    <span class="comment">// Unexpected case where a panic will happen for now
+                    </span><span class="macro">panic!</span>(<span class="string">&quot;Unexpected Next Event!&quot;</span>);
+                    <span class="comment">// In the future have endpoint isolate the enums instead of one master EndpointEvent
+                </span>}
             }
         }
     }
@@ -454,71 +433,60 @@
                     <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="bool-val">false</span>);
                 }
                 <span class="prelude-val">Ok</span>(EndpointEvent::MainStreamReceived(cid)) =&gt; <span class="kw">loop </span>{
-                    <span class="kw">match </span><span class="self">self</span>.endpoint.main_stream_recv(<span class="kw-2">&amp;</span>cid) {
-                        <span class="prelude-val">Ok</span>((read_bytes_option, vec_option)) =&gt; {
-                            <span class="kw">if let </span><span class="prelude-val">Some</span>(read_bytes) = read_bytes_option {
-                                <span class="kw">let </span>vec_data = <span class="kw">match </span>vec_option {
-                                    <span class="prelude-val">Some</span>(v) =&gt; v,
-                                    <span class="prelude-val">None </span>=&gt; {
-                                        <span class="macro">vec!</span>[<span class="number">0</span>; <span class="number">4096</span>] <span class="comment">// Backup and shouldn&#39;t ever be called
-                                    </span>}
-                                };
-                                <span class="kw">if let </span><span class="prelude-val">Some</span>(next_recv_target) = <span class="self">self</span>.events.main_stream_recv(
-                                    <span class="kw-2">&amp;mut </span><span class="self">self</span>.endpoint,
-                                    <span class="kw-2">&amp;</span>cid,
-                                    <span class="kw-2">&amp;</span>vec_data[..read_bytes],
-                                ) {
-                                    <span class="kw">let _ </span>= <span class="self">self</span>.endpoint.main_stream_set_target(
-                                        <span class="kw-2">&amp;</span>cid,
-                                        next_recv_target,
-                                        vec_data,
-                                    );
-                                } <span class="kw">else </span>{
-                                    <span class="kw">let _ </span>= <span class="self">self</span>.endpoint.close_connection(<span class="kw-2">&amp;</span>cid, <span class="number">16</span>);
-                                    <span class="kw">break</span>;
-                                }
-                            } <span class="kw">else </span>{
-                                <span class="kw">break</span>;
-                            }
-                        }
-                        <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; {
-                            <span class="self">self</span>.events.debug_text(<span class="string">&quot;Stream Read Error!\n&quot;</span>);
+                    <span class="kw">let </span>(read_bytes_option, vec_option) = <span class="self">self</span>.endpoint.main_stream_recv(<span class="kw-2">&amp;</span>cid)<span class="question-mark">?</span>;
+                    <span class="kw">if let </span><span class="prelude-val">Some</span>(read_bytes) = read_bytes_option {
+                        <span class="kw">let </span>vec_data = <span class="kw">match </span>vec_option {
+                            <span class="prelude-val">Some</span>(v) =&gt; v,
+                            <span class="prelude-val">None </span>=&gt; {
+                                <span class="macro">vec!</span>[<span class="number">0</span>; <span class="number">4096</span>] <span class="comment">// Backup and shouldn&#39;t ever be called
+                                              // Maybe a panic or code redesign so this is not even an issue???
+                            </span>}
+                        };
+                        <span class="kw">if let </span><span class="prelude-val">Some</span>(next_recv_target) = <span class="self">self</span>.events.main_stream_recv(
+                            <span class="kw-2">&amp;mut </span><span class="self">self</span>.endpoint,
+                            <span class="kw-2">&amp;</span>cid,
+                            <span class="kw-2">&amp;</span>vec_data[..read_bytes],
+                        ) {
+                            <span class="kw">let _ </span>= <span class="self">self</span>.endpoint.main_stream_set_target(
+                                <span class="kw-2">&amp;</span>cid,
+                                next_recv_target,
+                                vec_data,
+                            );
+                        } <span class="kw">else </span>{
+                            <span class="kw">let _ </span>= <span class="self">self</span>.endpoint.close_connection(<span class="kw-2">&amp;</span>cid, <span class="number">16</span>);
                             <span class="kw">break</span>;
                         }
+                    } <span class="kw">else </span>{
+                        <span class="kw">break</span>;
                     }
                 },
                 <span class="prelude-val">Ok</span>(EndpointEvent::BackgroundStreamReceived(cid)) =&gt; <span class="kw">loop </span>{
-                    <span class="kw">match </span><span class="self">self</span>.endpoint.background_stream_recv(<span class="kw-2">&amp;</span>cid) {
-                        <span class="prelude-val">Ok</span>((read_bytes_option, vec_option)) =&gt; {
-                            <span class="kw">if let </span><span class="prelude-val">Some</span>(read_bytes) = read_bytes_option {
-                                <span class="kw">let </span>vec_data = <span class="kw">match </span>vec_option {
-                                    <span class="prelude-val">Some</span>(v) =&gt; v,
-                                    <span class="prelude-val">None </span>=&gt; {
-                                        <span class="macro">vec!</span>[<span class="number">0</span>; <span class="number">4096</span>] <span class="comment">// Backup and shouldn&#39;t ever be called
-                                    </span>}
-                                };
-                                <span class="kw">if let </span><span class="prelude-val">Some</span>(next_recv_target) = <span class="self">self</span>.events.background_stream_recv(
-                                    <span class="kw-2">&amp;mut </span><span class="self">self</span>.endpoint,
-                                    <span class="kw-2">&amp;</span>cid,
-                                    <span class="kw-2">&amp;</span>vec_data[..read_bytes],
-                                ) {
-                                    <span class="kw">let _ </span>= <span class="self">self</span>.endpoint.background_stream_set_target(
-                                        <span class="kw-2">&amp;</span>cid,
-                                        next_recv_target,
-                                        vec_data,
-                                    );
-                                } <span class="kw">else </span>{
-                                    <span class="kw">let _ </span>= <span class="self">self</span>.endpoint.close_connection(<span class="kw-2">&amp;</span>cid, <span class="number">16</span>);
-                                    <span class="kw">break</span>;
-                                }
-                            } <span class="kw">else </span>{
-                                <span class="kw">break</span>;
-                            }
-                        }
-                        <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; {
-                            <span class="self">self</span>.events.debug_text(<span class="string">&quot;Stream Read Error!\n&quot;</span>);
+                    <span class="kw">let </span>(read_bytes_option, vec_option) =
+                        <span class="self">self</span>.endpoint.background_stream_recv(<span class="kw-2">&amp;</span>cid)<span class="question-mark">?</span>;
+                    <span class="kw">if let </span><span class="prelude-val">Some</span>(read_bytes) = read_bytes_option {
+                        <span class="kw">let </span>vec_data = <span class="kw">match </span>vec_option {
+                            <span class="prelude-val">Some</span>(v) =&gt; v,
+                            <span class="prelude-val">None </span>=&gt; {
+                                <span class="macro">vec!</span>[<span class="number">0</span>; <span class="number">4096</span>] <span class="comment">// Backup and shouldn&#39;t ever be called
+                                              // Maybe a panic or code redesign so this is not even an issue???
+                            </span>}
+                        };
+                        <span class="kw">if let </span><span class="prelude-val">Some</span>(next_recv_target) = <span class="self">self</span>.events.background_stream_recv(
+                            <span class="kw-2">&amp;mut </span><span class="self">self</span>.endpoint,
+                            <span class="kw-2">&amp;</span>cid,
+                            <span class="kw-2">&amp;</span>vec_data[..read_bytes],
+                        ) {
+                            <span class="kw">let _ </span>= <span class="self">self</span>.endpoint.background_stream_set_target(
+                                <span class="kw-2">&amp;</span>cid,
+                                next_recv_target,
+                                vec_data,
+                            );
+                        } <span class="kw">else </span>{
+                            <span class="kw">let _ </span>= <span class="self">self</span>.endpoint.close_connection(<span class="kw-2">&amp;</span>cid, <span class="number">16</span>);
                             <span class="kw">break</span>;
                         }
+                    } <span class="kw">else </span>{
+                        <span class="kw">break</span>;
                     }
                 },
                 <span class="prelude-val">Ok</span>(EndpointEvent::ConnectionClosed(cid)) =&gt; {
@@ -530,9 +498,10 @@
                         <span class="kw">return </span><span class="prelude-val">Ok</span>(<span class="bool-val">true</span>);
                     }
                 }
-                <span class="prelude-val">Ok</span>(EndpointEvent::ConnectionClosing(_cid)) =&gt; {
-                    <span class="comment">// Do nothing right now...?
-                </span>}
+                <span class="prelude-val">Ok</span>(EndpointEvent::ConnectionClosing(cid)) =&gt; {
+                    <span class="self">self</span>.events
+                        .connection_ending_warning(<span class="kw-2">&amp;mut </span><span class="self">self</span>.endpoint, <span class="kw-2">&amp;</span>cid);
+                }
                 <span class="prelude-val">Ok</span>(EndpointEvent::EstablishedOnce(cid)) =&gt; {
                     <span class="self">self</span>.events.connection_started(<span class="kw-2">&amp;mut </span><span class="self">self</span>.endpoint, <span class="kw-2">&amp;</span>cid);
                 }
@@ -540,16 +509,13 @@
                     <span class="comment">// Do nothing and call recv again
                 </span>}
                 <span class="prelude-val">Err</span>(e) =&gt; {
-                    <span class="kw">match </span>e {
-                        EndpointError::StreamRecv =&gt; <span class="self">self</span>.events.debug_text(<span class="string">&quot;Stream Recv Error!\n&quot;</span>),
-                        <span class="kw">_ </span>=&gt; <span class="self">self</span>.events.debug_text(<span class="string">&quot;General Endpoint Recv Error!\n&quot;</span>),
-                    }
-                    <span class="kw">return </span><span class="prelude-val">Err</span>(Error::EndpointError);
+                    <span class="kw">return </span><span class="prelude-val">Err</span>(e);
                 }
                 <span class="prelude-val">Ok</span>(<span class="kw">_</span>) =&gt; {
-                    <span class="self">self</span>.events.debug_text(<span class="string">&quot;Unexpected Event Ok 2\n&quot;</span>);
-                    <span class="kw">return </span><span class="prelude-val">Err</span>(Error::Unexpected);
-                }
+                    <span class="comment">// Unexpected case where a panic will happen for now
+                    </span><span class="macro">panic!</span>(<span class="string">&quot;Unexpected Receive Event!&quot;</span>);
+                    <span class="comment">// In the future have endpoint isolate the enums instead of one master EndpointEvent
+                </span>}
             }
         }
     }

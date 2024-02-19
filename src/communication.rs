@@ -65,7 +65,7 @@ pub(crate) enum NetworkCommand {
 
 pub(crate) enum ClientCommand {
     StateChange(u8),
-    ServerConnect(swiftlet_quic::SocketAddr),
+    ServerConnect(swiftlet_quic::endpoint::SocketAddr),
     MusicTransfer(audio::OpusData),
 }
 

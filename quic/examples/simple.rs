@@ -28,8 +28,8 @@ const PKEY_PATH: &str = "security/pkey.pem"; // Location of the private key for 
 use std::time::Duration;
 
 use swiftlet_quic::{
-    endpoint::{Config, ConnectionId, Endpoint},
-    Events, Handler, SocketAddr,
+    endpoint::{Config, ConnectionId, Endpoint, SocketAddr},
+    EndpointEventCallbacks, EndpointHandler,
 };
 
 const MESSAGE_HEADER_SIZE: usize = 3;
@@ -90,7 +90,7 @@ fn server_thread(port: u16, server_name: String) {
     let mut server_state = ServerState::new(server_name);
     server_state.send_debug_text("Starting Server Network!\n");
 
-    let mut rtc_handler = Handler::new(server_endpoint, &mut server_state);
+    let mut rtc_handler = EndpointHandler::new(server_endpoint, &mut server_state);
 
     match rtc_handler.run_event_loop(std::time::Duration::from_millis(5)) {
         Ok(_) => {}
@@ -139,9 +139,8 @@ fn client_thread(server_address: SocketAddr, user_name: String) {
 
     let mut client_handler = ClientHandler::new(user_name);
     client_handler.send_debug_text("Starting Client Network!\n");
-    let mut rtc_handler = Handler::new(client_endpoint, &mut client_handler);
+    let mut rtc_handler = EndpointHandler::new(client_endpoint, &mut client_handler);
 
-    // If
     match rtc_handler.run_event_loop(std::time::Duration::from_millis(5)) {
         Ok(_) => {}
         Err(_) => {
@@ -384,7 +383,7 @@ impl ServerState {
     }
 }
 
-impl Events for ServerState {
+impl EndpointEventCallbacks for ServerState {
     fn connection_started(&mut self, _endpoint: &mut Endpoint, _cid: &ConnectionId) {
         // Nothing to do until a server gets the first recv data from a potential client
     }
@@ -434,10 +433,6 @@ impl Events for ServerState {
         }
 
         false
-    }
-
-    fn debug_text(&mut self, text: &'static str) {
-        self.send_debug_text(text);
     }
 
     fn main_stream_recv(
@@ -586,7 +581,7 @@ impl ClientHandler {
     }
 }
 
-impl Events for ClientHandler {
+impl EndpointEventCallbacks for ClientHandler {
     fn connection_started(&mut self, endpoint: &mut Endpoint, cid: &ConnectionId) {
         println!("Announcing Self to Server!");
         let mut send_data = self.create_announce_data();
@@ -644,10 +639,6 @@ impl Events for ClientHandler {
         }
 
         false
-    }
-
-    fn debug_text(&mut self, text: &'static str) {
-        self.send_debug_text(text);
     }
 
     fn main_stream_recv(

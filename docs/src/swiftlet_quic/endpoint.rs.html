@@ -782,6 +782,16 @@
 <a href="#782" id="782">782</a>
 <a href="#783" id="783">783</a>
 <a href="#784" id="784">784</a>
+<a href="#785" id="785">785</a>
+<a href="#786" id="786">786</a>
+<a href="#787" id="787">787</a>
+<a href="#788" id="788">788</a>
+<a href="#789" id="789">789</a>
+<a href="#790" id="790">790</a>
+<a href="#791" id="791">791</a>
+<a href="#792" id="792">792</a>
+<a href="#793" id="793">793</a>
+<a href="#794" id="794">794</a>
 </pre></div><pre class="rust"><code><span class="comment">//Media Enhanced Swiftlet Quic Rust Library for Real-time Internet Communications
 //MIT License
 //Copyright (c) 2024 Jared Loewenthal
@@ -804,7 +814,8 @@
 //OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //SOFTWARE.
 
-</span><span class="kw">use </span><span class="kw">crate</span>::SocketAddr;
+// Socket Address format used within the library
+</span><span class="kw">pub use </span>std::net::SocketAddr;
 <span class="kw">use </span>std::time::{Duration, Instant};
 
 <span class="kw">use </span>ring::rand::<span class="kw-2">*</span>;
@@ -816,37 +827,44 @@
 <span class="kw">use </span>connection::{Connection, RecvResult, TimeoutResult};
 
 <span class="doccomment">/// The Endpoint Configuration Structure
+///
+/// Used when creating a new Endpoint
 </span><span class="kw">pub struct </span>Config {
-    <span class="doccomment">/// The quic connection idle timeout in milliseconds
+    <span class="doccomment">/// The quic connection idle timeout in milliseconds.
     </span><span class="kw">pub </span>idle_timeout_in_ms: u64,
 
-    <span class="doccomment">/// The quic connection bidirectional stream receive buffer length in bytes
-    /// These streams are intended for communicating reliable information
+    <span class="doccomment">/// The quic connection bidirectional stream receive buffer length in bytes.
+    ///
+    /// These streams are intended for communicating reliable information.
     /// Most applications should probably set this to a multiple of 65536
     </span><span class="kw">pub </span>reliable_stream_buffer: u64,
 
-    <span class="doccomment">/// The quic connection unidirectional stream receive buffer length in bytes
-    /// These streams are intended for real-time unreliable information
+    <span class="doccomment">/// The quic connection unidirectional stream receive buffer length in bytes.
+    ///
+    /// These streams are intended for real-time unreliable information.
     /// Most applications should probably set this to a multiple of 65536
     </span><span class="kw">pub </span>unreliable_stream_buffer: u64,
 
-    <span class="doccomment">/// The keep alive timeout duration
+    <span class="doccomment">/// The keep alive timeout duration.
+    ///
     /// If there is a value and the duration has passed since the quic connection had recieved anything
-    /// the quic connection will send out a PING to try and keep the connection alive
+    /// the quic connection will send out a PING to try and keep the connection alive.
     </span><span class="kw">pub </span>keep_alive_timeout: <span class="prelude-ty">Option</span>&lt;Duration&gt;,
 
-    <span class="doccomment">/// The initial main stream recieve buffer size
-    /// This could be set to the max size of the expected data to process if there is enough RAM
+    <span class="doccomment">/// The initial main stream recieve buffer size.
+    ///
+    /// This could be set to the max size of the expected data to process if there is enough RAM.
     </span><span class="kw">pub </span>initial_main_recv_size: usize,
 
-    <span class="doccomment">/// The number of bytes to receive on the main stream before calling main_stream_recv for the first time
+    <span class="doccomment">/// The number of bytes to receive on the main stream before calling main_stream_recv for the first time.
     </span><span class="kw">pub </span>main_recv_first_bytes: usize,
 
-    <span class="doccomment">/// The initial background stream recieve buffer size
-    /// This could be set to the max size of the expected data to process if there is enough RAM
+    <span class="doccomment">/// The initial background stream recieve buffer size.
+    ///
+    /// This could be set to the max size of the expected data to process if there is enough RAM.
     </span><span class="kw">pub </span>initial_background_recv_size: usize,
 
-    <span class="doccomment">/// The number of bytes to receive on the background stream before calling main_stream_recv for the first time
+    <span class="doccomment">/// The number of bytes to receive on the background stream before calling main_stream_recv for the first time.
     </span><span class="kw">pub </span>background_recv_first_bytes: usize,
 }
 
@@ -864,7 +882,8 @@
     conn_id_seed_key: ring::hmac::Key, <span class="comment">// Value matters ONLY if is_server is true
 </span>}
 
-<span class="doccomment">/// A Connection ID structure to communicate with the endpoint about a specific connection
+<span class="doccomment">/// A Connection ID structure to communicate with the endpoint about a specific connection.
+///
 /// Should be updated so that endpoint function calls are more efficient
 </span><span class="kw">pub struct </span>ConnectionId {
     id: u64,
@@ -889,14 +908,14 @@
 <span class="kw">impl </span>ConnectionId {
     <span class="comment">// Check if this function gets inlined in the future
 
-    </span><span class="doccomment">/// A way to update the connection id
+    </span><span class="doccomment">/// A way to update the Connection ID
     </span><span class="kw">pub fn </span>update(<span class="kw-2">&amp;mut </span><span class="self">self</span>, other: <span class="kw-2">&amp;</span><span class="self">Self</span>) {
         <span class="self">self</span>.probable_index = other.probable_index;
     }
 }
 
-<span class="doccomment">/// Endpoint Errors
-</span><span class="kw">pub enum </span>EndpointError {
+<span class="doccomment">/// Errors that the QUIC Endpoint can return
+</span><span class="kw">pub enum </span>Error {
     <span class="doccomment">/// Error with the UDP socket creation
     </span>SocketCreation,
     <span class="doccomment">/// Error with the Quic Config Creation
@@ -949,14 +968,14 @@
 <span class="kw">impl </span>Endpoint {
     <span class="comment">// Maybe combine new_server and new_client together... but there is hardly any real benefit (and sacrifices readability)
 
-    </span><span class="doccomment">/// Create a quic server Endpoint
+    </span><span class="doccomment">/// Create a QUIC Server Endpoint
     </span><span class="kw">pub fn </span>new_server(
         bind_addr: SocketAddr,
         alpn: <span class="kw-2">&amp;</span>[u8],
         cert_path: <span class="kw-2">&amp;</span>str,
         pkey_path: <span class="kw-2">&amp;</span>str,
         config: Config,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>, EndpointError&gt; {
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>, Error&gt; {
         <span class="kw">if let </span><span class="prelude-val">Ok</span>((socket_mgr, local_addr)) = UdpSocket::new(bind_addr) {
             <span class="kw">let </span>max_payload_size = udp::TARGET_MAX_DATAGRAM_SIZE;
 
@@ -970,13 +989,13 @@
                 config.unreliable_stream_buffer,
             ) {
                 <span class="prelude-val">Ok</span>(cfg) =&gt; cfg,
-                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(EndpointError::ConfigCreation),
+                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(Error::ConfigCreation),
             };
 
             <span class="kw">let </span>rand = SystemRandom::new();
             <span class="kw">let </span>conn_id_seed_key = <span class="kw">match </span>ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, <span class="kw-2">&amp;</span>rand) {
                 <span class="prelude-val">Ok</span>(key) =&gt; key,
-                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(EndpointError::Randomness),
+                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(Error::Randomness),
             };
 
             <span class="kw">let </span>endpoint_manager = Endpoint {
@@ -994,17 +1013,17 @@
 
             <span class="prelude-val">Ok</span>(endpoint_manager)
         } <span class="kw">else </span>{
-            <span class="prelude-val">Err</span>(EndpointError::SocketCreation)
+            <span class="prelude-val">Err</span>(Error::SocketCreation)
         }
     }
 
-    <span class="doccomment">/// Create a quic client Endpoint
+    <span class="doccomment">/// Create a QUIC Client Endpoint
     </span><span class="kw">pub fn </span>new_client(
         bind_addr: SocketAddr,
         alpn: <span class="kw-2">&amp;</span>[u8],
         cert_path: <span class="kw-2">&amp;</span>str,
         config: Config,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>, EndpointError&gt; {
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>, Error&gt; {
         <span class="kw">if let </span><span class="prelude-val">Ok</span>((socket_mgr, local_addr)) = UdpSocket::new(bind_addr) {
             <span class="kw">let </span>max_payload_size = udp::TARGET_MAX_DATAGRAM_SIZE;
 
@@ -1018,14 +1037,14 @@
                 config.unreliable_stream_buffer,
             ) {
                 <span class="prelude-val">Ok</span>(cfg) =&gt; cfg,
-                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(EndpointError::ConfigCreation),
+                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(Error::ConfigCreation),
             };
 
             <span class="kw">let </span>rand = SystemRandom::new();
             <span class="comment">// Following value doesn&#39;t matter but its useful for making sure the SystemRandom is working... I guess
             </span><span class="kw">let </span>conn_id_seed_key = <span class="kw">match </span>ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, <span class="kw-2">&amp;</span>rand) {
                 <span class="prelude-val">Ok</span>(key) =&gt; key,
-                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(EndpointError::Randomness),
+                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="kw">return </span><span class="prelude-val">Err</span>(Error::Randomness),
             };
 
             <span class="kw">let </span>endpoint_manager = Endpoint {
@@ -1043,7 +1062,7 @@
 
             <span class="prelude-val">Ok</span>(endpoint_manager)
         } <span class="kw">else </span>{
-            <span class="prelude-val">Err</span>(EndpointError::SocketCreation)
+            <span class="prelude-val">Err</span>(Error::SocketCreation)
         }
     }
 
@@ -1061,7 +1080,7 @@
         }
     }
 
-    <span class="kw">fn </span>send(<span class="kw-2">&amp;mut </span><span class="self">self</span>, verified_index: usize) -&gt; <span class="prelude-ty">Result</span>&lt;(u64, u64), EndpointError&gt; {
+    <span class="kw">fn </span>send(<span class="kw-2">&amp;mut </span><span class="self">self</span>, verified_index: usize) -&gt; <span class="prelude-ty">Result</span>&lt;(u64, u64), Error&gt; {
         <span class="kw">let </span><span class="kw-2">mut </span>immediate_sends = <span class="number">0</span>;
         <span class="kw">let </span><span class="kw-2">mut </span>delayed_sends = <span class="number">0</span>;
         <span class="kw">loop </span>{
@@ -1076,7 +1095,7 @@
                             delayed_sends += <span class="number">1</span>;
                         }
                         <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; {
-                            <span class="kw">return </span><span class="prelude-val">Err</span>(EndpointError::SocketSend);
+                            <span class="kw">return </span><span class="prelude-val">Err</span>(Error::SocketSend);
                         }
                     }
                 }
@@ -1084,7 +1103,7 @@
                     <span class="kw">return </span><span class="prelude-val">Ok</span>((immediate_sends, delayed_sends));
                 }
                 <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; {
-                    <span class="kw">return </span><span class="prelude-val">Err</span>(EndpointError::ConnectionSend);
+                    <span class="kw">return </span><span class="prelude-val">Err</span>(Error::ConnectionSend);
                 }
             }
         }
@@ -1096,16 +1115,18 @@
         </span><span class="self">self</span>.connections.remove(verified_index);
     }
 
-    <span class="doccomment">/// Add a connection for a client Endpoint
+    <span class="doccomment">/// Add a connection for a Client Endpoint
+    ///
+    /// Must be used on a Client and not a Server otherwise an error will be thrown
     </span><span class="kw">pub fn </span>add_client_connection(
         <span class="kw-2">&amp;mut </span><span class="self">self</span>,
         peer_addr: SocketAddr,
         server_name: <span class="kw-2">&amp;</span>str,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;(), EndpointError&gt; {
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
         <span class="kw">if </span>!<span class="self">self</span>.is_server {
             <span class="kw">let </span><span class="kw-2">mut </span>scid_data = Connection::get_empty_cid();
             <span class="kw">if </span><span class="self">self</span>.rand.fill(<span class="kw-2">&amp;mut </span>scid_data).is_err() {
-                <span class="kw">return </span><span class="prelude-val">Err</span>(EndpointError::Randomness);
+                <span class="kw">return </span><span class="prelude-val">Err</span>(Error::Randomness);
             }
 
             <span class="kw">match </span>Connection::new(
@@ -1124,14 +1145,14 @@
                     <span class="self">self</span>.send(verified_index)<span class="question-mark">?</span>;
                     <span class="prelude-val">Ok</span>(())
                 }
-                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Err</span>(EndpointError::ConnectionCreation),
+                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Err</span>(Error::ConnectionCreation),
             }
         } <span class="kw">else </span>{
-            <span class="prelude-val">Err</span>(EndpointError::IsServer)
+            <span class="prelude-val">Err</span>(Error::IsServer)
         }
     }
 
-    <span class="doccomment">/// Create a quic client Endpoint with an initial connection
+    <span class="doccomment">/// Create a QUIC Client Endpoint with an initial connection
     </span><span class="kw">pub fn </span>new_client_with_first_connection(
         bind_addr: SocketAddr,
         alpn: <span class="kw-2">&amp;</span>[u8],
@@ -1139,7 +1160,7 @@
         peer_addr: SocketAddr,
         server_name: <span class="kw-2">&amp;</span>str,
         config: Config,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>, EndpointError&gt; {
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="self">Self</span>, Error&gt; {
         <span class="kw">let </span><span class="kw-2">mut </span>endpoint_mgr = Endpoint::new_client(bind_addr, alpn, cert_path, config)<span class="question-mark">?</span>;
 
         endpoint_mgr.add_client_connection(peer_addr, server_name)<span class="question-mark">?</span>;
@@ -1154,13 +1175,14 @@
     }
 
     <span class="doccomment">/// Update the keep alive duration time
+    ///
     /// Will disable the keep alive functionality if set to None
     </span><span class="attr">#[inline]
     </span><span class="kw">pub fn </span>update_keep_alive_duration(<span class="kw-2">&amp;mut </span><span class="self">self</span>, duration_opt: <span class="prelude-ty">Option</span>&lt;Duration&gt;) {
         <span class="self">self</span>.config.keep_alive_timeout = duration_opt;
     }
 
-    <span class="kw">fn </span>keep_alive(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;u64, EndpointError&gt; {
+    <span class="kw">fn </span>keep_alive(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;u64, Error&gt; {
         <span class="kw">let </span><span class="kw-2">mut </span>num_pings = <span class="number">0</span>;
         <span class="kw">if let </span><span class="prelude-val">Some</span>(duration) = <span class="self">self</span>.config.keep_alive_timeout {
             <span class="kw">let </span>before_instant = Instant::now() - duration;
@@ -1172,7 +1194,7 @@
                         num_pings += <span class="number">1</span>;
                     }
                     <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; {
-                        <span class="kw">return </span><span class="prelude-val">Err</span>(EndpointError::ConnectionPing);
+                        <span class="kw">return </span><span class="prelude-val">Err</span>(Error::ConnectionPing);
                     }
                 }
             }
@@ -1183,7 +1205,7 @@
     <span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>get_next_event(
         <span class="kw-2">&amp;mut </span><span class="self">self</span>,
         next_tick_instant: Instant,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;EndpointEvent, EndpointError&gt; {
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;EndpointEvent, Error&gt; {
         <span class="kw">let </span><span class="kw-2">mut </span>next_instant = <span class="kw">if </span>next_tick_instant &gt; Instant::now() {
             next_tick_instant
         } <span class="kw">else </span>{
@@ -1200,7 +1222,7 @@
                 }
             }
             <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; {
-                <span class="kw">return </span><span class="prelude-val">Err</span>(EndpointError::SocketSend);
+                <span class="kw">return </span><span class="prelude-val">Err</span>(Error::SocketSend);
             }
         }
 
@@ -1265,7 +1287,7 @@
                             }
                         }
                         <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; {
-                            <span class="kw">return </span><span class="prelude-val">Err</span>(EndpointError::SocketSend);
+                            <span class="kw">return </span><span class="prelude-val">Err</span>(Error::SocketSend);
                         }
                     }
                 }
@@ -1287,7 +1309,7 @@
         } <span class="kw">else if </span>send_check_timeout {
             <span class="kw">match </span><span class="self">self</span>.udp.send_check() {
                 <span class="prelude-val">Ok</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Ok</span>(EndpointEvent::AlreadyHandled),
-                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Err</span>(EndpointError::SocketSend),
+                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Err</span>(Error::SocketSend),
             }
         } <span class="kw">else if let </span><span class="prelude-val">Some</span>(vi) = conn_timeout_opt {
             <span class="kw">match </span><span class="self">self</span>.connections[vi].handle_possible_timeout() {
@@ -1316,7 +1338,7 @@
         }
     }
 
-    <span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>recv(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;EndpointEvent, EndpointError&gt; {
+    <span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>recv(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;EndpointEvent, Error&gt; {
         <span class="kw">match </span><span class="self">self</span>.udp.get_next_recv_data() {
             <span class="prelude-val">Ok</span>((recv_data, from_addr)) =&gt; {
                 <span class="comment">// Only bother to look at a datagram that is less than or equal to the target
@@ -1412,7 +1434,7 @@
                                         )
                                         .is_err()
                                     {
-                                        <span class="kw">return </span><span class="prelude-val">Err</span>(EndpointError::StreamCreation);
+                                        <span class="kw">return </span><span class="prelude-val">Err</span>(Error::StreamCreation);
                                     }
 
                                     <span class="prelude-val">Ok</span>(EndpointEvent::EstablishedOnce(ConnectionId {
@@ -1439,7 +1461,7 @@
                                     <span class="prelude-val">Ok</span>(EndpointEvent::NoUpdate)
                                 }
 
-                                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Err</span>(EndpointError::ConnectionRecv),
+                                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Err</span>(Error::ConnectionRecv),
                             }
                         } <span class="kw">else </span>{
                             <span class="prelude-val">Ok</span>(EndpointEvent::NoUpdate)
@@ -1453,57 +1475,54 @@
                 }
             }
             <span class="prelude-val">Err</span>(SocketError::RecvBlocked) =&gt; <span class="prelude-val">Ok</span>(EndpointEvent::DoneReceiving),
-            <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Err</span>(EndpointError::SocketRecv),
+            <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Err</span>(Error::SocketRecv),
         }
     }
 
-    <span class="doccomment">/// Close a connection with a given error code number
-    </span><span class="kw">pub fn </span>close_connection(
-        <span class="kw-2">&amp;mut </span><span class="self">self</span>,
-        cid: <span class="kw-2">&amp;</span>ConnectionId,
-        error_code: u64,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;bool, EndpointError&gt; {
+    <span class="doccomment">/// Close a connection with a given error code value
+    </span><span class="kw">pub fn </span>close_connection(<span class="kw-2">&amp;mut </span><span class="self">self</span>, cid: <span class="kw-2">&amp;</span>ConnectionId, error_code: u64) -&gt; <span class="prelude-ty">Result</span>&lt;bool, Error&gt; {
         <span class="kw">if let </span><span class="prelude-val">Some</span>(verified_index) = <span class="self">self</span>.find_connection_from_cid(cid) {
             <span class="kw">match </span><span class="self">self</span>.connections[verified_index].close(error_code, <span class="string">b&quot;reason&quot;</span>) {
                 <span class="prelude-val">Ok</span>(<span class="kw">_</span>) =&gt; <span class="kw">match </span><span class="self">self</span>.send(verified_index) {
                     <span class="prelude-val">Ok</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Ok</span>(<span class="bool-val">true</span>),
                     <span class="prelude-val">Err</span>(e) =&gt; <span class="prelude-val">Err</span>(e),
                 },
-                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Err</span>(EndpointError::ConnectionClose),
+                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Err</span>(Error::ConnectionClose),
             }
         } <span class="kw">else </span>{
-            <span class="prelude-val">Err</span>(EndpointError::ConnectionNotFound)
+            <span class="prelude-val">Err</span>(Error::ConnectionNotFound)
         }
     }
 
     <span class="doccomment">/// Send data over the main stream
+    ///
     /// A reminder that the Endpoint connection will be taking ownership of the data so it can be sent out when possible
     </span><span class="kw">pub fn </span>main_stream_send(
         <span class="kw-2">&amp;mut </span><span class="self">self</span>,
         cid: <span class="kw-2">&amp;</span>ConnectionId,
         send_data: Vec&lt;u8&gt;,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;(u64, u64), EndpointError&gt; {
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;(u64, u64), Error&gt; {
         <span class="kw">if let </span><span class="prelude-val">Some</span>(verified_index) = <span class="self">self</span>.find_connection_from_cid(cid) {
             <span class="kw">match </span><span class="self">self</span>.connections[verified_index].main_stream_send(send_data) {
                 <span class="prelude-val">Ok</span>(<span class="kw">_</span>) =&gt; <span class="self">self</span>.send(verified_index),
-                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Err</span>(EndpointError::StreamSend),
+                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Err</span>(Error::StreamSend),
             }
         } <span class="kw">else </span>{
-            <span class="prelude-val">Err</span>(EndpointError::ConnectionNotFound)
+            <span class="prelude-val">Err</span>(Error::ConnectionNotFound)
         }
     }
 
     <span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>main_stream_recv(
         <span class="kw-2">&amp;mut </span><span class="self">self</span>,
         cid: <span class="kw-2">&amp;</span>ConnectionId,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;(<span class="prelude-ty">Option</span>&lt;usize&gt;, <span class="prelude-ty">Option</span>&lt;Vec&lt;u8&gt;&gt;), EndpointError&gt; {
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;(<span class="prelude-ty">Option</span>&lt;usize&gt;, <span class="prelude-ty">Option</span>&lt;Vec&lt;u8&gt;&gt;), Error&gt; {
         <span class="kw">if let </span><span class="prelude-val">Some</span>(verified_index) = <span class="self">self</span>.find_connection_from_cid(cid) {
             <span class="kw">match </span><span class="self">self</span>.connections[verified_index].main_stream_read() {
                 <span class="prelude-val">Ok</span>((x, y)) =&gt; <span class="prelude-val">Ok</span>((x, y)),
-                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Err</span>(EndpointError::StreamSend),
+                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Err</span>(Error::StreamSend),
             }
         } <span class="kw">else </span>{
-            <span class="prelude-val">Err</span>(EndpointError::ConnectionNotFound)
+            <span class="prelude-val">Err</span>(Error::ConnectionNotFound)
         }
     }
 
@@ -1512,43 +1531,44 @@
         cid: <span class="kw-2">&amp;</span>ConnectionId,
         next_target: usize,
         vec_data_return: Vec&lt;u8&gt;,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;(), EndpointError&gt; {
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
         <span class="kw">if let </span><span class="prelude-val">Some</span>(verified_index) = <span class="self">self</span>.find_connection_from_cid(cid) {
             <span class="self">self</span>.connections[verified_index].main_stream_next_target(next_target, vec_data_return);
             <span class="prelude-val">Ok</span>(())
         } <span class="kw">else </span>{
-            <span class="prelude-val">Err</span>(EndpointError::ConnectionNotFound)
+            <span class="prelude-val">Err</span>(Error::ConnectionNotFound)
         }
     }
 
     <span class="doccomment">/// Send data over the background stream
+    ///
     /// A reminder that the Endpoint connection will be taking ownership of the data so it can be sent out when possible
     </span><span class="kw">pub fn </span>background_stream_send(
         <span class="kw-2">&amp;mut </span><span class="self">self</span>,
         cid: <span class="kw-2">&amp;</span>ConnectionId,
         send_data: Vec&lt;u8&gt;,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;(u64, u64), EndpointError&gt; {
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;(u64, u64), Error&gt; {
         <span class="kw">if let </span><span class="prelude-val">Some</span>(verified_index) = <span class="self">self</span>.find_connection_from_cid(cid) {
             <span class="kw">match </span><span class="self">self</span>.connections[verified_index].bkgd_stream_send(send_data) {
                 <span class="prelude-val">Ok</span>(<span class="kw">_</span>) =&gt; <span class="self">self</span>.send(verified_index),
-                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Err</span>(EndpointError::StreamSend),
+                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Err</span>(Error::StreamSend),
             }
         } <span class="kw">else </span>{
-            <span class="prelude-val">Err</span>(EndpointError::ConnectionNotFound)
+            <span class="prelude-val">Err</span>(Error::ConnectionNotFound)
         }
     }
 
     <span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>background_stream_recv(
         <span class="kw-2">&amp;mut </span><span class="self">self</span>,
         cid: <span class="kw-2">&amp;</span>ConnectionId,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;(<span class="prelude-ty">Option</span>&lt;usize&gt;, <span class="prelude-ty">Option</span>&lt;Vec&lt;u8&gt;&gt;), EndpointError&gt; {
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;(<span class="prelude-ty">Option</span>&lt;usize&gt;, <span class="prelude-ty">Option</span>&lt;Vec&lt;u8&gt;&gt;), Error&gt; {
         <span class="kw">if let </span><span class="prelude-val">Some</span>(verified_index) = <span class="self">self</span>.find_connection_from_cid(cid) {
             <span class="kw">match </span><span class="self">self</span>.connections[verified_index].bkgd_stream_read() {
                 <span class="prelude-val">Ok</span>((x, y)) =&gt; <span class="prelude-val">Ok</span>((x, y)),
-                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Err</span>(EndpointError::StreamSend),
+                <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Err</span>(Error::StreamSend),
             }
         } <span class="kw">else </span>{
-            <span class="prelude-val">Err</span>(EndpointError::ConnectionNotFound)
+            <span class="prelude-val">Err</span>(Error::ConnectionNotFound)
         }
     }
 
@@ -1557,12 +1577,12 @@
         cid: <span class="kw-2">&amp;</span>ConnectionId,
         next_target: usize,
         vec_data_return: Vec&lt;u8&gt;,
-    ) -&gt; <span class="prelude-ty">Result</span>&lt;(), EndpointError&gt; {
+    ) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
         <span class="kw">if let </span><span class="prelude-val">Some</span>(verified_index) = <span class="self">self</span>.find_connection_from_cid(cid) {
             <span class="self">self</span>.connections[verified_index].bkgd_stream_next_target(next_target, vec_data_return);
             <span class="prelude-val">Ok</span>(())
         } <span class="kw">else </span>{
-            <span class="prelude-val">Err</span>(EndpointError::ConnectionNotFound)
+            <span class="prelude-val">Err</span>(Error::ConnectionNotFound)
         }
     }
 }

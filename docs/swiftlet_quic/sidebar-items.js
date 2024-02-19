@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["Error","SocketAddr"],"mod":["endpoint"],"struct":["Handler"],"trait":["Events"]};
+window.SIDEBAR_ITEMS = {"mod":["endpoint"],"struct":["EndpointHandler"],"trait":["EndpointEventCallbacks"]};

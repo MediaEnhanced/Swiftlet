@@ -20,7 +20,7 @@
 //OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //SOFTWARE.
 
-use crate::SocketAddr;
+use crate::endpoint::SocketAddr;
 use std::collections::VecDeque;
 use std::time::Instant;
 
