@@ -56,6 +56,12 @@ fn main() {
     client_thread_handle.join().unwrap();
     server_thread_handle.join().unwrap();
 
+    let google_ipv6_dns_addr_str = String::from("[2001:4860:4860::8888]:53");
+    let remote_address = google_ipv6_dns_addr_str.parse().unwrap();
+    let dns_thread_handle =
+        std::thread::spawn(move || client_thread(remote_address, "DNS-Client".to_string()));
+    dns_thread_handle.join().unwrap();
+
     //crossterm::terminal::disable_raw_mode().unwrap();
 }
 
@@ -612,23 +618,23 @@ impl EndpointEventCallbacks for ClientHandler {
             if *my_conn_id == *cid {
                 self.cid_option = None;
                 self.main_recv_type = None;
-                match reason {
-                    ConnectionEndReason::LocalApplication(code) => println!(
-                        "Client Connection Ended Reason: {:?}: {:?}",
-                        reason,
-                        ErrorCode::from_u64(code)
-                    ),
-                    ConnectionEndReason::PeerApplication(code) => println!(
-                        "Client Connection Ended Reason: {:?}: {:?}",
-                        reason,
-                        ErrorCode::from_u64(code)
-                    ),
-                    _ => println!("Client Connection Ended Reason: {:?}", reason),
-                }
             }
         }
+        match reason {
+            ConnectionEndReason::LocalApplication(code) => println!(
+                "Client Connection Ended Reason: {:?}: {:?}",
+                reason,
+                ErrorCode::from_u64(code)
+            ),
+            ConnectionEndReason::PeerApplication(code) => println!(
+                "Client Connection Ended Reason: {:?}: {:?}",
+                reason,
+                ErrorCode::from_u64(code)
+            ),
+            _ => println!("Client Connection Ended Reason: {:?}", reason),
+        }
 
-        // There might need to be more logic here
+        // Stop the Endpoint Handler event loop if there are zero client connections
         remaining_connections == 0
     }
 

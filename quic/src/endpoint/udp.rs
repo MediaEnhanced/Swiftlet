@@ -256,11 +256,12 @@ impl UdpSocket {
         // } else {
         match self.socket.recv_from(&mut self.read_data) {
             Ok((recv_size, addr_from)) => Ok((&mut self.read_data[..recv_size], addr_from)),
-            Err(err) => {
-                if err.kind() == std::io::ErrorKind::WouldBlock {
+            Err(e) => {
+                let kind = e.kind();
+                if kind == std::io::ErrorKind::WouldBlock {
                     Err(SocketError::RecvBlocked)
                 } else {
-                    Err(SocketError::RecvOtherIssue(err.kind()))
+                    Err(SocketError::RecvOtherIssue(kind))
                 }
             }
         }

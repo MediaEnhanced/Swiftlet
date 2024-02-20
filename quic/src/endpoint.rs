@@ -962,7 +962,7 @@ impl Endpoint {
             }
             Err(SocketError::RecvBlocked) => Ok(RecvEvent::DoneReceiving),
             Err(SocketError::RecvOtherIssue(e)) => Err(Error::SocketRecv(e)),
-            Err(_) => Err(Error::SocketRecv(std::io::ErrorKind::Other)),
+            Err(_) => Err(Error::SocketRecv(std::io::ErrorKind::WouldBlock)),
         }
     }
 
