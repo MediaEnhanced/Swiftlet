@@ -79,23 +79,43 @@ pub(super) struct Connection {
     bkgd_send_queue: VecDeque<SendBuffer>,
 }
 
-pub(super) enum RecvResult {
-    Closed(u64),
-    Draining(u64),
-    Established(u64),
-    Nothing,
-    Closing(u64),
-    ReliableBufferMissing,
-    MainStreamReadable(u64),
-    BkgdStreamReadable(u64),
-    StreamReadable((u64, u64)),
+pub(super) enum CloseOrigin {
+    Unknown, // Uncertain why the connection is closed/closing
+    Timeout, // Connection closed/closing due to Idle Timeout
+    Local,   // Local connection closed itself
+    Peer,    // Peer closed the connection
 }
 
-pub(super) enum TimeoutResult {
-    Nothing(Option<Instant>),
-    Closed(u64),
-    Draining(u64),
-    Happened,
+pub(super) struct CloseInfo {
+    pub(super) id: u64,         // This connection ID
+    pub(super) is_closed: bool, // True only if connection is completely closed
+    pub(super) close_origin: CloseOrigin,
+    // The following parameters don't really apply to a timeout or unknown closure
+    pub(super) is_application_error: bool, // True only if error came from the application
+    pub(super) error_code: u64,            // Code associated with the error
+}
+
+pub(super) enum SendResult {
+    Done,
+    CloseInfo(CloseInfo),
+    DataToSend((usize, SocketAddr, Instant)),
+}
+
+pub(super) enum RecvResult {
+    Nothing,
+    CloseInitiated,
+    Established(u64),
+    StreamProcess(u64),
+}
+
+pub(super) enum StreamResult {
+    Nothing,
+    MainStreamReadable((Vec<u8>, usize)),
+    //RealtimeStreamReadable((Vec<u8>, usize)),
+    RealtimeStreamReadable,
+    BkgdStreamReadable((Vec<u8>, usize)),
+    MainStreamFinished,
+    BkgdStreamFinished,
 }
 
 impl Connection {
@@ -120,7 +140,7 @@ impl Connection {
             config.load_priv_key_from_pem_file(pkey_path)?;
             config.verify_peer(false);
 
-            config.set_initial_max_streams_bidi(3); // 1 For Main Communication, 2 and 3 for Unordered Alt Data (like file transfers)
+            config.set_initial_max_streams_bidi(2); // 1 For Main Communication, 2 and 3 for Unordered Alt Data (like file transfers)
 
             // Enable the ability to log the secret keys for wireshark debugging
             config.log_keys();
@@ -133,7 +153,7 @@ impl Connection {
             config.set_initial_max_streams_bidi(0);
         }
 
-        config.set_initial_max_streams_uni(4); // Not sure... based on future testing
+        config.set_initial_max_streams_uni(100); // Based on 1 second of 10ms Real-time Streams
 
         config.set_max_idle_timeout(idle_timeout_in_ms);
 
@@ -263,26 +283,113 @@ impl Connection {
         self.current_scid.as_ref() == dcid
     }
 
+    // Better way to write this?
+    pub(super) fn get_close_info(&self) -> Option<CloseInfo> {
+        if self.connection.is_closed() {
+            if self.connection.is_timed_out() {
+                Some(CloseInfo {
+                    id: self.id,
+                    is_closed: true,
+                    close_origin: CloseOrigin::Timeout,
+                    is_application_error: false,
+                    error_code: 0,
+                })
+            } else if let Some(conn_info) = self.connection.local_error() {
+                Some(CloseInfo {
+                    id: self.id,
+                    is_closed: true,
+                    close_origin: CloseOrigin::Local,
+                    is_application_error: conn_info.is_app,
+                    error_code: conn_info.error_code,
+                })
+            } else if let Some(conn_info) = self.connection.peer_error() {
+                Some(CloseInfo {
+                    id: self.id,
+                    is_closed: true,
+                    close_origin: CloseOrigin::Peer,
+                    is_application_error: conn_info.is_app,
+                    error_code: conn_info.error_code,
+                })
+            } else {
+                Some(CloseInfo {
+                    id: self.id,
+                    is_closed: true,
+                    close_origin: CloseOrigin::Unknown,
+                    is_application_error: false,
+                    error_code: 0,
+                })
+            }
+        } else if self.connection.is_draining() {
+            if self.connection.is_timed_out() {
+                Some(CloseInfo {
+                    id: self.id,
+                    is_closed: false,
+                    close_origin: CloseOrigin::Timeout,
+                    is_application_error: false,
+                    error_code: 0,
+                })
+            } else if let Some(conn_info) = self.connection.local_error() {
+                Some(CloseInfo {
+                    id: self.id,
+                    is_closed: false,
+                    close_origin: CloseOrigin::Local,
+                    is_application_error: conn_info.is_app,
+                    error_code: conn_info.error_code,
+                })
+            } else if let Some(conn_info) = self.connection.peer_error() {
+                Some(CloseInfo {
+                    id: self.id,
+                    is_closed: false,
+                    close_origin: CloseOrigin::Peer,
+                    is_application_error: conn_info.is_app,
+                    error_code: conn_info.error_code,
+                })
+            } else {
+                Some(CloseInfo {
+                    id: self.id,
+                    is_closed: false,
+                    close_origin: CloseOrigin::Unknown,
+                    is_application_error: false,
+                    error_code: 0,
+                })
+            }
+        } else {
+            None
+        }
+    }
+
     pub(super) fn get_next_send_packet(
         &mut self,
         packet_data: &mut [u8],
-    ) -> Result<Option<(usize, SocketAddr, Instant)>, Error> {
+    ) -> Result<SendResult, Error> {
         match self.connection.send(packet_data) {
             Ok((packet_len, send_info)) => {
                 if send_info.at > self.last_send_instant {
                     self.last_send_instant = send_info.at;
                 }
-                Ok(Some((packet_len, send_info.to, send_info.at)))
+                Ok(SendResult::DataToSend((
+                    packet_len,
+                    send_info.to,
+                    send_info.at,
+                )))
             }
             Err(quiche::Error::Done) => {
-                self.next_timeout_instant = self.connection.timeout_instant();
-                Ok(None)
+                if let Some(close_info) = self.get_close_info() {
+                    if !close_info.is_closed {
+                        self.next_timeout_instant = self.connection.timeout_instant();
+                    }
+                    Ok(SendResult::CloseInfo(close_info))
+                } else {
+                    self.next_timeout_instant = self.connection.timeout_instant();
+                    Ok(SendResult::Done)
+                }
             }
             Err(e) => Err(e),
         }
     }
 
-    pub(super) fn handle_possible_timeout(&mut self) -> TimeoutResult {
+    // Returns None when a timeout occurred
+    pub(super) fn handle_possible_timeout(&mut self) -> Option<Option<Instant>> {
         if let Some(timeout_instant) = self.next_timeout_instant {
             let now = Instant::now();
             if timeout_instant <= now {
@@ -291,25 +398,12 @@ impl Connection {
                 if let Some(timeout_verify) = self.next_timeout_instant {
                     if timeout_verify <= now {
                         self.connection.on_timeout();
-                        if self.connection.is_closed() {
-                            TimeoutResult::Closed(self.id)
-                        } else if self.connection.is_draining() {
-                            TimeoutResult::Draining(self.id)
-                        } else {
-                            TimeoutResult::Happened
-                        }
-                    } else {
-                        TimeoutResult::Nothing(self.next_timeout_instant)
+                        return None;
                     }
-                } else {
-                    TimeoutResult::Nothing(self.next_timeout_instant)
                 }
-            } else {
-                TimeoutResult::Nothing(self.next_timeout_instant)
             }
-        } else {
-            TimeoutResult::Nothing(self.next_timeout_instant)
         }
+        Some(self.next_timeout_instant)
     }
 
     fn main_stream_send_next(&mut self) -> Result<usize, Error> {
@@ -374,82 +468,32 @@ impl Connection {
         }
     }
 
-    pub(super) fn recv_data_process(
+    pub(super) fn recv_data(
         &mut self,
         data: &mut [u8],
         from_addr: SocketAddr,
     ) -> Result<RecvResult, Error> {
         self.recv_info.from = from_addr;
-        let _ = self.connection.recv(data, self.recv_info)?;
-        // Maybe check bytes_processed in future
-        if self.established_once {
-            if self.connection.is_closed() {
-                Ok(RecvResult::Closed(self.id))
-            } else if self.connection.is_draining() {
-                Ok(RecvResult::Draining(self.id))
-            } else {
-                self.main_stream_send_next()?;
-                self.bkgd_stream_send_next()?;
-
-                if let Some(next_readable_stream) = self.connection.stream_readable_next() {
-                    if next_readable_stream == MAIN_STREAM_ID {
-                        if self.main_recv.captured >= self.main_recv.target {
-                            Ok(RecvResult::MainStreamReadable(self.id))
-                        } else if let Some(recv_data) = &mut self.main_recv.data {
-                            let (bytes_read, is_finished) = self.connection.stream_recv(
-                                MAIN_STREAM_ID,
-                                &mut recv_data[self.main_recv.captured..self.main_recv.target],
-                            )?; // Shouldn't throw a done since it was stated to be readable
-                            if !is_finished {
-                                self.main_recv.captured += bytes_read;
-                                if self.main_recv.captured >= self.main_recv.target {
-                                    Ok(RecvResult::MainStreamReadable(self.id))
-                                } else {
-                                    Ok(RecvResult::Nothing)
-                                }
-                            } else {
-                                self.connection.close(false, 1, b"Stream0Finished")?;
-                                Ok(RecvResult::Closing(self.id))
-                            }
-                        } else {
-                            Ok(RecvResult::Nothing)
-                        }
-                    } else if next_readable_stream == BACKGROUND_STREAM_ID {
-                        if self.background_recv.captured >= self.background_recv.target {
-                            Ok(RecvResult::BkgdStreamReadable(self.id))
-                        } else if let Some(recv_data) = &mut self.background_recv.data {
-                            let (bytes_read, is_finished) = self.connection.stream_recv(
-                                BACKGROUND_STREAM_ID,
-                                &mut recv_data
-                                    [self.background_recv.captured..self.background_recv.target],
-                            )?; // Shouldn't throw a done since it was stated to be readable
-                            if !is_finished {
-                                self.background_recv.captured += bytes_read;
-                                if self.background_recv.captured >= self.background_recv.target {
-                                    Ok(RecvResult::BkgdStreamReadable(self.id))
-                                } else {
-                                    Ok(RecvResult::Nothing)
-                                }
-                            } else {
-                                self.connection.close(false, 1, b"Stream4Finished")?;
-                                Ok(RecvResult::Closing(self.id))
-                            }
-                        } else {
-                            Ok(RecvResult::Nothing)
-                        }
-                    } else {
-                        Ok(RecvResult::StreamReadable((self.id, next_readable_stream)))
-                    }
-                } else {
-                    Ok(RecvResult::ReliableBufferMissing)
-                }
+        if let Err(e) = self.connection.recv(data, self.recv_info) {
+            // if let Some(local_err) = self.connection.local_error() {
+            //     Some(CloseInfo {
+            //         id: self.id,
+            //         is_closed: false,
+            //         close_origin: CloseOrigin::Local,
+            //         is_application_error: local_err.is_app,
+            //         error_code: local_err.error_code,
+            //     })
+            // }
+            if self.connection.local_error().is_some() {
+                return Ok(RecvResult::CloseInitiated);
             }
+            return Err(e);
+        }
+
+        if self.established_once {
+            Ok(RecvResult::StreamProcess(self.id))
         } else if self.connection.is_established() {
             Ok(RecvResult::Established(self.id))
-        } else if self.connection.is_closed() {
-            Ok(RecvResult::Closed(self.id))
-        } else if self.connection.is_draining() {
-            Ok(RecvResult::Draining(self.id))
         } else {
             Ok(RecvResult::Nothing)
         }
@@ -482,18 +526,98 @@ impl Connection {
         Ok(())
     }
 
+    // A returned Error::InvalidState indicates something went wrong with the read process
+    pub(super) fn stream_process(&mut self) -> Result<StreamResult, Error> {
+        self.main_stream_send_next()?;
+        self.bkgd_stream_send_next()?;
+
+        if let Some(next_readable_stream) = self.connection.stream_readable_next() {
+            if next_readable_stream == MAIN_STREAM_ID {
+                if let Some(mut recv_data) = self.main_recv.data.take() {
+                    let (bytes_read, is_finished) = self.connection.stream_recv(
+                        MAIN_STREAM_ID,
+                        &mut recv_data[self.main_recv.captured..self.main_recv.target],
+                    )?; // Shouldn't throw a done since it was stated to be readable
+                    if !is_finished {
+                        self.main_recv.captured += bytes_read;
+                        #[allow(clippy::comparison_chain)]
+                        if self.main_recv.captured == self.main_recv.target {
+                            Ok(StreamResult::MainStreamReadable((
+                                recv_data,
+                                self.main_recv.target,
+                            )))
+                        } else if self.main_recv.captured < self.main_recv.target {
+                            self.main_recv.data = Some(recv_data);
+                            Ok(StreamResult::Nothing)
+                        } else {
+                            Err(Error::InvalidState)
+                        }
+                    } else {
+                        //self.connection.close(false, 1, b"Stream0Finished")?;
+                        Ok(StreamResult::MainStreamFinished)
+                    }
+                } else {
+                    Err(Error::InvalidState)
+                }
+            } else if next_readable_stream == BACKGROUND_STREAM_ID {
+                if let Some(mut recv_data) = self.background_recv.data.take() {
+                    let (bytes_read, is_finished) = self.connection.stream_recv(
+                        BACKGROUND_STREAM_ID,
+                        &mut recv_data[self.background_recv.captured..self.background_recv.target],
+                    )?; // Shouldn't throw a done since it was stated to be readable
+                    if !is_finished {
+                        self.background_recv.captured += bytes_read;
+                        #[allow(clippy::comparison_chain)]
+                        if self.background_recv.captured == self.background_recv.target {
+                            Ok(StreamResult::BkgdStreamReadable((
+                                recv_data,
+                                self.background_recv.target,
+                            )))
+                        } else if self.background_recv.captured < self.background_recv.target {
+                            self.background_recv.data = Some(recv_data);
+                            Ok(StreamResult::Nothing)
+                        } else {
+                            Err(Error::InvalidState)
+                        }
+                    } else {
+                        //self.connection.close(false, 1, b"Stream4Finished")?;
+                        Ok(StreamResult::BkgdStreamFinished)
+                    }
+                } else {
+                    Err(Error::InvalidState)
+                }
+            } else {
+                Ok(StreamResult::RealtimeStreamReadable)
+            }
+        } else {
+            Ok(StreamResult::Nothing)
+        }
+    }
+
+    // Endpoint Connection Close Error Code
     #[inline]
     pub(super) fn close(&mut self, err: u64, reason: &[u8]) -> Result<bool, Error> {
         self.connection.close(false, err, reason)?;
         Ok(true)
     }
 
+    // Application Connection Close Error Code
+    #[inline]
+    pub(super) fn app_close(&mut self, err: u64, reason: &[u8]) -> Result<bool, Error> {
+        self.connection.close(true, err, reason)?;
+        Ok(true)
+    }
+
     pub(super) fn send_ping_if_before_instant(&mut self, instant: Instant) -> Result<bool, Error> {
-        if self.last_send_instant > instant {
-            Ok(false)
+        if self.established_once {
+            if self.last_send_instant > instant {
+                Ok(false)
+            } else {
+                self.connection.send_ack_eliciting()?;
+                Ok(true)
+            }
         } else {
-            self.connection.send_ack_eliciting()?;
-            Ok(true)
+            Ok(false)
         }
     }
 
@@ -502,44 +626,44 @@ impl Connection {
         self.main_stream_send_next()
     }
 
-    pub(super) fn main_stream_next_target(&mut self, next_target: usize, mut data_vec: Vec<u8>) {
-        if next_target > data_vec.len() {
-            data_vec.resize(next_target, 0);
+    // A returned Error::InvalidState indicates something went wrong with the read process
+    // A returned Error::Done indicates the stream finished
+    pub(super) fn main_stream_read(
+        &mut self,
+        mut data_vec: Vec<u8>,
+        target_len: usize,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        if target_len > data_vec.len() {
+            data_vec.resize(target_len, 0);
         }
-        self.main_recv.captured = 0;
-        self.main_recv.target = next_target;
-        self.main_recv.data = Some(data_vec);
-    }
-
-    pub(super) fn main_stream_read(&mut self) -> Result<(Option<usize>, Option<Vec<u8>>), Error> {
-        if self.main_recv.captured >= self.main_recv.target {
-            Ok((Some(self.main_recv.target), self.main_recv.data.take()))
-        } else if let Some(recv_data) = &mut self.main_recv.data {
-            match self.connection.stream_recv(
-                MAIN_STREAM_ID,
-                &mut recv_data[self.main_recv.captured..self.main_recv.target],
-            ) {
-                Ok((bytes_read, is_finished)) => {
-                    if !is_finished {
-                        self.main_recv.captured += bytes_read;
-                        if self.main_recv.captured >= self.main_recv.target {
-                            Ok((Some(self.main_recv.target), self.main_recv.data.take()))
-                        } else {
-                            Ok((None, None))
-                        }
+        match self
+            .connection
+            .stream_recv(MAIN_STREAM_ID, &mut data_vec[..target_len])
+        {
+            Ok((bytes_read, is_finished)) => {
+                if !is_finished {
+                    #[allow(clippy::comparison_chain)]
+                    if bytes_read == target_len {
+                        Ok(Some(data_vec))
+                    } else if bytes_read < target_len {
+                        self.main_recv.captured = bytes_read;
+                        self.main_recv.target = target_len;
+                        self.main_recv.data = Some(data_vec);
+                        Ok(None)
                     } else {
-                        self.connection.close(false, 1, b"Stream0Finished")?;
-
-                        // Maybe add closing awareness here later
-                        //Ok(RecvResult::Closing(self.id))
-                        Ok((None, None))
+                        Err(Error::InvalidState)
                     }
+                } else {
+                    Err(Error::Done)
                 }
-                Err(Error::Done) => Ok((None, None)),
-                Err(e) => Err(e),
             }
-        } else {
-            Err(Error::InvalidState) // Temporarily used to indicate No recv_data buffer
+            Err(Error::Done) => {
+                self.main_recv.captured = 0;
+                self.main_recv.target = target_len;
+                self.main_recv.data = Some(data_vec);
+                Ok(None)
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -548,50 +672,44 @@ impl Connection {
         self.bkgd_stream_send_next()
     }
 
-    pub(super) fn bkgd_stream_next_target(&mut self, next_target: usize, mut data_vec: Vec<u8>) {
-        if next_target > data_vec.len() {
-            data_vec.resize(next_target, 0);
+    // A returned Error::InvalidState indicates something went wrong with the read process
+    // A returned Error::Done indicates the stream finished
+    pub(super) fn bkgd_stream_read(
+        &mut self,
+        mut data_vec: Vec<u8>,
+        target_len: usize,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        if target_len > data_vec.len() {
+            data_vec.resize(target_len, 0);
         }
-        self.background_recv.captured = 0;
-        self.background_recv.target = next_target;
-        self.background_recv.data = Some(data_vec);
-    }
-
-    pub(super) fn bkgd_stream_read(&mut self) -> Result<(Option<usize>, Option<Vec<u8>>), Error> {
-        if self.background_recv.captured >= self.background_recv.target {
-            Ok((
-                Some(self.background_recv.target),
-                self.background_recv.data.take(),
-            ))
-        } else if let Some(recv_data) = &mut self.background_recv.data {
-            match self.connection.stream_recv(
-                MAIN_STREAM_ID,
-                &mut recv_data[self.background_recv.captured..self.background_recv.target],
-            ) {
-                Ok((bytes_read, is_finished)) => {
-                    if !is_finished {
-                        self.background_recv.captured += bytes_read;
-                        if self.background_recv.captured >= self.background_recv.target {
-                            Ok((
-                                Some(self.background_recv.target),
-                                self.background_recv.data.take(),
-                            ))
-                        } else {
-                            Ok((None, None))
-                        }
+        match self
+            .connection
+            .stream_recv(BACKGROUND_STREAM_ID, &mut data_vec[..target_len])
+        {
+            Ok((bytes_read, is_finished)) => {
+                if !is_finished {
+                    #[allow(clippy::comparison_chain)]
+                    if bytes_read == target_len {
+                        Ok(Some(data_vec))
+                    } else if bytes_read < target_len {
+                        self.background_recv.captured = bytes_read;
+                        self.background_recv.target = target_len;
+                        self.background_recv.data = Some(data_vec);
+                        Ok(None)
                     } else {
-                        self.connection.close(false, 1, b"Stream4Finished")?;
-
-                        // Maybe add closing awareness here later
-                        //Ok(RecvResult::Closing(self.id))
-                        Ok((None, None))
+                        Err(Error::InvalidState)
                     }
+                } else {
+                    Err(Error::Done)
                 }
-                Err(Error::Done) => Ok((None, None)),
-                Err(e) => Err(e),
             }
-        } else {
-            Err(Error::InvalidState) // Temporarily used to indicate No recv_data buffer
+            Err(Error::Done) => {
+                self.background_recv.captured = 0;
+                self.background_recv.target = target_len;
+                self.background_recv.data = Some(data_vec);
+                Ok(None)
+            }
+            Err(e) => Err(e),
         }
     }
 }

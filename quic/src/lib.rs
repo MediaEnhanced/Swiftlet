@@ -31,72 +31,106 @@
 
 /// QUIC Endpoint Module
 pub mod endpoint;
-use endpoint::{ConnectionId, Endpoint, EndpointEvent, Error};
+use endpoint::{
+    ConnectionEndReason, ConnectionId, Endpoint, Error, NextEvent, ReadInfo, RecvEvent,
+};
 
 use std::time::{Duration, Instant};
 
 /// Required QUIC Endpoint Handler Event Callback Functions
 ///
-/// These functions will get called for their respective events!
+/// These functions will get called for their respective events.
+/// These callbacks are expected to return within a couple milliseconds AT THE MOST
+/// for all processing cases.
 pub trait EndpointEventCallbacks {
     /// Called when a new connection is started and is application ready.
     fn connection_started(&mut self, endpoint: &mut Endpoint, cid: &ConnectionId);
 
     /// Called when a connection has ended and should be cleaned up.
     ///
-    /// Return true if you want the Handler event loop to exit.
-    /// It will return the reference to the endpoint in that case.
+    /// Return true if you want the Endpoint Handler event loop to exit.
+    /// The event loop will return an Ok(true) indicating that the connection_ended callback function caused the exit.
+    /// This is intended to be useful in case the application wants to start up the Endpoint Handler event loop again.
     fn connection_ended(
         &mut self,
         endpoint: &mut Endpoint,
         cid: &ConnectionId,
+        reason: ConnectionEndReason,
         remaining_connections: usize,
     ) -> bool;
 
-    /// Called when a connection is in the process of ending and allows an application to clean up relevant states earlier before it fully closes.
-    fn connection_ending_warning(&mut self, endpoint: &mut Endpoint, cid: &ConnectionId);
+    /// Called when a connection is in the process of ending and allows an application to clean up
+    /// relevant states earlier before the connection fully ends.
+    ///
+    /// By default, this function does nothing when called.
+    fn connection_ending_warning(
+        &mut self,
+        _endpoint: &mut Endpoint,
+        _cid: &ConnectionId,
+        _reason: ConnectionEndReason,
+    ) {
+        // Do nothing by default
+    }
 
     /// Called when the next tick occurrs based on the tick duration given to the run_event_loop call.
+    ///
+    /// Return true if you want the Endpoint Handler event loop to exit.
+    /// The event loop will return an Ok(false) indicating that the tick callback function caused the exit.
     fn tick(&mut self, endpoint: &mut Endpoint) -> bool;
 
     /// Called when there is something to read on the main stream.
     ///
     /// The read_data length will be the number of bytes asked for on the previous call.
     /// The first time it is called the length will be the number of bytes set by the Endpoint Config.
+    /// This data can be processed based on the application protocol.
+    ///
     /// Return the number of bytes you want to read the next time this callback is called.
-    /// Returning a None will close the connection.
+    /// If the optional usize value is set to zero (0) it will be interpreted as a one (1).
+    /// Returning a None will close the main stream but since the main stream is required,
+    /// the connection will start the close process.
     fn main_stream_recv(
         &mut self,
         endpoint: &mut Endpoint,
         cid: &ConnectionId,
         read_data: &[u8],
-    ) -> Option<usize>;
+    ) -> Option<usize>; // Just a usize in future where 0 represents close the stream...?
 
     /// Called when there is something to read on the background stream.
     ///
     /// The read_data length will be the number of bytes asked for on the previous call.
     /// The first time it is called the length will be the number of bytes set by the Endpoint Config.
+    /// This data can be processed based on the application protocol.
+    ///
     /// Return the number of bytes you want to read the next time this callback is called.
-    /// Returning a None will close the connection.
+    /// If the optional usize value is set to zero (0) it will be interpreted as a one (1).
+    /// Returning a None will close the background stream but since the background stream is required,
+    /// the connection will start the close process.
+    ///
+    /// By default, this function will return None, which translates to a connection closure as indicated above.
+    /// This function should be overwritten to handle cases where a connection might send
+    /// information over the background stream to prevent accidental connection closures.
     fn background_stream_recv(
         &mut self,
-        endpoint: &mut Endpoint,
-        cid: &ConnectionId,
-        read_data: &[u8],
-    ) -> Option<usize>;
+        _endpoint: &mut Endpoint,
+        _cid: &ConnectionId,
+        _read_data: &[u8],
+    ) -> Option<usize> {
+        // Return None by default since the background stream is not managed
+        None
+    }
 }
 
 /// Main library structure that handles the QUIC Endpoint
 pub struct EndpointHandler<'a> {
     current_tick: u64,
-    endpoint: Endpoint,
+    endpoint: &'a mut Endpoint,
     events: &'a mut dyn EndpointEventCallbacks,
 }
 
 impl<'a> EndpointHandler<'a> {
     /// Create a QUIC Endpoint Handler by giving it an already created Endpoint
     /// and a mutable reference of a structure that implements the Endpoint Event Callbacks trait.
-    pub fn new(endpoint: Endpoint, events: &'a mut dyn EndpointEventCallbacks) -> Self {
+    pub fn new(endpoint: &'a mut Endpoint, events: &'a mut dyn EndpointEventCallbacks) -> Self {
         EndpointHandler {
             current_tick: 0,
             endpoint,
@@ -112,54 +146,45 @@ impl<'a> EndpointHandler<'a> {
     ///
     /// Tick "0" callback will happen immediately
     ///
-    /// Returns the endpoint reference if this event loop function should be maybe called again
+    /// Returns true if this event loop function should be maybe called again
     ///  (ie. run a client endpoint in "low power" mode when it has no connections)
-    pub fn run_event_loop(
-        &mut self,
-        tick_duration: Duration,
-    ) -> Result<Option<&mut Endpoint>, Error> {
+    pub fn run_event_loop(&mut self, tick_duration: Duration) -> Result<bool, Error> {
         let start_instant = Instant::now();
         let mut next_tick_instant = start_instant;
 
         loop {
-            // This update sleeps when waiting for the next instant or recv udp data and the duration is >= 1ms
-            match self.endpoint.get_next_event(next_tick_instant) {
-                Ok(EndpointEvent::ReceivedData) => {
+            // This function will sleep the thread while waiting for the next instant or recv udp data
+            match self.endpoint.get_next_event(next_tick_instant)? {
+                NextEvent::ReceivedData => {
                     if self.run_recv_loop()? {
-                        return Ok(Some(&mut self.endpoint));
+                        return Ok(true);
                     }
                 }
-                Ok(EndpointEvent::NextTick) => {
+                NextEvent::Tick => {
                     next_tick_instant += tick_duration; // Does not currently check for skipped ticks / assumes computer processes all
                     self.current_tick += 1;
 
-                    if self.events.tick(&mut self.endpoint) {
-                        return Ok(None);
+                    if self.events.tick(self.endpoint) {
+                        return Ok(false);
                     }
                 }
-                Ok(EndpointEvent::ConnectionClosed(cid)) => {
+                NextEvent::ConnectionEnded((cid, reason)) => {
                     let remaining_connections = self.endpoint.get_num_connections();
-                    if self
-                        .events
-                        .connection_ended(&mut self.endpoint, &cid, remaining_connections)
-                    {
-                        return Ok(Some(&mut self.endpoint));
+                    if self.events.connection_ended(
+                        self.endpoint,
+                        &cid,
+                        reason,
+                        remaining_connections,
+                    ) {
+                        return Ok(true);
                     }
                 }
-                Ok(EndpointEvent::ConnectionClosing(cid)) => {
+                NextEvent::ConnectionEnding((cid, reason)) => {
                     self.events
-                        .connection_ending_warning(&mut self.endpoint, &cid);
+                        .connection_ending_warning(self.endpoint, &cid, reason);
                 }
-                Ok(EndpointEvent::AlreadyHandled) => {
+                NextEvent::AlreadyHandled => {
                     // Do Nothing and try to call get_next_event ASAP
-                }
-                Err(e) => {
-                    return Err(e);
-                }
-                _ => {
-                    // Unexpected case where a panic will happen for now
-                    panic!("Unexpected Next Event!");
-                    // In the future have endpoint isolate the enums instead of one master EndpointEvent
                 }
             }
         }
@@ -167,93 +192,111 @@ impl<'a> EndpointHandler<'a> {
 
     fn run_recv_loop(&mut self) -> Result<bool, Error> {
         loop {
-            match self.endpoint.recv() {
-                Ok(EndpointEvent::DoneReceiving) => {
+            match self.endpoint.recv()? {
+                RecvEvent::DoneReceiving => {
                     return Ok(false);
                 }
-                Ok(EndpointEvent::MainStreamReceived(cid)) => loop {
-                    let (read_bytes_option, vec_option) = self.endpoint.main_stream_recv(&cid)?;
-                    if let Some(read_bytes) = read_bytes_option {
-                        let vec_data = match vec_option {
-                            Some(v) => v,
-                            None => {
-                                vec![0; 4096] // Backup and shouldn't ever be called
-                                              // Maybe a panic or code redesign so this is not even an issue???
+                RecvEvent::MainStreamReceived((cid, mut data_vec, mut len)) => {
+                    let verified_index = cid.get_index();
+                    loop {
+                        let target_len_opt =
+                            self.events
+                                .main_stream_recv(self.endpoint, &cid, &data_vec[..len]);
+                        match self.endpoint.main_stream_read(
+                            verified_index,
+                            data_vec,
+                            target_len_opt,
+                        )? {
+                            ReadInfo::ReadData((new_data_vec, new_len)) => {
+                                data_vec = new_data_vec;
+                                len = new_len;
                             }
-                        };
-                        if let Some(next_recv_target) = self.events.main_stream_recv(
-                            &mut self.endpoint,
-                            &cid,
-                            &vec_data[..read_bytes],
-                        ) {
-                            let _ = self.endpoint.main_stream_set_target(
-                                &cid,
-                                next_recv_target,
-                                vec_data,
-                            );
-                        } else {
-                            let _ = self.endpoint.close_connection(&cid, 16);
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                },
-                Ok(EndpointEvent::BackgroundStreamReceived(cid)) => loop {
-                    let (read_bytes_option, vec_option) =
-                        self.endpoint.background_stream_recv(&cid)?;
-                    if let Some(read_bytes) = read_bytes_option {
-                        let vec_data = match vec_option {
-                            Some(v) => v,
-                            None => {
-                                vec![0; 4096] // Backup and shouldn't ever be called
-                                              // Maybe a panic or code redesign so this is not even an issue???
+                            ReadInfo::DoneReceiving => {
+                                break;
                             }
-                        };
-                        if let Some(next_recv_target) = self.events.background_stream_recv(
-                            &mut self.endpoint,
-                            &cid,
-                            &vec_data[..read_bytes],
-                        ) {
-                            let _ = self.endpoint.background_stream_set_target(
-                                &cid,
-                                next_recv_target,
-                                vec_data,
-                            );
-                        } else {
-                            let _ = self.endpoint.close_connection(&cid, 16);
-                            break;
+                            ReadInfo::ConnectionEnded(reason) => {
+                                let remaining_connections = self.endpoint.get_num_connections();
+                                if self.events.connection_ended(
+                                    self.endpoint,
+                                    &cid,
+                                    reason,
+                                    remaining_connections,
+                                ) {
+                                    return Ok(true);
+                                }
+                                break;
+                            }
+                            ReadInfo::ConnectionEnding(reason) => {
+                                self.events
+                                    .connection_ending_warning(self.endpoint, &cid, reason);
+                                break;
+                            }
                         }
-                    } else {
-                        break;
                     }
-                },
-                Ok(EndpointEvent::ConnectionClosed(cid)) => {
+                }
+                RecvEvent::RealtimeReceived(_cid) => {
+                    // Do nothing for now
+                }
+                RecvEvent::BackgroundStreamReceived((cid, mut data_vec, mut len)) => {
+                    let verified_index = cid.get_index();
+                    loop {
+                        let target_len_opt = self.events.background_stream_recv(
+                            self.endpoint,
+                            &cid,
+                            &data_vec[..len],
+                        );
+                        match self.endpoint.background_stream_read(
+                            verified_index,
+                            data_vec,
+                            target_len_opt,
+                        )? {
+                            ReadInfo::ReadData((new_data_vec, new_len)) => {
+                                data_vec = new_data_vec;
+                                len = new_len;
+                            }
+                            ReadInfo::DoneReceiving => {
+                                break;
+                            }
+                            ReadInfo::ConnectionEnded(reason) => {
+                                let remaining_connections = self.endpoint.get_num_connections();
+                                if self.events.connection_ended(
+                                    self.endpoint,
+                                    &cid,
+                                    reason,
+                                    remaining_connections,
+                                ) {
+                                    return Ok(true);
+                                }
+                                break;
+                            }
+                            ReadInfo::ConnectionEnding(reason) => {
+                                self.events
+                                    .connection_ending_warning(self.endpoint, &cid, reason);
+                                break;
+                            }
+                        }
+                    }
+                }
+                RecvEvent::ConnectionEnded((cid, reason)) => {
                     let remaining_connections = self.endpoint.get_num_connections();
-                    if self
-                        .events
-                        .connection_ended(&mut self.endpoint, &cid, remaining_connections)
-                    {
+                    if self.events.connection_ended(
+                        self.endpoint,
+                        &cid,
+                        reason,
+                        remaining_connections,
+                    ) {
                         return Ok(true);
                     }
                 }
-                Ok(EndpointEvent::ConnectionClosing(cid)) => {
+                RecvEvent::ConnectionEnding((cid, reason)) => {
                     self.events
-                        .connection_ending_warning(&mut self.endpoint, &cid);
+                        .connection_ending_warning(self.endpoint, &cid, reason);
                 }
-                Ok(EndpointEvent::EstablishedOnce(cid)) => {
-                    self.events.connection_started(&mut self.endpoint, &cid);
+                RecvEvent::EstablishedOnce(cid) => {
+                    self.events.connection_started(self.endpoint, &cid);
                 }
-                Ok(EndpointEvent::NoUpdate) => {
+                RecvEvent::NoUpdate => {
                     // Do nothing and call recv again
-                }
-                Err(e) => {
-                    return Err(e);
-                }
-                Ok(_) => {
-                    // Unexpected case where a panic will happen for now
-                    panic!("Unexpected Receive Event!");
-                    // In the future have endpoint isolate the enums instead of one master EndpointEvent
                 }
             }
         }

@@ -28,7 +28,7 @@ const PKEY_PATH: &str = "security/pkey.pem"; // Location of the private key for 
 use std::time::Duration;
 
 use swiftlet_quic::{
-    endpoint::{Config, ConnectionId, Endpoint, SocketAddr},
+    endpoint::{Config, ConnectionEndReason, ConnectionId, Endpoint, SocketAddr},
     EndpointEventCallbacks, EndpointHandler,
 };
 
@@ -77,7 +77,7 @@ fn server_thread(port: u16, server_name: String) {
         background_recv_first_bytes: MESSAGE_HEADER_SIZE,
     };
 
-    let server_endpoint =
+    let mut server_endpoint =
         match Endpoint::new_server(bind_address, ALPN_NAME, CERT_PATH, PKEY_PATH, config) {
             Ok(endpoint) => endpoint,
             Err(_) => {
@@ -90,9 +90,8 @@ fn server_thread(port: u16, server_name: String) {
     let mut server_state = ServerState::new(server_name);
     server_state.send_debug_text("Starting Server Network!\n");
 
-    let mut rtc_handler = EndpointHandler::new(server_endpoint, &mut server_state);
-
-    match rtc_handler.run_event_loop(std::time::Duration::from_millis(5)) {
+    let mut endpoint_handler = EndpointHandler::new(&mut server_endpoint, &mut server_state);
+    match endpoint_handler.run_event_loop(std::time::Duration::from_millis(5)) {
         Ok(_) => {}
         Err(_) => {
             server_state.send_debug_text("Server Event Loop Error\n");
@@ -121,7 +120,7 @@ fn client_thread(server_address: SocketAddr, user_name: String) {
         background_recv_first_bytes: MESSAGE_HEADER_SIZE,
     };
 
-    let client_endpoint = match Endpoint::new_client_with_first_connection(
+    let mut client_endpoint = match Endpoint::new_client_with_first_connection(
         bind_address,
         ALPN_NAME,
         CERT_PATH,
@@ -139,9 +138,9 @@ fn client_thread(server_address: SocketAddr, user_name: String) {
 
     let mut client_handler = ClientHandler::new(user_name);
     client_handler.send_debug_text("Starting Client Network!\n");
-    let mut rtc_handler = EndpointHandler::new(client_endpoint, &mut client_handler);
 
-    match rtc_handler.run_event_loop(std::time::Duration::from_millis(5)) {
+    let mut endpoint_handler = EndpointHandler::new(&mut client_endpoint, &mut client_handler);
+    match endpoint_handler.run_event_loop(std::time::Duration::from_millis(5)) {
         Ok(_) => {}
         Err(_) => {
             client_handler.send_debug_text("Client Event Loop Error\n");
@@ -149,6 +148,24 @@ fn client_thread(server_address: SocketAddr, user_name: String) {
     }
 
     client_handler.send_debug_text("Client Network Thread Exiting\n");
+}
+
+#[derive(Debug)]
+#[repr(u64)]
+enum ErrorCode {
+    NotUsed = 0,
+    ServerClosed,
+    ClientClosed,
+}
+
+impl ErrorCode {
+    fn from_u64(value: u64) -> Self {
+        match value {
+            x if x == ErrorCode::ServerClosed as u64 => ErrorCode::ServerClosed,
+            x if x == ErrorCode::ClientClosed as u64 => ErrorCode::ClientClosed,
+            _ => ErrorCode::NotUsed,
+        }
+    }
 }
 
 #[repr(u8)]
@@ -220,7 +237,6 @@ const MAX_CHAR_LENGTH: usize = 32;
 struct ClientState {
     cid: ConnectionId,
     main_recv_type: Option<StreamMsgType>,
-    bkgd_recv_type: Option<StreamMsgType>,
     user_name: [u8; MAX_CHAR_LENGTH * 4],
     user_name_len: usize,
     state: u8, // Doesn't represent anything
@@ -231,7 +247,6 @@ impl ClientState {
         let mut cs = ClientState {
             cid,
             main_recv_type: None,
-            bkgd_recv_type: None,
             user_name: [0; MAX_CHAR_LENGTH * 4],
             user_name_len: 0,
             state: 0,
@@ -392,9 +407,23 @@ impl EndpointEventCallbacks for ServerState {
         &mut self,
         endpoint: &mut Endpoint,
         cid: &ConnectionId,
+        reason: ConnectionEndReason,
         _remaining_connections: usize,
     ) -> bool {
         if self.remove_connection_state(cid) {
+            match reason {
+                ConnectionEndReason::LocalApplication(code) => println!(
+                    "Server Connection Ended Reason: {:?}: {:?}",
+                    reason,
+                    ErrorCode::from_u64(code)
+                ),
+                ConnectionEndReason::PeerApplication(code) => println!(
+                    "Server Connection Ended Reason: {:?}: {:?}",
+                    reason,
+                    ErrorCode::from_u64(code)
+                ),
+                _ => println!("Server Connection Ended Reason: {:?}", reason),
+            }
             // Temporarily (inefficiently) used for removing of clients
             for vi in 0..self.client_states.len() {
                 let mut send_data = self.create_refresh_data(vi);
@@ -405,11 +434,7 @@ impl EndpointEventCallbacks for ServerState {
         false
     }
 
-    fn connection_ending_warning(&mut self, _endpoint: &mut Endpoint, _cid: &ConnectionId) {
-        // COULD end earlier in future
-    }
-
-    fn tick(&mut self, _endpoint: &mut Endpoint) -> bool {
+    fn tick(&mut self, endpoint: &mut Endpoint) -> bool {
         self.command_handler_tick += 1;
         if self.command_handler_tick >= 10 {
             if crossterm::event::poll(std::time::Duration::from_millis(0)).is_ok_and(|v| v) {
@@ -419,6 +444,12 @@ impl EndpointEventCallbacks for ServerState {
                             crossterm::event::KeyCode::Char(c) => {
                                 let uc = c.to_ascii_uppercase();
                                 if uc == 'S' {
+                                    for cs in &self.client_states {
+                                        let _ = endpoint.close_connection(
+                                            &cs.cid,
+                                            ErrorCode::ServerClosed as u64,
+                                        );
+                                    }
                                     return true;
                                 }
                             }
@@ -484,34 +515,6 @@ impl EndpointEventCallbacks for ServerState {
             None // Close Connection
         }
     }
-
-    fn background_stream_recv(
-        &mut self,
-        _endpoint: &mut Endpoint,
-        cid: &ConnectionId,
-        read_data: &[u8],
-    ) -> Option<usize> {
-        if let Some(vi) = self.find_connection_index_from_cid(cid) {
-            self.client_states[vi].cid.update(cid);
-            if let Some(_msg_type) = self.client_states[vi].bkgd_recv_type.take() {
-                // if self.handle_stream_msg(endpoint, vi, msg_type, read_data) {
-                //     Some(MESSAGE_HEADER_SIZE)
-                // } else {
-                None // Close Connection
-                     // }
-            } else {
-                let new_msg_type = StreamMsgType::from_u8(read_data[0]);
-                if new_msg_type.intended_for_server() {
-                    self.client_states[vi].bkgd_recv_type = Some(new_msg_type);
-                    Some(get_stream_msg_size(read_data))
-                } else {
-                    None
-                }
-            }
-        } else {
-            None // Close Connection
-        }
-    }
 }
 
 struct ClientHandler {
@@ -519,7 +522,6 @@ struct ClientHandler {
     command_handler_tick: u64,
     cid_option: Option<ConnectionId>, // Focus Connection ID
     main_recv_type: Option<StreamMsgType>,
-    background_recv_type: Option<StreamMsgType>,
 }
 
 impl ClientHandler {
@@ -529,7 +531,6 @@ impl ClientHandler {
             command_handler_tick: 0,
             cid_option: None,
             main_recv_type: None,
-            background_recv_type: None,
         }
     }
 
@@ -593,12 +594,26 @@ impl EndpointEventCallbacks for ClientHandler {
         &mut self,
         _endpoint: &mut Endpoint,
         cid: &ConnectionId,
+        reason: ConnectionEndReason,
         remaining_connections: usize,
     ) -> bool {
         if let Some(my_conn_id) = &self.cid_option {
             if *my_conn_id == *cid {
                 self.cid_option = None;
                 self.main_recv_type = None;
+                match reason {
+                    ConnectionEndReason::LocalApplication(code) => println!(
+                        "Client Connection Ended Reason: {:?}: {:?}",
+                        reason,
+                        ErrorCode::from_u64(code)
+                    ),
+                    ConnectionEndReason::PeerApplication(code) => println!(
+                        "Client Connection Ended Reason: {:?}: {:?}",
+                        reason,
+                        ErrorCode::from_u64(code)
+                    ),
+                    _ => println!("Client Connection Ended Reason: {:?}", reason),
+                }
             }
         }
 
@@ -606,16 +621,7 @@ impl EndpointEventCallbacks for ClientHandler {
         remaining_connections == 0
     }
 
-    fn connection_ending_warning(&mut self, _endpoint: &mut Endpoint, cid: &ConnectionId) {
-        if let Some(my_conn_id) = &self.cid_option {
-            if *my_conn_id == *cid {
-                self.cid_option = None;
-                self.main_recv_type = None;
-            }
-        }
-    }
-
-    fn tick(&mut self, _endpoint: &mut Endpoint) -> bool {
+    fn tick(&mut self, endpoint: &mut Endpoint) -> bool {
         self.command_handler_tick += 1;
         if self.command_handler_tick >= 10 {
             if crossterm::event::poll(std::time::Duration::from_millis(0)).is_ok_and(|v| v) {
@@ -625,6 +631,10 @@ impl EndpointEventCallbacks for ClientHandler {
                             crossterm::event::KeyCode::Char(c) => {
                                 let uc = c.to_ascii_uppercase();
                                 if uc == 'C' {
+                                    if let Some(cid) = &self.cid_option {
+                                        let _ = endpoint
+                                            .close_connection(cid, ErrorCode::ClientClosed as u64);
+                                    }
                                     return true;
                                 }
                             }
@@ -680,38 +690,6 @@ impl EndpointEventCallbacks for ClientHandler {
                 _ => {
                     None // Close Connection
                 }
-            }
-        } else {
-            None // Close Connection
-        }
-    }
-
-    fn background_stream_recv(
-        &mut self,
-        endpoint: &mut Endpoint,
-        cid: &ConnectionId,
-        read_data: &[u8],
-    ) -> Option<usize> {
-        if let Some(my_cid) = &mut self.cid_option {
-            if *my_cid == *cid {
-                my_cid.update(cid);
-                if let Some(msg_type) = self.background_recv_type.take() {
-                    if self.handle_stream_msg(endpoint, cid, msg_type, read_data) {
-                        Some(MESSAGE_HEADER_SIZE)
-                    } else {
-                        None // Close Connection
-                    }
-                } else {
-                    let new_msg_type = StreamMsgType::from_u8(read_data[0]);
-                    if new_msg_type.intended_for_client() {
-                        self.background_recv_type = Some(new_msg_type);
-                        Some(get_stream_msg_size(read_data))
-                    } else {
-                        None // Close Connection
-                    }
-                }
-            } else {
-                None // Close Connection
             }
         } else {
             None // Close Connection

@@ -30,7 +30,7 @@ mod udp;
 use udp::{SocketError, UdpSocket};
 
 mod connection;
-use connection::{Connection, RecvResult, TimeoutResult};
+use connection::{CloseInfo, CloseOrigin, Connection, RecvResult, SendResult, StreamResult};
 
 /// The Endpoint Configuration Structure
 ///
@@ -55,6 +55,7 @@ pub struct Config {
     ///
     /// If there is a value and the duration has passed since the quic connection had recieved anything
     /// the quic connection will send out a PING to try and keep the connection alive.
+    /// Any potential keep alives currently occur right before the tick callback function is called.
     pub keep_alive_timeout: Option<Duration>,
 
     /// The initial main stream recieve buffer size.
@@ -63,6 +64,8 @@ pub struct Config {
     pub initial_main_recv_size: usize,
 
     /// The number of bytes to receive on the main stream before calling main_stream_recv for the first time.
+    ///
+    /// If this value is set to 0 it will be changed to 1 during endpoint creation
     pub main_recv_first_bytes: usize,
 
     /// The initial background stream recieve buffer size.
@@ -71,6 +74,8 @@ pub struct Config {
     pub initial_background_recv_size: usize,
 
     /// The number of bytes to receive on the background stream before calling main_stream_recv for the first time.
+    ///
+    /// If this value is set to 0 it will be changed to 1 during endpoint creation
     pub background_recv_first_bytes: usize,
 }
 
@@ -90,7 +95,7 @@ pub struct Endpoint {
 
 /// A Connection ID structure to communicate with the endpoint about a specific connection.
 ///
-/// Should be updated so that endpoint function calls are more efficient
+/// Should be updated so that endpoint function calls are more efficient.
 pub struct ConnectionId {
     id: u64,
     probable_index: usize,
@@ -114,13 +119,18 @@ impl Clone for ConnectionId {
 impl ConnectionId {
     // Check if this function gets inlined in the future
 
-    /// A way to update the Connection ID
+    /// A way to update the Connection ID.
     pub fn update(&mut self, other: &Self) {
         self.probable_index = other.probable_index;
+    }
+
+    pub(super) fn get_index(&self) -> usize {
+        self.probable_index
     }
 }
 
 /// Errors that the QUIC Endpoint can return
+#[derive(Debug)]
 pub enum Error {
     /// Error with the UDP socket creation
     SocketCreation,
@@ -136,10 +146,12 @@ pub enum Error {
     ConnectionClose,
     /// Error getting send data from a connection
     ConnectionSend,
+    /// Error from an unexpected close
+    UnexpectedClose,
     /// Error sending data on the UDP socket
     SocketSend,
     /// Error receiving data on the UDP socket
-    SocketRecv,
+    SocketRecv(std::io::ErrorKind),
 
     // Error receiving too much data
     //RecvTooMuchData,
@@ -154,21 +166,197 @@ pub enum Error {
     /// Error sending data on the stream
     StreamSend,
     /// Error receiving data from the stream
-    StreamRecv,
+    StreamRecv(connection::Error),
 }
 
-pub(super) enum EndpointEvent {
-    NextTick,
-    ConnectionClosing(ConnectionId),
-    ConnectionClosed(ConnectionId),
+/// Based on combination of QUIC Transport Error Codes and Endpoint Error Codes
+#[derive(Debug)]
+#[repr(u64)]
+pub enum EndpointCloseReason {
+    /// No Error
+    NoError = 0, // Enforce that it is zero
+    /// Implementation Error
+    InternalError,
+    /// Server refuses a connection
+    ConnectionRefused,
+    /// Flow control error
+    FlowControlError,
+    /// Too many streams opened
+    StreamLimitError,
+    /// Frame received in invalid stream state
+    StreamStateError,
+    /// Change to final size
+    FinalStateError,
+    /// Frame encoding error
+    FrameEncodingError,
+    /// Error in transport parameters
+    TransportParameterError,
+    /// Too many connection IDs received
+    ConnectionIdLimitError,
+    /// Generic protocol violation
+    ProtocolViolation,
+    /// Invalid Token received
+    InvalidToken,
+    /// Application error
+    ApplicationError,
+    /// CRYPTO data buffer overflowed
+    CryptoBufferExceeded,
+    /// Invalid packet protection update
+    KeyUpdateError,
+    /// Excessive use of packet protection keys
+    AeadLimitReached,
+    /// No viable network path exists
+    NoViablePath,
+
+    /// Main stream finished
+    MainStreamFinished,
+    /// Background stream finished
+    BackgroundStreamFinished,
+
+    /// TLS Alert Start
+    CryptoErrorStart = 0x0100,
+    /// TLS Alert End
+    CryptoErrorEnd = 0x01FF,
+}
+
+impl EndpointCloseReason {
+    #[inline] // Verbose but compiles down to minimal instructions
+    fn from_u64(value: u64) -> Self {
+        match value {
+            x if x == EndpointCloseReason::InternalError as u64 => {
+                EndpointCloseReason::InternalError
+            }
+            x if x == EndpointCloseReason::ConnectionRefused as u64 => {
+                EndpointCloseReason::ConnectionRefused
+            }
+            x if x == EndpointCloseReason::FlowControlError as u64 => {
+                EndpointCloseReason::FlowControlError
+            }
+            x if x == EndpointCloseReason::StreamLimitError as u64 => {
+                EndpointCloseReason::StreamLimitError
+            }
+            x if x == EndpointCloseReason::StreamStateError as u64 => {
+                EndpointCloseReason::StreamStateError
+            }
+            x if x == EndpointCloseReason::FinalStateError as u64 => {
+                EndpointCloseReason::FinalStateError
+            }
+            x if x == EndpointCloseReason::FrameEncodingError as u64 => {
+                EndpointCloseReason::FrameEncodingError
+            }
+            x if x == EndpointCloseReason::TransportParameterError as u64 => {
+                EndpointCloseReason::TransportParameterError
+            }
+            x if x == EndpointCloseReason::ConnectionIdLimitError as u64 => {
+                EndpointCloseReason::ConnectionIdLimitError
+            }
+            x if x == EndpointCloseReason::ProtocolViolation as u64 => {
+                EndpointCloseReason::ProtocolViolation
+            }
+            x if x == EndpointCloseReason::InvalidToken as u64 => EndpointCloseReason::InvalidToken,
+            x if x == EndpointCloseReason::ApplicationError as u64 => {
+                EndpointCloseReason::ApplicationError
+            }
+            x if x == EndpointCloseReason::CryptoBufferExceeded as u64 => {
+                EndpointCloseReason::CryptoBufferExceeded
+            }
+            x if x == EndpointCloseReason::KeyUpdateError as u64 => {
+                EndpointCloseReason::KeyUpdateError
+            }
+            x if x == EndpointCloseReason::AeadLimitReached as u64 => {
+                EndpointCloseReason::AeadLimitReached
+            }
+            x if x == EndpointCloseReason::NoViablePath as u64 => EndpointCloseReason::NoViablePath,
+
+            x if x == EndpointCloseReason::MainStreamFinished as u64 => {
+                EndpointCloseReason::MainStreamFinished
+            }
+            x if x == EndpointCloseReason::BackgroundStreamFinished as u64 => {
+                EndpointCloseReason::BackgroundStreamFinished
+            }
+
+            // Need to adjust this to cover more errors
+            x if x == EndpointCloseReason::CryptoErrorStart as u64 => {
+                EndpointCloseReason::CryptoErrorStart
+            }
+            x if x == EndpointCloseReason::CryptoErrorEnd as u64 => {
+                EndpointCloseReason::CryptoErrorEnd
+            }
+
+            _ => EndpointCloseReason::NoError,
+        }
+    }
+}
+
+/// Reason the connection has ended / is ending
+#[derive(Debug)]
+pub enum ConnectionEndReason {
+    /// Not sure of the reason
+    Uncertain,
+    /// Idle Timeout
+    IdleTimeout,
+    /// Local Endpoint Error
+    LocalEndpoint(EndpointCloseReason),
+    /// Peer Endpoint Error
+    PeerEndpoint(EndpointCloseReason),
+    /// Local Application Error
+    LocalApplication(u64),
+    /// Peer Application Error
+    PeerApplication(u64),
+}
+
+impl ConnectionEndReason {
+    fn from_close_info(close_info: &CloseInfo) -> Self {
+        match close_info.close_origin {
+            CloseOrigin::Timeout => ConnectionEndReason::IdleTimeout,
+            CloseOrigin::Local => {
+                if close_info.is_application_error {
+                    ConnectionEndReason::LocalApplication(close_info.error_code)
+                } else {
+                    ConnectionEndReason::LocalEndpoint(EndpointCloseReason::from_u64(
+                        close_info.error_code,
+                    ))
+                }
+            }
+            CloseOrigin::Peer => {
+                if close_info.is_application_error {
+                    ConnectionEndReason::PeerApplication(close_info.error_code)
+                } else {
+                    ConnectionEndReason::PeerEndpoint(EndpointCloseReason::from_u64(
+                        close_info.error_code,
+                    ))
+                }
+            }
+            _ => ConnectionEndReason::Uncertain,
+        }
+    }
+}
+
+pub(super) enum NextEvent {
     AlreadyHandled,
+    Tick,
+    ConnectionEnded((ConnectionId, ConnectionEndReason)),
+    ConnectionEnding((ConnectionId, ConnectionEndReason)),
     ReceivedData,
-    DoneReceiving,
+}
+
+pub(super) enum RecvEvent {
     NoUpdate,
+    DoneReceiving,
+    ConnectionEnded((ConnectionId, ConnectionEndReason)),
+    ConnectionEnding((ConnectionId, ConnectionEndReason)),
     EstablishedOnce(ConnectionId),
-    MainStreamReceived(ConnectionId),
-    BackgroundStreamReceived(ConnectionId),
-    //StreamReceivedData(StreamReadable),
+    MainStreamReceived((ConnectionId, Vec<u8>, usize)),
+    //RealtimeReceived((ConnectionId, Vec<u8>, usize)),
+    RealtimeReceived(ConnectionId),
+    BackgroundStreamReceived((ConnectionId, Vec<u8>, usize)),
+}
+
+pub(super) enum ReadInfo {
+    DoneReceiving,
+    ReadData((Vec<u8>, usize)),
+    ConnectionEnded(ConnectionEndReason),
+    ConnectionEnding(ConnectionEndReason),
 }
 
 impl Endpoint {
@@ -180,7 +368,7 @@ impl Endpoint {
         alpn: &[u8],
         cert_path: &str,
         pkey_path: &str,
-        config: Config,
+        mut config: Config,
     ) -> Result<Self, Error> {
         if let Ok((socket_mgr, local_addr)) = UdpSocket::new(bind_addr) {
             let max_payload_size = udp::TARGET_MAX_DATAGRAM_SIZE;
@@ -203,6 +391,14 @@ impl Endpoint {
                 Ok(key) => key,
                 Err(_) => return Err(Error::Randomness),
             };
+
+            if config.initial_main_recv_size == 0 {
+                config.initial_main_recv_size = 1;
+            }
+
+            if config.initial_background_recv_size == 0 {
+                config.initial_background_recv_size = 1;
+            }
 
             let endpoint_manager = Endpoint {
                 udp: socket_mgr,
@@ -228,7 +424,7 @@ impl Endpoint {
         bind_addr: SocketAddr,
         alpn: &[u8],
         cert_path: &str,
-        config: Config,
+        mut config: Config,
     ) -> Result<Self, Error> {
         if let Ok((socket_mgr, local_addr)) = UdpSocket::new(bind_addr) {
             let max_payload_size = udp::TARGET_MAX_DATAGRAM_SIZE;
@@ -252,6 +448,14 @@ impl Endpoint {
                 Ok(key) => key,
                 Err(_) => return Err(Error::Randomness),
             };
+
+            if config.initial_main_recv_size == 0 {
+                config.initial_main_recv_size = 1;
+            }
+
+            if config.initial_background_recv_size == 0 {
+                config.initial_background_recv_size = 1;
+            }
 
             let endpoint_manager = Endpoint {
                 udp: socket_mgr,
@@ -286,27 +490,31 @@ impl Endpoint {
         }
     }
 
-    fn send(&mut self, verified_index: usize) -> Result<(u64, u64), Error> {
-        let mut immediate_sends = 0;
-        let mut delayed_sends = 0;
+    fn send(&mut self, verified_index: usize) -> Result<Option<CloseInfo>, Error> {
+        //let mut immediate_sends = 0;
+        //let mut delayed_sends = 0;
         loop {
             let packet_data = self.udp.get_packet_data();
             match self.connections[verified_index].get_next_send_packet(packet_data) {
-                Ok(Some((packet_len, to_addr, instant))) => {
+                Ok(SendResult::DataToSend((packet_len, to_addr, instant))) => {
                     match self.udp.send_packet(packet_len, to_addr, instant) {
                         Ok(true) => {
-                            immediate_sends += 1;
+                            //immediate_sends += 1;
                         }
                         Ok(false) => {
-                            delayed_sends += 1;
+                            //delayed_sends += 1;
                         }
                         Err(_) => {
                             return Err(Error::SocketSend);
                         }
                     }
                 }
-                Ok(None) => {
-                    return Ok((immediate_sends, delayed_sends));
+                Ok(SendResult::Done) => {
+                    //return Ok((immediate_sends, delayed_sends));
+                    return Ok(None);
+                }
+                Ok(SendResult::CloseInfo(close_info)) => {
+                    return Ok(Some(close_info));
                 }
                 Err(_) => {
                     return Err(Error::ConnectionSend);
@@ -348,8 +556,11 @@ impl Endpoint {
                     self.next_connection_id += 1;
                     self.connections.push(conn_mgr);
                     let verified_index = self.connections.len() - 1;
-                    self.send(verified_index)?;
-                    Ok(())
+                    if self.send(verified_index)?.is_some() {
+                        Err(Error::UnexpectedClose)
+                    } else {
+                        Ok(())
+                    }
                 }
                 Err(_) => Err(Error::ConnectionCreation),
             }
@@ -396,7 +607,9 @@ impl Endpoint {
                 match self.connections[verified_index].send_ping_if_before_instant(before_instant) {
                     Ok(false) => {}
                     Ok(true) => {
-                        self.send(verified_index)?;
+                        if self.send(verified_index)?.is_some() {
+                            return Err(Error::UnexpectedClose);
+                        }
                         num_pings += 1;
                     }
                     Err(_) => {
@@ -411,20 +624,20 @@ impl Endpoint {
     pub(super) fn get_next_event(
         &mut self,
         next_tick_instant: Instant,
-    ) -> Result<EndpointEvent, Error> {
+    ) -> Result<NextEvent, Error> {
         let mut next_instant = if next_tick_instant > Instant::now() {
             next_tick_instant
         } else {
             self.keep_alive()?;
-            return Ok(EndpointEvent::NextTick);
+            return Ok(NextEvent::Tick);
         };
-        let mut conn_timeout_opt = None;
+        let mut conn_timeout_opt: Option<usize> = None;
 
         match self.udp.send_check() {
             Ok(send_count) => {
                 if send_count > 0 && next_tick_instant <= Instant::now() {
                     self.keep_alive()?;
-                    return Ok(EndpointEvent::NextTick);
+                    return Ok(NextEvent::Tick);
                 }
             }
             Err(_) => {
@@ -434,61 +647,48 @@ impl Endpoint {
 
         for verified_index in 0..self.connections.len() {
             match self.connections[verified_index].handle_possible_timeout() {
-                TimeoutResult::Nothing(Some(timeout_instant)) => {
-                    if timeout_instant < next_instant {
-                        next_instant = timeout_instant;
-                        conn_timeout_opt = Some(verified_index);
+                None => {
+                    if let Some(close_info) = self.send(verified_index)? {
+                        let connection_id = ConnectionId {
+                            id: close_info.id,
+                            probable_index: verified_index,
+                        };
+                        let end_reason = ConnectionEndReason::from_close_info(&close_info);
+                        if close_info.is_closed {
+                            self.remove_connection(verified_index);
+                            return Ok(NextEvent::ConnectionEnded((connection_id, end_reason)));
+                        }
+                        return Ok(NextEvent::ConnectionEnding((connection_id, end_reason)));
                     }
-                }
-                TimeoutResult::Closed(conn_id) => {
-                    self.remove_connection(verified_index);
-                    return Ok(EndpointEvent::ConnectionClosed(ConnectionId {
-                        id: conn_id,
-                        probable_index: verified_index,
-                    }));
-                }
-                TimeoutResult::Draining(conn_id) => {
-                    return Ok(EndpointEvent::ConnectionClosing(ConnectionId {
-                        id: conn_id,
-                        probable_index: verified_index,
-                    }));
-                }
-                TimeoutResult::Happened => {
-                    self.send(verified_index)?;
-
                     match self.udp.send_check() {
                         Ok(_) => {
                             if next_instant <= Instant::now() {
                                 if let Some(vi) = conn_timeout_opt {
-                                    match self.connections[vi].handle_possible_timeout() {
-                                        TimeoutResult::Happened => {
-                                            self.send(vi)?;
-                                            return Ok(EndpointEvent::AlreadyHandled);
-                                        }
-                                        TimeoutResult::Closed(conn_id) => {
-                                            self.remove_connection(vi);
-                                            return Ok(EndpointEvent::ConnectionClosed(
-                                                ConnectionId {
-                                                    id: conn_id,
-                                                    probable_index: verified_index,
-                                                },
-                                            ));
-                                        }
-                                        TimeoutResult::Draining(conn_id) => {
-                                            return Ok(EndpointEvent::ConnectionClosing(
-                                                ConnectionId {
-                                                    id: conn_id,
-                                                    probable_index: verified_index,
-                                                },
-                                            ));
-                                        }
-                                        _ => {
-                                            return Ok(EndpointEvent::AlreadyHandled);
+                                    if self.connections[vi].handle_possible_timeout().is_none() {
+                                        if let Some(close_info) = self.send(vi)? {
+                                            let connection_id = ConnectionId {
+                                                id: close_info.id,
+                                                probable_index: vi,
+                                            };
+                                            let end_reason =
+                                                ConnectionEndReason::from_close_info(&close_info);
+                                            if close_info.is_closed {
+                                                self.remove_connection(vi);
+                                                return Ok(NextEvent::ConnectionEnded((
+                                                    connection_id,
+                                                    end_reason,
+                                                )));
+                                            }
+                                            return Ok(NextEvent::ConnectionEnding((
+                                                connection_id,
+                                                end_reason,
+                                            )));
                                         }
                                     }
+                                    return Ok(NextEvent::AlreadyHandled);
                                 } else {
                                     self.keep_alive()?;
-                                    return Ok(EndpointEvent::NextTick);
+                                    return Ok(NextEvent::Tick);
                                 }
                             }
                         }
@@ -497,7 +697,15 @@ impl Endpoint {
                         }
                     }
                 }
-                _ => {}
+                Some(Some(timeout_instant)) => {
+                    if timeout_instant < next_instant {
+                        next_instant = timeout_instant;
+                        conn_timeout_opt = Some(verified_index);
+                    }
+                }
+                Some(None) => {
+                    // Do nothing
+                }
             }
         }
 
@@ -511,40 +719,39 @@ impl Endpoint {
 
         let sleep_duration = next_instant.duration_since(Instant::now());
         if self.udp.sleep_till_recv_data(sleep_duration) {
-            Ok(EndpointEvent::ReceivedData)
+            Ok(NextEvent::ReceivedData)
         } else if send_check_timeout {
             match self.udp.send_check() {
-                Ok(_) => Ok(EndpointEvent::AlreadyHandled),
+                Ok(_) => Ok(NextEvent::AlreadyHandled),
                 Err(_) => Err(Error::SocketSend),
             }
         } else if let Some(vi) = conn_timeout_opt {
-            match self.connections[vi].handle_possible_timeout() {
-                TimeoutResult::Happened => {
-                    self.send(vi)?;
-                    Ok(EndpointEvent::AlreadyHandled)
-                }
-                TimeoutResult::Closed(conn_id) => {
-                    self.remove_connection(vi);
-                    Ok(EndpointEvent::ConnectionClosed(ConnectionId {
-                        id: conn_id,
+            if self.connections[vi].handle_possible_timeout().is_none() {
+                if let Some(close_info) = self.send(vi)? {
+                    let connection_id = ConnectionId {
+                        id: close_info.id,
                         probable_index: vi,
-                    }))
+                    };
+                    let end_reason = ConnectionEndReason::from_close_info(&close_info);
+                    if close_info.is_closed {
+                        self.remove_connection(vi);
+                        Ok(NextEvent::ConnectionEnded((connection_id, end_reason)))
+                    } else {
+                        Ok(NextEvent::ConnectionEnding((connection_id, end_reason)))
+                    }
+                } else {
+                    Ok(NextEvent::AlreadyHandled)
                 }
-                TimeoutResult::Draining(conn_id) => {
-                    Ok(EndpointEvent::ConnectionClosing(ConnectionId {
-                        id: conn_id,
-                        probable_index: vi,
-                    }))
-                }
-                _ => Ok(EndpointEvent::AlreadyHandled),
+            } else {
+                Ok(NextEvent::AlreadyHandled)
             }
         } else {
             self.keep_alive()?;
-            Ok(EndpointEvent::NextTick)
+            Ok(NextEvent::Tick)
         }
     }
 
-    pub(super) fn recv(&mut self) -> Result<EndpointEvent, Error> {
+    pub(super) fn recv(&mut self) -> Result<RecvEvent, Error> {
         match self.udp.get_next_recv_data() {
             Ok((recv_data, from_addr)) => {
                 // Only bother to look at a datagram that is less than or equal to the target
@@ -583,44 +790,133 @@ impl Endpoint {
                                     verified_index_opt = Some(self.connections.len());
                                     self.connections.push(conn_mgr);
                                 }
-                                Err(_) => return Ok(EndpointEvent::NoUpdate),
+                                Err(_) => return Ok(RecvEvent::NoUpdate),
                             }
                         }
 
                         if let Some(verified_index) = verified_index_opt {
-                            match self.connections[verified_index]
-                                .recv_data_process(recv_data, from_addr)
+                            let recv_res = match self.connections[verified_index]
+                                .recv_data(recv_data, from_addr)
                             {
-                                Ok(RecvResult::MainStreamReadable(conn_id)) => {
-                                    self.send(verified_index)?;
-                                    Ok(EndpointEvent::MainStreamReceived(ConnectionId {
+                                Ok(res) => {
+                                    if let Some(close_info) = self.send(verified_index)? {
+                                        let connection_id = ConnectionId {
+                                            id: close_info.id,
+                                            probable_index: verified_index,
+                                        };
+                                        let end_reason =
+                                            ConnectionEndReason::from_close_info(&close_info);
+                                        if close_info.is_closed {
+                                            self.remove_connection(verified_index);
+                                            return Ok(RecvEvent::ConnectionEnded((
+                                                connection_id,
+                                                end_reason,
+                                            )));
+                                        }
+                                        return Ok(RecvEvent::ConnectionEnding((
+                                            connection_id,
+                                            end_reason,
+                                        )));
+                                    }
+                                    res
+                                }
+                                Err(_) => {
+                                    return Err(Error::ConnectionRecv);
+                                }
+                            };
+                            match recv_res {
+                                RecvResult::StreamProcess(conn_id) => {
+                                    let connection_id = ConnectionId {
                                         id: conn_id,
                                         probable_index: verified_index,
-                                    }))
-                                }
-                                Ok(RecvResult::BkgdStreamReadable(conn_id)) => {
-                                    self.send(verified_index)?;
-                                    Ok(EndpointEvent::BackgroundStreamReceived(ConnectionId {
-                                        id: conn_id,
-                                        probable_index: verified_index,
-                                    }))
-                                }
-                                Ok(RecvResult::Closed(conn_id)) => {
-                                    self.remove_connection(verified_index);
-                                    Ok(EndpointEvent::ConnectionClosed(ConnectionId {
-                                        id: conn_id,
-                                        probable_index: verified_index,
-                                    }))
-                                }
-                                Ok(RecvResult::Draining(conn_id)) => {
-                                    Ok(EndpointEvent::ConnectionClosing(ConnectionId {
-                                        id: conn_id,
-                                        probable_index: verified_index,
-                                    }))
-                                }
-                                Ok(RecvResult::Established(conn_id)) => {
-                                    self.send(verified_index)?;
+                                    };
+                                    match self.connections[verified_index].stream_process() {
+                                        Ok(StreamResult::MainStreamReadable((data_vec, len))) => {
+                                            if self.send(verified_index)?.is_none() {
+                                                Ok(RecvEvent::MainStreamReceived((
+                                                    connection_id,
+                                                    data_vec,
+                                                    len,
+                                                )))
+                                            } else {
+                                                Err(Error::UnexpectedClose)
+                                            }
+                                        }
+                                        Ok(StreamResult::RealtimeStreamReadable) => {
+                                            if self.send(verified_index)?.is_none() {
+                                                Ok(RecvEvent::RealtimeReceived(connection_id))
+                                            } else {
+                                                Err(Error::UnexpectedClose)
+                                            }
+                                        }
+                                        Ok(StreamResult::BkgdStreamReadable((data_vec, len))) => {
+                                            if self.send(verified_index)?.is_none() {
+                                                Ok(RecvEvent::BackgroundStreamReceived((
+                                                    connection_id,
+                                                    data_vec,
+                                                    len,
+                                                )))
+                                            } else {
+                                                Err(Error::UnexpectedClose)
+                                            }
+                                        }
+                                        Ok(StreamResult::Nothing) => Ok(RecvEvent::NoUpdate),
+                                        Ok(StreamResult::MainStreamFinished) => {
+                                            if let Some(close_info) = self.connection_close(
+                                                verified_index,
+                                                EndpointCloseReason::MainStreamFinished,
+                                            )? {
+                                                let end_reason =
+                                                    ConnectionEndReason::from_close_info(
+                                                        &close_info,
+                                                    );
+                                                if close_info.is_closed {
+                                                    self.remove_connection(verified_index);
+                                                    Ok(RecvEvent::ConnectionEnded((
+                                                        connection_id,
+                                                        end_reason,
+                                                    )))
+                                                } else {
+                                                    Ok(RecvEvent::ConnectionEnding((
+                                                        connection_id,
+                                                        end_reason,
+                                                    )))
+                                                }
+                                            } else {
+                                                Ok(RecvEvent::NoUpdate)
+                                            }
+                                        }
+                                        Ok(StreamResult::BkgdStreamFinished) => {
+                                            if let Some(close_info) = self.connection_close(
+                                                verified_index,
+                                                EndpointCloseReason::BackgroundStreamFinished,
+                                            )? {
+                                                let end_reason =
+                                                    ConnectionEndReason::from_close_info(
+                                                        &close_info,
+                                                    );
+                                                if close_info.is_closed {
+                                                    self.remove_connection(verified_index);
+                                                    Ok(RecvEvent::ConnectionEnded((
+                                                        connection_id,
+                                                        end_reason,
+                                                    )))
+                                                } else {
+                                                    Ok(RecvEvent::ConnectionEnding((
+                                                        connection_id,
+                                                        end_reason,
+                                                    )))
+                                                }
+                                            } else {
+                                                Ok(RecvEvent::NoUpdate)
+                                            }
+                                        }
 
+                                        Err(e) => Err(Error::StreamRecv(e)),
+                                    }
+                                }
+                                RecvResult::Nothing => Ok(RecvEvent::NoUpdate),
+                                RecvResult::Established(conn_id) => {
                                     // let mut main_recv_data_old =
                                     //     Vec::with_capacity(self.config.initial_main_recv_size);
                                     // main_recv_data_old
@@ -643,56 +939,61 @@ impl Endpoint {
                                         return Err(Error::StreamCreation);
                                     }
 
-                                    Ok(EndpointEvent::EstablishedOnce(ConnectionId {
+                                    Ok(RecvEvent::EstablishedOnce(ConnectionId {
                                         id: conn_id,
                                         probable_index: verified_index,
                                     }))
                                 }
-                                Ok(RecvResult::StreamReadable(_)) => {
-                                    self.send(verified_index)?;
-                                    //Maybe error out here and close connection in future?
-
-                                    // let stream_readable = StreamReadable {
-                                    //     stream_id,
-                                    //     conn_id,
-                                    //     probable_index: verified_index,
-                                    // };
-
-                                    // Ok(EndpointEvent::StreamReceivedData(stream_readable))
-
-                                    Ok(EndpointEvent::NoUpdate)
+                                RecvResult::CloseInitiated => {
+                                    // This is an unexpected spot but allowable
+                                    Ok(RecvEvent::NoUpdate)
                                 }
-                                Ok(_) => {
-                                    self.send(verified_index)?;
-                                    Ok(EndpointEvent::NoUpdate)
-                                }
-
-                                Err(_) => Err(Error::ConnectionRecv),
                             }
                         } else {
-                            Ok(EndpointEvent::NoUpdate)
+                            Ok(RecvEvent::NoUpdate)
                         }
                     } else {
-                        Ok(EndpointEvent::NoUpdate)
+                        Ok(RecvEvent::NoUpdate)
                     }
                 } else {
                     //Err(EndpointError::RecvTooMuchData)
-                    Ok(EndpointEvent::NoUpdate)
+                    Ok(RecvEvent::NoUpdate)
                 }
             }
-            Err(SocketError::RecvBlocked) => Ok(EndpointEvent::DoneReceiving),
-            Err(_) => Err(Error::SocketRecv),
+            Err(SocketError::RecvBlocked) => Ok(RecvEvent::DoneReceiving),
+            Err(SocketError::RecvOtherIssue(e)) => Err(Error::SocketRecv(e)),
+            Err(_) => Err(Error::SocketRecv(std::io::ErrorKind::Other)),
+        }
+    }
+
+    // Close a connection with a given error code value
+    fn connection_close(
+        &mut self,
+        verified_index: usize,
+        reason: EndpointCloseReason,
+    ) -> Result<Option<CloseInfo>, Error> {
+        match self.connections[verified_index].close(reason as u64, b"reason") {
+            Ok(_) => {
+                let close_info_opt = self.send(verified_index)?;
+                Ok(close_info_opt)
+            }
+            Err(_) => Err(Error::ConnectionClose),
         }
     }
 
     /// Close a connection with a given error code value
+    ///
+    /// Returns true when connection close process has started
     pub fn close_connection(&mut self, cid: &ConnectionId, error_code: u64) -> Result<bool, Error> {
         if let Some(verified_index) = self.find_connection_from_cid(cid) {
-            match self.connections[verified_index].close(error_code, b"reason") {
-                Ok(_) => match self.send(verified_index) {
-                    Ok(_) => Ok(true),
-                    Err(e) => Err(e),
-                },
+            match self.connections[verified_index].app_close(error_code, b"app-reason") {
+                Ok(_) => {
+                    if self.send(verified_index)?.is_some() {
+                        Err(Error::UnexpectedClose)
+                    } else {
+                        Ok(true)
+                    }
+                }
                 Err(_) => Err(Error::ConnectionClose),
             }
         } else {
@@ -707,42 +1008,65 @@ impl Endpoint {
         &mut self,
         cid: &ConnectionId,
         send_data: Vec<u8>,
-    ) -> Result<(u64, u64), Error> {
-        if let Some(verified_index) = self.find_connection_from_cid(cid) {
-            match self.connections[verified_index].main_stream_send(send_data) {
-                Ok(_) => self.send(verified_index),
-                Err(_) => Err(Error::StreamSend),
-            }
-        } else {
-            Err(Error::ConnectionNotFound)
-        }
-    }
-
-    pub(super) fn main_stream_recv(
-        &mut self,
-        cid: &ConnectionId,
-    ) -> Result<(Option<usize>, Option<Vec<u8>>), Error> {
-        if let Some(verified_index) = self.find_connection_from_cid(cid) {
-            match self.connections[verified_index].main_stream_read() {
-                Ok((x, y)) => Ok((x, y)),
-                Err(_) => Err(Error::StreamSend),
-            }
-        } else {
-            Err(Error::ConnectionNotFound)
-        }
-    }
-
-    pub(super) fn main_stream_set_target(
-        &mut self,
-        cid: &ConnectionId,
-        next_target: usize,
-        vec_data_return: Vec<u8>,
     ) -> Result<(), Error> {
         if let Some(verified_index) = self.find_connection_from_cid(cid) {
-            self.connections[verified_index].main_stream_next_target(next_target, vec_data_return);
-            Ok(())
+            match self.connections[verified_index].main_stream_send(send_data) {
+                Ok(_) => {
+                    if self.send(verified_index)?.is_some() {
+                        Err(Error::UnexpectedClose)
+                    } else {
+                        Ok(())
+                    }
+                }
+                Err(_) => Err(Error::StreamSend),
+            }
         } else {
             Err(Error::ConnectionNotFound)
+        }
+    }
+
+    pub(super) fn main_stream_read(
+        &mut self,
+        verified_index: usize,
+        data_vec: Vec<u8>,
+        target_len_opt: Option<usize>,
+    ) -> Result<ReadInfo, Error> {
+        if let Some(mut target_len) = target_len_opt {
+            if target_len == 0 {
+                target_len = 1;
+            }
+            match self.connections[verified_index].main_stream_read(data_vec, target_len) {
+                Ok(Some(vec_data)) => Ok(ReadInfo::ReadData((vec_data, target_len))),
+                Ok(None) => Ok(ReadInfo::DoneReceiving),
+                Err(connection::Error::Done) => {
+                    if let Some(close_info) = self
+                        .connection_close(verified_index, EndpointCloseReason::MainStreamFinished)?
+                    {
+                        let end_reason = ConnectionEndReason::from_close_info(&close_info);
+                        if close_info.is_closed {
+                            self.remove_connection(verified_index);
+                            Ok(ReadInfo::ConnectionEnded(end_reason))
+                        } else {
+                            Ok(ReadInfo::ConnectionEnding(end_reason))
+                        }
+                    } else {
+                        Ok(ReadInfo::DoneReceiving)
+                    }
+                }
+                Err(_) => Err(Error::StreamSend),
+            }
+        } else if let Some(close_info) =
+            self.connection_close(verified_index, EndpointCloseReason::MainStreamFinished)?
+        {
+            let end_reason = ConnectionEndReason::from_close_info(&close_info);
+            if close_info.is_closed {
+                self.remove_connection(verified_index);
+                Ok(ReadInfo::ConnectionEnded(end_reason))
+            } else {
+                Ok(ReadInfo::ConnectionEnding(end_reason))
+            }
+        } else {
+            Ok(ReadInfo::DoneReceiving)
         }
     }
 
@@ -753,42 +1077,65 @@ impl Endpoint {
         &mut self,
         cid: &ConnectionId,
         send_data: Vec<u8>,
-    ) -> Result<(u64, u64), Error> {
-        if let Some(verified_index) = self.find_connection_from_cid(cid) {
-            match self.connections[verified_index].bkgd_stream_send(send_data) {
-                Ok(_) => self.send(verified_index),
-                Err(_) => Err(Error::StreamSend),
-            }
-        } else {
-            Err(Error::ConnectionNotFound)
-        }
-    }
-
-    pub(super) fn background_stream_recv(
-        &mut self,
-        cid: &ConnectionId,
-    ) -> Result<(Option<usize>, Option<Vec<u8>>), Error> {
-        if let Some(verified_index) = self.find_connection_from_cid(cid) {
-            match self.connections[verified_index].bkgd_stream_read() {
-                Ok((x, y)) => Ok((x, y)),
-                Err(_) => Err(Error::StreamSend),
-            }
-        } else {
-            Err(Error::ConnectionNotFound)
-        }
-    }
-
-    pub(super) fn background_stream_set_target(
-        &mut self,
-        cid: &ConnectionId,
-        next_target: usize,
-        vec_data_return: Vec<u8>,
     ) -> Result<(), Error> {
         if let Some(verified_index) = self.find_connection_from_cid(cid) {
-            self.connections[verified_index].bkgd_stream_next_target(next_target, vec_data_return);
-            Ok(())
+            match self.connections[verified_index].bkgd_stream_send(send_data) {
+                Ok(_) => {
+                    if self.send(verified_index)?.is_some() {
+                        Err(Error::UnexpectedClose)
+                    } else {
+                        Ok(())
+                    }
+                }
+                Err(_) => Err(Error::StreamSend),
+            }
         } else {
             Err(Error::ConnectionNotFound)
+        }
+    }
+
+    pub(super) fn background_stream_read(
+        &mut self,
+        verified_index: usize,
+        data_vec: Vec<u8>,
+        target_len_opt: Option<usize>,
+    ) -> Result<ReadInfo, Error> {
+        if let Some(mut target_len) = target_len_opt {
+            if target_len == 0 {
+                target_len = 1;
+            }
+            match self.connections[verified_index].bkgd_stream_read(data_vec, target_len) {
+                Ok(Some(vec_data)) => Ok(ReadInfo::ReadData((vec_data, target_len))),
+                Ok(None) => Ok(ReadInfo::DoneReceiving),
+                Err(connection::Error::Done) => {
+                    if let Some(close_info) = self
+                        .connection_close(verified_index, EndpointCloseReason::MainStreamFinished)?
+                    {
+                        let end_reason = ConnectionEndReason::from_close_info(&close_info);
+                        if close_info.is_closed {
+                            self.remove_connection(verified_index);
+                            Ok(ReadInfo::ConnectionEnded(end_reason))
+                        } else {
+                            Ok(ReadInfo::ConnectionEnding(end_reason))
+                        }
+                    } else {
+                        Ok(ReadInfo::DoneReceiving)
+                    }
+                }
+                Err(_) => Err(Error::StreamSend),
+            }
+        } else if let Some(close_info) =
+            self.connection_close(verified_index, EndpointCloseReason::MainStreamFinished)?
+        {
+            let end_reason = ConnectionEndReason::from_close_info(&close_info);
+            if close_info.is_closed {
+                self.remove_connection(verified_index);
+                Ok(ReadInfo::ConnectionEnded(end_reason))
+            } else {
+                Ok(ReadInfo::ConnectionEnding(end_reason))
+            }
+        } else {
+            Ok(ReadInfo::DoneReceiving)
         }
     }
 }

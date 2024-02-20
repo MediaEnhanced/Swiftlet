@@ -93,7 +93,7 @@ pub(super) enum SocketError {
     SendBlocked,
     SendOtherIssue,
     RecvBlocked,
-    RecvOtherIssue,
+    RecvOtherIssue(std::io::ErrorKind),
 }
 
 impl UdpSocket {
@@ -166,7 +166,6 @@ impl UdpSocket {
                 }
             }
         } else {
-            //println!("Delayed Packet!");
             let delayed_send_packet = DelayedSendPacket {
                 data: self.packet, // It copies it...?
                 data_len: len,
@@ -261,7 +260,7 @@ impl UdpSocket {
                 if err.kind() == std::io::ErrorKind::WouldBlock {
                     Err(SocketError::RecvBlocked)
                 } else {
-                    Err(SocketError::RecvOtherIssue)
+                    Err(SocketError::RecvOtherIssue(err.kind()))
                 }
             }
         }

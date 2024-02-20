@@ -41,7 +41,7 @@ use crate::communication::{
 
 // Use quic sub-library for internet communications
 use swiftlet_quic::{
-    endpoint::{Config, ConnectionId, Endpoint, SocketAddr},
+    endpoint::{Config, ConnectionEndReason, ConnectionId, Endpoint, SocketAddr},
     EndpointEventCallbacks, EndpointHandler,
 };
 
@@ -625,9 +625,13 @@ impl EndpointEventCallbacks for ServerState {
         &mut self,
         endpoint: &mut Endpoint,
         cid: &ConnectionId,
+        reason: ConnectionEndReason,
         remaining_connections: usize,
     ) -> bool {
         if self.remove_connection_state(cid) {
+            let ended_reason = format!("Server Connection Ended Reason: {:?}\n", reason);
+            let _ = self.channels.network_debug_send.send(ended_reason);
+
             // Temporarily (inefficiently) used for removing of clients
             for vi in 0..self.client_states.len() {
                 let mut send_data = self.create_refresh_data(vi);
@@ -639,8 +643,14 @@ impl EndpointEventCallbacks for ServerState {
         false
     }
 
-    fn connection_ending_warning(&mut self, endpoint: &mut Endpoint, cid: &ConnectionId) {
-        // COULD end earlier in future
+    fn connection_ending_warning(
+        &mut self,
+        endpoint: &mut Endpoint,
+        cid: &ConnectionId,
+        reason: ConnectionEndReason,
+    ) {
+        let ending_reason = format!("Server Connection Ending Reason: {:?}\n", reason);
+        let _ = self.channels.network_debug_send.send(ending_reason);
     }
 
     fn tick(&mut self, endpoint: &mut Endpoint) -> bool {
@@ -694,7 +704,12 @@ impl EndpointEventCallbacks for ServerState {
                     Ok(NetworkCommand::Server(server_cmd)) => {
                         self.handle_commands(endpoint, server_cmd)
                     }
-                    Ok(NetworkCommand::Stop(int)) => return true,
+                    Ok(NetworkCommand::Stop(int)) => {
+                        for cs in &self.client_states {
+                            let _ = endpoint.close_connection(&cs.cid, 4);
+                        }
+                        return true;
+                    }
                     Err(_) => return true, // Other recv errors
                     Ok(NetworkCommand::Client(_)) => {}
                 }
@@ -1052,12 +1067,15 @@ impl EndpointEventCallbacks for ClientHandler {
         &mut self,
         endpoint: &mut Endpoint,
         cid: &ConnectionId,
+        reason: ConnectionEndReason,
         remaining_connections: usize,
     ) -> bool {
         if let Some(my_conn_id) = &self.cid_option {
             if *my_conn_id == *cid {
                 self.cid_option = None;
                 self.main_recv_type = None;
+                let ended_reason = format!("Client Connection Ended Reason: {:?}\n", reason);
+                let _ = self.channels.network_debug_send.send(ended_reason);
             }
         }
 
@@ -1065,11 +1083,18 @@ impl EndpointEventCallbacks for ClientHandler {
         remaining_connections == 0
     }
 
-    fn connection_ending_warning(&mut self, endpoint: &mut Endpoint, cid: &ConnectionId) {
+    fn connection_ending_warning(
+        &mut self,
+        endpoint: &mut Endpoint,
+        cid: &ConnectionId,
+        reason: ConnectionEndReason,
+    ) {
         if let Some(my_conn_id) = &self.cid_option {
             if *my_conn_id == *cid {
                 self.cid_option = None;
                 self.main_recv_type = None;
+                let ending_reason = format!("Client Connection Ending Reason: {:?}\n", reason);
+                let _ = self.channels.network_debug_send.send(ending_reason);
             }
         }
     }
@@ -1200,7 +1225,7 @@ pub(crate) fn server_thread(
         background_recv_first_bytes: MESSAGE_HEADER_SIZE,
     };
 
-    let server_endpoint =
+    let mut server_endpoint =
         match Endpoint::new_server(bind_address, ALPN_NAME, CERT_PATH, PKEY_PATH, config) {
             Ok(endpoint) => endpoint,
             Err(err) => {
@@ -1215,12 +1240,12 @@ pub(crate) fn server_thread(
     let mut server_state = ServerState::new(server_name, channels);
     server_state.send_debug_text("Starting Server Network!\n");
 
-    let mut rtc_handler = EndpointHandler::new(server_endpoint, &mut server_state);
-
+    let mut rtc_handler = EndpointHandler::new(&mut server_endpoint, &mut server_state);
     match rtc_handler.run_event_loop(std::time::Duration::from_millis(5)) {
         Ok(_) => {}
-        Err(_) => {
-            server_state.send_debug_text("Server Event Loop Error\n");
+        Err(e) => {
+            let error_print = format!("Server Error: {:?}\n", e);
+            let _ = server_state.channels.network_debug_send.send(error_print);
         }
     }
 
@@ -1250,7 +1275,7 @@ pub(crate) fn client_thread(
         initial_background_recv_size: 65536,
         background_recv_first_bytes: MESSAGE_HEADER_SIZE,
     };
-    let client_endpoint = match Endpoint::new_client_with_first_connection(
+    let mut client_endpoint = match Endpoint::new_client_with_first_connection(
         bind_address,
         ALPN_NAME,
         CERT_PATH,
@@ -1268,45 +1293,29 @@ pub(crate) fn client_thread(
         }
     };
 
-    // Not ideal but works for now...
-    let command_handler = channels.command_recv.clone();
-
     let mut client_handler = ClientHandler::new(user_name, channels, network_audio_out_channels);
     client_handler.send_debug_text("Starting Client Network!\n");
-    let mut rtc_handler = EndpointHandler::new(client_endpoint, &mut client_handler);
 
     loop {
-        // If
-        match rtc_handler.run_event_loop(std::time::Duration::from_millis(5)) {
-            Ok(Some(endpoint)) => {
+        let mut endpoint_handler = EndpointHandler::new(&mut client_endpoint, &mut client_handler);
+        match endpoint_handler.run_event_loop(std::time::Duration::from_millis(5)) {
+            Ok(true) => {
                 loop {
                     std::thread::sleep(std::time::Duration::from_millis(50));
-                    let should_quit = loop {
-                        match command_handler.try_recv() {
-                            Err(TryRecvError::Empty) => break false,
-                            Ok(NetworkCommand::Client(ClientCommand::ServerConnect(
-                                server_address,
-                            ))) => {
-                                let _ = endpoint.add_client_connection(server_address, SERVER_NAME);
-                                break true;
-                            }
-                            Ok(NetworkCommand::Stop(int)) => break true,
-                            Err(_) => break true, // Other recv errors
-                            Ok(_) => {}
-                        }
-                    };
-                    if should_quit {
+                    if client_handler.handle_limited_commands(&mut client_endpoint) {
                         break;
                     }
                 }
-                if endpoint.get_num_connections() > 0 {
+                if client_endpoint.get_num_connections() == 0 {
                     break;
                 }
             }
-            Ok(None) => {
+            Ok(false) => {
                 break;
             }
-            Err(_) => {
+            Err(e) => {
+                let error_print = format!("Client Error: {:?}\n", e);
+                let _ = client_handler.channels.network_debug_send.send(error_print);
                 break;
             }
         }
