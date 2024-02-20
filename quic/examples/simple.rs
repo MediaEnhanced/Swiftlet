@@ -36,7 +36,7 @@ const MESSAGE_HEADER_SIZE: usize = 3;
 const BUFFER_SIZE_PER_CONNECTION: usize = 65536; // 16 KiB
 
 fn main() {
-    crossterm::terminal::enable_raw_mode().unwrap();
+    //crossterm::terminal::enable_raw_mode().unwrap();
 
     println!("Press the S or C keys to quit the Server or Client threads respectively!");
     println!(
@@ -44,18 +44,19 @@ fn main() {
     );
 
     let port = 9001;
-    let server_thread = std::thread::spawn(move || server_thread(port, "Server".to_string()));
+    let server_thread_handle =
+        std::thread::spawn(move || server_thread(port, "Server".to_string()));
     std::thread::sleep(std::time::Duration::from_secs(1));
 
     let local_ipv6 = std::net::Ipv6Addr::from([0, 0, 0, 0, 0, 0, 0, 1]);
     let server_address = SocketAddr::V6(std::net::SocketAddrV6::new(local_ipv6, port, 0, 0));
-    let client_thread =
+    let client_thread_handle =
         std::thread::spawn(move || client_thread(server_address, "Client".to_string()));
 
-    client_thread.join().unwrap();
-    server_thread.join().unwrap();
+    client_thread_handle.join().unwrap();
+    server_thread_handle.join().unwrap();
 
-    crossterm::terminal::disable_raw_mode().unwrap();
+    //crossterm::terminal::disable_raw_mode().unwrap();
 }
 
 fn server_thread(port: u16, server_name: String) {
@@ -92,9 +93,14 @@ fn server_thread(port: u16, server_name: String) {
 
     let mut endpoint_handler = EndpointHandler::new(&mut server_endpoint, &mut server_state);
     match endpoint_handler.run_event_loop(std::time::Duration::from_millis(5)) {
-        Ok(_) => {}
-        Err(_) => {
-            server_state.send_debug_text("Server Event Loop Error\n");
+        Ok(true) => {
+            println!("Server event loop ended due to the connection_ended callback function returning true!");
+        }
+        Ok(false) => {
+            println!("Server event loop ended due to the tick callback function returning true!");
+        }
+        Err(e) => {
+            println!("Server Error: {:?}", e);
         }
     }
 
@@ -141,9 +147,14 @@ fn client_thread(server_address: SocketAddr, user_name: String) {
 
     let mut endpoint_handler = EndpointHandler::new(&mut client_endpoint, &mut client_handler);
     match endpoint_handler.run_event_loop(std::time::Duration::from_millis(5)) {
-        Ok(_) => {}
-        Err(_) => {
-            client_handler.send_debug_text("Client Event Loop Error\n");
+        Ok(true) => {
+            println!("Client event loop ended due to the connection_ended callback function returning true!");
+        }
+        Ok(false) => {
+            println!("Client event loop ended due to the tick callback function returning true!");
+        }
+        Err(e) => {
+            println!("Client Error: {:?}", e);
         }
     }
 
