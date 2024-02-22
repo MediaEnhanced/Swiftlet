@@ -769,7 +769,7 @@ impl Endpoint {
                             let scid_data = tag.as_ref();
 
                             let writer_opt = match self.connections.len() {
-                                0 => match std::fs::File::create("security/key.log") {
+                                0 => match std::fs::File::create("key.log") {
                                     Ok(file) => Some(Box::new(file)),
                                     Err(_) => None,
                                 },

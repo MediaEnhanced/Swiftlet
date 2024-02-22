@@ -20,8 +20,8 @@
 //OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //SOFTWARE.
 
-use crossbeam::channel::bounded;
-pub(crate) use crossbeam::channel::{Receiver, Sender, TryRecvError};
+use crossbeam_channel::bounded;
+pub(crate) use crossbeam_channel::{Receiver, Sender, TryRecvError};
 
 use crate::audio;
 

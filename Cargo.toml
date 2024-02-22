@@ -33,7 +33,7 @@ autobenches = false
 clap = { version = "4.4.18", features = ["derive"] }
 
 # Thread Sync Requirements:
-crossbeam = "*"
+crossbeam-channel = "*"
 
 # Network (Thread) Requirements:
 swiftlet_quic = { version = "*", path = "quic" }
@@ -54,9 +54,9 @@ ratatui = "*"
 resolver = "2"
 members = [
   ".",
-  "quic",
-  "binaural",
   "audio",
+  "binaural",
+  "quic",
 ]
 
 [workspace.lints.rust]
