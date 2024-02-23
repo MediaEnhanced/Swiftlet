@@ -96,10 +96,25 @@ pub struct Endpoint {
 /// A Connection ID structure to communicate with the endpoint about a specific connection.
 ///
 /// Should be updated so that endpoint function calls are more efficient.
+#[derive(Debug)]
 pub struct ConnectionId {
     id: u64,
     probable_index: usize,
 }
+
+impl Ord for ConnectionId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.id.cmp(&other.id)
+    }
+}
+
+impl PartialOrd for ConnectionId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Eq for ConnectionId {}
 
 impl PartialEq for ConnectionId {
     fn eq(&self, other: &Self) -> bool {

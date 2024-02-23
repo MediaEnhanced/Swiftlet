@@ -25,6 +25,7 @@ const SERVER_NAME: &str = "localhost"; // Server "Name" / Domain Name that shoul
 const CERT_PATH: &str = "security/cert.pem"; // Location of the certificate for the server to use (temporarily used by client to verify server)
 const PKEY_PATH: &str = "security/pkey.pem"; // Location of the private key for the server to use
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use swiftlet_quic::{
@@ -252,7 +253,6 @@ fn get_stream_msg_size(read_data: &[u8]) -> usize {
 const MAX_CHAR_LENGTH: usize = 32;
 
 struct ClientState {
-    cid: ConnectionId,
     main_recv_type: Option<StreamMsgType>,
     user_name: [u8; MAX_CHAR_LENGTH * 4],
     user_name_len: usize,
@@ -260,9 +260,8 @@ struct ClientState {
 }
 
 impl ClientState {
-    fn new(cid: ConnectionId, user_name_bytes: &[u8]) -> Option<Self> {
+    fn new(user_name_bytes: &[u8]) -> Option<Self> {
         let mut cs = ClientState {
-            cid,
             main_recv_type: None,
             user_name: [0; MAX_CHAR_LENGTH * 4],
             user_name_len: 0,
@@ -303,7 +302,7 @@ struct ServerState {
     name_len: usize,
     command_handler_tick: u64,
     potential_clients: Vec<ConnectionId>,
-    client_states: Vec<ClientState>,
+    client_states: BTreeMap<ConnectionId, ClientState>,
 }
 
 impl ServerState {
@@ -332,19 +331,13 @@ impl ServerState {
             name_len,
             command_handler_tick: 0,
             potential_clients: Vec::new(),
-            client_states: Vec::new(),
+            client_states: BTreeMap::new(),
         }
     }
 
     #[inline]
     fn send_debug_text(&self, text: &str) {
         print!("{}", text);
-    }
-
-    #[inline]
-    fn find_connection_index_from_cid(&self, cid: &ConnectionId) -> Option<usize> {
-        // Can use binary search later since the client states are ordered by id#
-        self.client_states.iter().position(|cs| cs.cid == *cid)
     }
 
     fn add_new_verified_connection(
@@ -354,21 +347,23 @@ impl ServerState {
         read_data: &[u8],
     ) -> bool {
         let username_len = read_data[0] as usize;
-        if let Some(cs) = ClientState::new(cid.clone(), &read_data[1..username_len + 1]) {
+        if let Some(cs) = ClientState::new(&read_data[1..username_len + 1]) {
+            // Should always be inserted at the end of the BTree due to the ConnectionId properties
             let cs_ind = self.client_states.len();
-            self.client_states.push(cs);
+            self.client_states.insert(cid.clone(), cs);
 
             // Send new client a state refresh
             let mut send_data = self.create_refresh_data(cs_ind);
             set_stream_msg_size(&mut send_data);
             let _ = endpoint.main_stream_send(cid, send_data);
 
+            let mut send_data = self.create_new_client_data(cid);
+            set_stream_msg_size(&mut send_data);
+
             // Send all other clients a msg about the new client
-            for (ind, conn) in self.client_states.iter().enumerate() {
+            for (ind, (conn_id, _cs)) in self.client_states.iter().enumerate() {
                 if ind != cs_ind {
-                    let mut send_data = self.create_new_client_data(cs_ind);
-                    set_stream_msg_size(&mut send_data);
-                    let _ = endpoint.main_stream_send(&conn.cid, send_data);
+                    let _ = endpoint.main_stream_send(conn_id, send_data.clone());
                 }
             }
             true
@@ -378,22 +373,17 @@ impl ServerState {
     }
 
     fn remove_connection_state(&mut self, cid: &ConnectionId) -> bool {
-        if let Some(verified_index) = self.find_connection_index_from_cid(cid) {
-            self.client_states.remove(verified_index);
-            true
-        } else {
-            false
-        }
+        self.client_states.remove(cid).is_some()
     }
 
-    fn create_refresh_data(&mut self, verified_index: usize) -> Vec<u8> {
+    fn create_refresh_data(&self, verified_index: usize) -> Vec<u8> {
         let mut data = StreamMsgType::ServerStateRefresh.get_stream_msg();
         data.push(self.client_states.len() as u8);
         data.push(verified_index as u8);
         data.push(self.name_len as u8);
         data.extend_from_slice(&self.name[..self.name_len]);
 
-        for cs in &self.client_states {
+        for cs in self.client_states.values() {
             data.push(cs.user_name_len as u8);
             data.extend_from_slice(&cs.user_name[..cs.user_name_len]);
             data.push(cs.state);
@@ -403,13 +393,14 @@ impl ServerState {
         data
     }
 
-    fn create_new_client_data(&self, verified_index: usize) -> Vec<u8> {
+    fn create_new_client_data(&self, cid: &ConnectionId) -> Vec<u8> {
         let mut data = StreamMsgType::NewClient.get_stream_msg();
-        let cs = &self.client_states[verified_index];
 
-        data.push(cs.user_name_len as u8);
-        data.extend_from_slice(&cs.user_name[..cs.user_name_len]);
-        data.push(cs.state);
+        if let Some(cs) = self.client_states.get(cid) {
+            data.push(cs.user_name_len as u8);
+            data.extend_from_slice(&cs.user_name[..cs.user_name_len]);
+            data.push(cs.state);
+        }
 
         data
     }
@@ -442,10 +433,10 @@ impl EndpointEventCallbacks for ServerState {
                 _ => println!("Server Connection Ended Reason: {:?}", reason),
             }
             // Temporarily (inefficiently) used for removing of clients
-            for vi in 0..self.client_states.len() {
-                let mut send_data = self.create_refresh_data(vi);
+            for (verified_index, (conn_id, _cs)) in self.client_states.iter().enumerate() {
+                let mut send_data = self.create_refresh_data(verified_index);
                 set_stream_msg_size(&mut send_data);
-                let _ = endpoint.main_stream_send(&self.client_states[vi].cid, send_data);
+                let _ = endpoint.main_stream_send(conn_id, send_data);
             }
         }
         false
@@ -461,9 +452,9 @@ impl EndpointEventCallbacks for ServerState {
                             crossterm::event::KeyCode::Char(c) => {
                                 let uc = c.to_ascii_uppercase();
                                 if uc == 'S' {
-                                    for cs in &self.client_states {
+                                    for conn_id in self.client_states.keys() {
                                         let _ = endpoint.close_connection(
-                                            &cs.cid,
+                                            conn_id,
                                             ErrorCode::ServerClosed as u64,
                                         );
                                     }
@@ -489,9 +480,9 @@ impl EndpointEventCallbacks for ServerState {
         cid: &ConnectionId,
         read_data: &[u8],
     ) -> Option<usize> {
-        if let Some(vi) = self.find_connection_index_from_cid(cid) {
-            self.client_states[vi].cid.update(cid);
-            if let Some(_msg_type) = self.client_states[vi].main_recv_type.take() {
+        if let Some(cs) = self.client_states.get_mut(cid) {
+            //self.client_states[vi].cid.update(cid);
+            if let Some(_msg_type) = cs.main_recv_type.take() {
                 // if self.handle_stream_msg(endpoint, vi, msg_type, read_data) {
                 //     Some(MESSAGE_HEADER_SIZE)
                 // } else {
@@ -500,7 +491,7 @@ impl EndpointEventCallbacks for ServerState {
             } else {
                 let new_msg_type = StreamMsgType::from_u8(read_data[0]);
                 if new_msg_type.intended_for_server() {
-                    self.client_states[vi].main_recv_type = Some(new_msg_type);
+                    cs.main_recv_type = Some(new_msg_type);
                     Some(get_stream_msg_size(read_data))
                 } else {
                     None

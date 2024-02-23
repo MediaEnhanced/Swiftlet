@@ -11,3 +11,11 @@ build-linux-x64 = "build --target x86_64-unknown-linux-gnu"
 build-linux-arm64 = "build --target aarch64-unknown-linux-gnu"
 run-quic-example = "run -p swiftlet_quic --example simple"
 run-binaural-example = "run -p swiftlet_binaural --example demo"
+
+#[env]
+#RUST_BACKTRACE="1"
+#COREAUDIO_SDK_PATH="MacOSX.sdk"
+
+#[target.aarch64-apple-darwin]
+
+
