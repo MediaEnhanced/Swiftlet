@@ -40,8 +40,7 @@ swiftlet_quic = { version = "*", path = "quic" }
 #bincode = { version = "2.0.0-rc.3" }
 
 # Audio Requirements:
-cpal = "*"
-opus = "*"
+swiftlet_audio = { version = "*", path = "audio", features = ["opus"] }
 #swiftlet_binaural = { version = "*", path = "binaural" }
 
 # Console Requirements:

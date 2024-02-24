@@ -30,6 +30,9 @@ pub mod raw;
 mod os;
 use os::AudioDevice;
 
+#[cfg(feature = "opus")]
+pub mod opus;
+
 pub enum Error {
     DeviceCreation,
 }

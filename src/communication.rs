@@ -23,7 +23,7 @@
 use crossbeam_channel::bounded;
 pub(crate) use crossbeam_channel::{Receiver, Sender, TryRecvError};
 
-use crate::audio;
+use crate::audio::OpusData;
 
 pub(crate) struct NetworkThreadChannels {
     pub(crate) command_recv: Receiver<NetworkCommand>,
@@ -66,7 +66,7 @@ pub(crate) enum NetworkCommand {
 pub(crate) enum ClientCommand {
     StateChange(u8),
     ServerConnect(swiftlet_quic::endpoint::SocketAddr),
-    MusicTransfer(audio::OpusData),
+    MusicTransfer(OpusData),
 }
 
 pub(crate) enum ServerCommand {
@@ -136,7 +136,7 @@ pub(crate) fn create_audio_output_channels() -> (
 }
 
 pub(crate) enum ConsoleAudioCommands {
-    LoadOpus(audio::OpusData),
+    LoadOpus(OpusData),
     PlayOpus(u64),
 }
 
