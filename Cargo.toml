@@ -17,9 +17,8 @@ edition = "2021"
 publish = false
 default-run = "swiftlet"
 
-# The build script informs the cargo builder of the dynamic library "./bin" location
-# neccessary for linking to dependencies in the future
-#build = "src/build.rs"
+# The build script makes sure that the build target is a valid option
+build = "src/build.rs"
 
 # Disable Automatic Discovery
 autobins = false
@@ -83,7 +82,7 @@ opt-level = 3
 lto = true
 panic = 'abort'
 strip = true
+codegen-units = 1
 #debug = false
-#rpath = false
 #debug-assertions = false
-#codegen-units = 1
+#rpath = false

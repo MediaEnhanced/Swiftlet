@@ -350,7 +350,7 @@ impl ServerState {
         if let Some(cs) = ClientState::new(&read_data[1..username_len + 1]) {
             // Should always be inserted at the end of the BTree due to the ConnectionId properties
             let cs_ind = self.client_states.len();
-            self.client_states.insert(cid.clone(), cs);
+            self.client_states.insert(*cid, cs);
 
             // Send new client a state refresh
             let mut send_data = self.create_refresh_data(cs_ind);
@@ -512,7 +512,7 @@ impl EndpointEventCallbacks for ServerState {
             // Check to see if it's a new valid server
             match StreamMsgType::from_u8(read_data[0]) {
                 StreamMsgType::NewClientAnnounce => {
-                    self.potential_clients.push(cid.clone());
+                    self.potential_clients.push(*cid);
                     Some(get_stream_msg_size(read_data))
                 }
                 _ => {
@@ -667,7 +667,6 @@ impl EndpointEventCallbacks for ClientHandler {
     ) -> Option<usize> {
         if let Some(my_cid) = &mut self.cid_option {
             if *my_cid == *cid {
-                my_cid.update(cid);
                 if let Some(msg_type) = self.main_recv_type.take() {
                     if self.handle_stream_msg(endpoint, cid, msg_type, read_data) {
                         Some(MESSAGE_HEADER_SIZE)
@@ -691,7 +690,7 @@ impl EndpointEventCallbacks for ClientHandler {
             // Check to see if it's a new valid server
             match StreamMsgType::from_u8(read_data[0]) {
                 StreamMsgType::ServerStateRefresh => {
-                    self.cid_option = Some(cid.clone());
+                    self.cid_option = Some(*cid);
                     self.main_recv_type = Some(StreamMsgType::ServerStateRefresh);
                     Some(get_stream_msg_size(read_data))
                 }

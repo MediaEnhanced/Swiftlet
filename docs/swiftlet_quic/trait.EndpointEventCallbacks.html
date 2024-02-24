@@ -3,12 +3,12 @@
     fn <a href="#tymethod.connection_started" class="fn">connection_started</a>(
         &amp;mut self,
         endpoint: &amp;mut <a class="struct" href="endpoint/struct.Endpoint.html" title="struct swiftlet_quic::endpoint::Endpoint">Endpoint</a>,
-        cid: &amp;<a class="struct" href="endpoint/struct.ConnectionId.html" title="struct swiftlet_quic::endpoint::ConnectionId">ConnectionId</a>
+        cid: &amp;<a class="type" href="endpoint/type.ConnectionId.html" title="type swiftlet_quic::endpoint::ConnectionId">ConnectionId</a>
     );
 <span class="item-spacer"></span>    fn <a href="#tymethod.connection_ended" class="fn">connection_ended</a>(
         &amp;mut self,
         endpoint: &amp;mut <a class="struct" href="endpoint/struct.Endpoint.html" title="struct swiftlet_quic::endpoint::Endpoint">Endpoint</a>,
-        cid: &amp;<a class="struct" href="endpoint/struct.ConnectionId.html" title="struct swiftlet_quic::endpoint::ConnectionId">ConnectionId</a>,
+        cid: &amp;<a class="type" href="endpoint/type.ConnectionId.html" title="type swiftlet_quic::endpoint::ConnectionId">ConnectionId</a>,
         reason: <a class="enum" href="endpoint/enum.ConnectionEndReason.html" title="enum swiftlet_quic::endpoint::ConnectionEndReason">ConnectionEndReason</a>,
         remaining_connections: <a class="primitive" href="https://doc.rust-lang.org/1.75.0/std/primitive.usize.html">usize</a>
     ) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.75.0/std/primitive.bool.html">bool</a>;
@@ -16,7 +16,7 @@
 <span class="item-spacer"></span>    fn <a href="#tymethod.main_stream_recv" class="fn">main_stream_recv</a>(
         &amp;mut self,
         endpoint: &amp;mut <a class="struct" href="endpoint/struct.Endpoint.html" title="struct swiftlet_quic::endpoint::Endpoint">Endpoint</a>,
-        cid: &amp;<a class="struct" href="endpoint/struct.ConnectionId.html" title="struct swiftlet_quic::endpoint::ConnectionId">ConnectionId</a>,
+        cid: &amp;<a class="type" href="endpoint/type.ConnectionId.html" title="type swiftlet_quic::endpoint::ConnectionId">ConnectionId</a>,
         read_data: &amp;[<a class="primitive" href="https://doc.rust-lang.org/1.75.0/std/primitive.u8.html">u8</a>]
     ) -&gt; <a class="enum" href="https://doc.rust-lang.org/1.75.0/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.75.0/std/primitive.usize.html">usize</a>&gt;;
 
@@ -24,24 +24,24 @@
     fn <a href="#method.connection_ending_warning" class="fn">connection_ending_warning</a>(
         &amp;mut self,
         _endpoint: &amp;mut <a class="struct" href="endpoint/struct.Endpoint.html" title="struct swiftlet_quic::endpoint::Endpoint">Endpoint</a>,
-        _cid: &amp;<a class="struct" href="endpoint/struct.ConnectionId.html" title="struct swiftlet_quic::endpoint::ConnectionId">ConnectionId</a>,
+        _cid: &amp;<a class="type" href="endpoint/type.ConnectionId.html" title="type swiftlet_quic::endpoint::ConnectionId">ConnectionId</a>,
         _reason: <a class="enum" href="endpoint/enum.ConnectionEndReason.html" title="enum swiftlet_quic::endpoint::ConnectionEndReason">ConnectionEndReason</a>
     ) { ... }
 <span class="item-spacer"></span>    fn <a href="#method.background_stream_recv" class="fn">background_stream_recv</a>(
         &amp;mut self,
         _endpoint: &amp;mut <a class="struct" href="endpoint/struct.Endpoint.html" title="struct swiftlet_quic::endpoint::Endpoint">Endpoint</a>,
-        _cid: &amp;<a class="struct" href="endpoint/struct.ConnectionId.html" title="struct swiftlet_quic::endpoint::ConnectionId">ConnectionId</a>,
+        _cid: &amp;<a class="type" href="endpoint/type.ConnectionId.html" title="type swiftlet_quic::endpoint::ConnectionId">ConnectionId</a>,
         _read_data: &amp;[<a class="primitive" href="https://doc.rust-lang.org/1.75.0/std/primitive.u8.html">u8</a>]
     ) -&gt; <a class="enum" href="https://doc.rust-lang.org/1.75.0/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.75.0/std/primitive.usize.html">usize</a>&gt; { ... }
 }</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Required QUIC Endpoint Handler Event Callback Functions</p>
 <p>These functions will get called for their respective events.
 These callbacks are expected to return within a couple milliseconds AT THE MOST
 for all processing cases.</p>
-</div></details><h2 id="required-methods" class="small-section-header">Required Methods<a href="#required-methods" class="anchor">§</a></h2><div class="methods"><details class="toggle method-toggle" open><summary><section id="tymethod.connection_started" class="method"><a class="src rightside" href="../src/swiftlet_quic/lib.rs.html#47">source</a><h4 class="code-header">fn <a href="#tymethod.connection_started" class="fn">connection_started</a>(&amp;mut self, endpoint: &amp;mut <a class="struct" href="endpoint/struct.Endpoint.html" title="struct swiftlet_quic::endpoint::Endpoint">Endpoint</a>, cid: &amp;<a class="struct" href="endpoint/struct.ConnectionId.html" title="struct swiftlet_quic::endpoint::ConnectionId">ConnectionId</a>)</h4></section></summary><div class="docblock"><p>Called when a new connection is started and is application ready.</p>
+</div></details><h2 id="required-methods" class="small-section-header">Required Methods<a href="#required-methods" class="anchor">§</a></h2><div class="methods"><details class="toggle method-toggle" open><summary><section id="tymethod.connection_started" class="method"><a class="src rightside" href="../src/swiftlet_quic/lib.rs.html#47">source</a><h4 class="code-header">fn <a href="#tymethod.connection_started" class="fn">connection_started</a>(&amp;mut self, endpoint: &amp;mut <a class="struct" href="endpoint/struct.Endpoint.html" title="struct swiftlet_quic::endpoint::Endpoint">Endpoint</a>, cid: &amp;<a class="type" href="endpoint/type.ConnectionId.html" title="type swiftlet_quic::endpoint::ConnectionId">ConnectionId</a>)</h4></section></summary><div class="docblock"><p>Called when a new connection is started and is application ready.</p>
 </div></details><details class="toggle method-toggle" open><summary><section id="tymethod.connection_ended" class="method"><a class="src rightside" href="../src/swiftlet_quic/lib.rs.html#54-60">source</a><h4 class="code-header">fn <a href="#tymethod.connection_ended" class="fn">connection_ended</a>(
     &amp;mut self,
     endpoint: &amp;mut <a class="struct" href="endpoint/struct.Endpoint.html" title="struct swiftlet_quic::endpoint::Endpoint">Endpoint</a>,
-    cid: &amp;<a class="struct" href="endpoint/struct.ConnectionId.html" title="struct swiftlet_quic::endpoint::ConnectionId">ConnectionId</a>,
+    cid: &amp;<a class="type" href="endpoint/type.ConnectionId.html" title="type swiftlet_quic::endpoint::ConnectionId">ConnectionId</a>,
     reason: <a class="enum" href="endpoint/enum.ConnectionEndReason.html" title="enum swiftlet_quic::endpoint::ConnectionEndReason">ConnectionEndReason</a>,
     remaining_connections: <a class="primitive" href="https://doc.rust-lang.org/1.75.0/std/primitive.usize.html">usize</a>
 ) -&gt; <a class="primitive" href="https://doc.rust-lang.org/1.75.0/std/primitive.bool.html">bool</a></h4></section></summary><div class="docblock"><p>Called when a connection has ended and should be cleaned up.</p>
@@ -54,7 +54,7 @@ The event loop will return an Ok(false) indicating that the tick callback functi
 </div></details><details class="toggle method-toggle" open><summary><section id="tymethod.main_stream_recv" class="method"><a class="src rightside" href="../src/swiftlet_quic/lib.rs.html#91-96">source</a><h4 class="code-header">fn <a href="#tymethod.main_stream_recv" class="fn">main_stream_recv</a>(
     &amp;mut self,
     endpoint: &amp;mut <a class="struct" href="endpoint/struct.Endpoint.html" title="struct swiftlet_quic::endpoint::Endpoint">Endpoint</a>,
-    cid: &amp;<a class="struct" href="endpoint/struct.ConnectionId.html" title="struct swiftlet_quic::endpoint::ConnectionId">ConnectionId</a>,
+    cid: &amp;<a class="type" href="endpoint/type.ConnectionId.html" title="type swiftlet_quic::endpoint::ConnectionId">ConnectionId</a>,
     read_data: &amp;[<a class="primitive" href="https://doc.rust-lang.org/1.75.0/std/primitive.u8.html">u8</a>]
 ) -&gt; <a class="enum" href="https://doc.rust-lang.org/1.75.0/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.75.0/std/primitive.usize.html">usize</a>&gt;</h4></section></summary><div class="docblock"><p>Called when there is something to read on the main stream.</p>
 <p>The read_data length will be the number of bytes asked for on the previous call.
@@ -67,7 +67,7 @@ the connection will start the close process.</p>
 </div></details></div><h2 id="provided-methods" class="small-section-header">Provided Methods<a href="#provided-methods" class="anchor">§</a></h2><div class="methods"><details class="toggle method-toggle" open><summary><section id="method.connection_ending_warning" class="method"><a class="src rightside" href="../src/swiftlet_quic/lib.rs.html#66-73">source</a><h4 class="code-header">fn <a href="#method.connection_ending_warning" class="fn">connection_ending_warning</a>(
     &amp;mut self,
     _endpoint: &amp;mut <a class="struct" href="endpoint/struct.Endpoint.html" title="struct swiftlet_quic::endpoint::Endpoint">Endpoint</a>,
-    _cid: &amp;<a class="struct" href="endpoint/struct.ConnectionId.html" title="struct swiftlet_quic::endpoint::ConnectionId">ConnectionId</a>,
+    _cid: &amp;<a class="type" href="endpoint/type.ConnectionId.html" title="type swiftlet_quic::endpoint::ConnectionId">ConnectionId</a>,
     _reason: <a class="enum" href="endpoint/enum.ConnectionEndReason.html" title="enum swiftlet_quic::endpoint::ConnectionEndReason">ConnectionEndReason</a>
 )</h4></section></summary><div class="docblock"><p>Called when a connection is in the process of ending and allows an application to clean up
 relevant states earlier before the connection fully ends.</p>
@@ -75,7 +75,7 @@ relevant states earlier before the connection fully ends.</p>
 </div></details><details class="toggle method-toggle" open><summary><section id="method.background_stream_recv" class="method"><a class="src rightside" href="../src/swiftlet_quic/lib.rs.html#112-120">source</a><h4 class="code-header">fn <a href="#method.background_stream_recv" class="fn">background_stream_recv</a>(
     &amp;mut self,
     _endpoint: &amp;mut <a class="struct" href="endpoint/struct.Endpoint.html" title="struct swiftlet_quic::endpoint::Endpoint">Endpoint</a>,
-    _cid: &amp;<a class="struct" href="endpoint/struct.ConnectionId.html" title="struct swiftlet_quic::endpoint::ConnectionId">ConnectionId</a>,
+    _cid: &amp;<a class="type" href="endpoint/type.ConnectionId.html" title="type swiftlet_quic::endpoint::ConnectionId">ConnectionId</a>,
     _read_data: &amp;[<a class="primitive" href="https://doc.rust-lang.org/1.75.0/std/primitive.u8.html">u8</a>]
 ) -&gt; <a class="enum" href="https://doc.rust-lang.org/1.75.0/core/option/enum.Option.html" title="enum core::option::Option">Option</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/1.75.0/std/primitive.usize.html">usize</a>&gt;</h4></section></summary><div class="docblock"><p>Called when there is something to read on the background stream.</p>
 <p>The read_data length will be the number of bytes asked for on the previous call.

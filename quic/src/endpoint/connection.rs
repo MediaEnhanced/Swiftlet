@@ -621,6 +621,10 @@ impl Connection {
         }
     }
 
+    pub(super) fn get_socket_addr(&self) -> SocketAddr {
+        self.recv_info.from
+    }
+
     pub(super) fn main_stream_send(&mut self, data_vec: Vec<u8>) -> Result<usize, Error> {
         self.main_send_queue.push_back(SendBuffer::new(data_vec));
         self.main_stream_send_next()

@@ -129,6 +129,9 @@ impl AudioOutput {
             return None;
         }
 
+        device.sw_params(h)
+        device.hw_params(&parameters)
+
         
         unsafe {
             let device = match enumerator.GetDefaultAudioEndpoint(Audio::eRender, Audio::eConsole) {

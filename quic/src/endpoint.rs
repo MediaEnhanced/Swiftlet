@@ -87,62 +87,15 @@ pub struct Endpoint {
     connection_config: connection::Config,
     next_connection_id: u64,
     connections: Vec<Connection>,
+    last_valid_index: usize,
     rand: SystemRandom,
     config: Config,
     is_server: bool,
     conn_id_seed_key: ring::hmac::Key, // Value matters ONLY if is_server is true
 }
 
-/// A Connection ID structure to communicate with the endpoint about a specific connection.
-///
-/// Should be updated so that endpoint function calls are more efficient.
-#[derive(Debug)]
-pub struct ConnectionId {
-    id: u64,
-    probable_index: usize,
-}
-
-impl Ord for ConnectionId {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.id.cmp(&other.id)
-    }
-}
-
-impl PartialOrd for ConnectionId {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Eq for ConnectionId {}
-
-impl PartialEq for ConnectionId {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-
-impl Clone for ConnectionId {
-    fn clone(&self) -> Self {
-        ConnectionId {
-            id: self.id,
-            probable_index: self.probable_index,
-        }
-    }
-}
-
-impl ConnectionId {
-    // Check if this function gets inlined in the future
-
-    /// A way to update the Connection ID.
-    pub fn update(&mut self, other: &Self) {
-        self.probable_index = other.probable_index;
-    }
-
-    pub(super) fn get_index(&self) -> usize {
-        self.probable_index
-    }
-}
+/// A Connection ID used to communicate with the endpoint about a specific connection.
+pub type ConnectionId = u64;
 
 /// Errors that the QUIC Endpoint can return
 #[derive(Debug)]
@@ -361,10 +314,10 @@ pub(super) enum RecvEvent {
     ConnectionEnded((ConnectionId, ConnectionEndReason)),
     ConnectionEnding((ConnectionId, ConnectionEndReason)),
     EstablishedOnce(ConnectionId),
-    MainStreamReceived((ConnectionId, Vec<u8>, usize)),
+    MainStreamReceived((ConnectionId, usize, Vec<u8>, usize)),
     //RealtimeReceived((ConnectionId, Vec<u8>, usize)),
-    RealtimeReceived(ConnectionId),
-    BackgroundStreamReceived((ConnectionId, Vec<u8>, usize)),
+    RealtimeReceived(ConnectionId, usize),
+    BackgroundStreamReceived((ConnectionId, usize, Vec<u8>, usize)),
 }
 
 pub(super) enum ReadInfo {
@@ -422,6 +375,7 @@ impl Endpoint {
                 connection_config,
                 next_connection_id: 1,
                 connections: Vec::new(),
+                last_valid_index: 0,
                 rand,
                 config,
                 is_server: true,
@@ -479,6 +433,7 @@ impl Endpoint {
                 connection_config,
                 next_connection_id: 1,
                 connections: Vec::new(),
+                last_valid_index: 0,
                 rand,
                 config,
                 is_server: false,
@@ -492,17 +447,20 @@ impl Endpoint {
     }
 
     #[inline]
-    fn find_connection_from_cid(&self, cid: &ConnectionId) -> Option<usize> {
-        if cid.probable_index < self.connections.len()
-            && self.connections[cid.probable_index].matches_id(cid.id)
-        {
-            Some(cid.probable_index)
-        } else {
-            // To be changed to binary search later
-            self.connections
-                .iter()
-                .position(|conn| conn.matches_id(cid.id))
+    fn find_connection_from_cid(&self, cid: ConnectionId) -> Option<usize> {
+        // To be changed to a binary search later depending on how many total connections there are
+        for i in self.last_valid_index..self.connections.len() {
+            if self.connections[i].matches_id(cid) {
+                return Some(i);
+            }
         }
+        #[allow(clippy::manual_find)]
+        for i in 0..self.last_valid_index {
+            if self.connections[i].matches_id(cid) {
+                return Some(i);
+            }
+        }
+        None
     }
 
     fn send(&mut self, verified_index: usize) -> Result<Option<CloseInfo>, Error> {
@@ -664,10 +622,8 @@ impl Endpoint {
             match self.connections[verified_index].handle_possible_timeout() {
                 None => {
                     if let Some(close_info) = self.send(verified_index)? {
-                        let connection_id = ConnectionId {
-                            id: close_info.id,
-                            probable_index: verified_index,
-                        };
+                        let connection_id = close_info.id;
+                        self.last_valid_index = verified_index;
                         let end_reason = ConnectionEndReason::from_close_info(&close_info);
                         if close_info.is_closed {
                             self.remove_connection(verified_index);
@@ -681,10 +637,8 @@ impl Endpoint {
                                 if let Some(vi) = conn_timeout_opt {
                                     if self.connections[vi].handle_possible_timeout().is_none() {
                                         if let Some(close_info) = self.send(vi)? {
-                                            let connection_id = ConnectionId {
-                                                id: close_info.id,
-                                                probable_index: vi,
-                                            };
+                                            let connection_id = close_info.id;
+                                            self.last_valid_index = vi;
                                             let end_reason =
                                                 ConnectionEndReason::from_close_info(&close_info);
                                             if close_info.is_closed {
@@ -743,10 +697,8 @@ impl Endpoint {
         } else if let Some(vi) = conn_timeout_opt {
             if self.connections[vi].handle_possible_timeout().is_none() {
                 if let Some(close_info) = self.send(vi)? {
-                    let connection_id = ConnectionId {
-                        id: close_info.id,
-                        probable_index: vi,
-                    };
+                    let connection_id = close_info.id;
+                    self.last_valid_index = vi;
                     let end_reason = ConnectionEndReason::from_close_info(&close_info);
                     if close_info.is_closed {
                         self.remove_connection(vi);
@@ -815,10 +767,8 @@ impl Endpoint {
                             {
                                 Ok(res) => {
                                     if let Some(close_info) = self.send(verified_index)? {
-                                        let connection_id = ConnectionId {
-                                            id: close_info.id,
-                                            probable_index: verified_index,
-                                        };
+                                        let connection_id = close_info.id;
+                                        self.last_valid_index = verified_index;
                                         let end_reason =
                                             ConnectionEndReason::from_close_info(&close_info);
                                         if close_info.is_closed {
@@ -841,15 +791,14 @@ impl Endpoint {
                             };
                             match recv_res {
                                 RecvResult::StreamProcess(conn_id) => {
-                                    let connection_id = ConnectionId {
-                                        id: conn_id,
-                                        probable_index: verified_index,
-                                    };
+                                    let connection_id = conn_id;
+                                    self.last_valid_index = verified_index;
                                     match self.connections[verified_index].stream_process() {
                                         Ok(StreamResult::MainStreamReadable((data_vec, len))) => {
                                             if self.send(verified_index)?.is_none() {
                                                 Ok(RecvEvent::MainStreamReceived((
                                                     connection_id,
+                                                    verified_index,
                                                     data_vec,
                                                     len,
                                                 )))
@@ -859,7 +808,10 @@ impl Endpoint {
                                         }
                                         Ok(StreamResult::RealtimeStreamReadable) => {
                                             if self.send(verified_index)?.is_none() {
-                                                Ok(RecvEvent::RealtimeReceived(connection_id))
+                                                Ok(RecvEvent::RealtimeReceived(
+                                                    connection_id,
+                                                    verified_index,
+                                                ))
                                             } else {
                                                 Err(Error::UnexpectedClose)
                                             }
@@ -868,6 +820,7 @@ impl Endpoint {
                                             if self.send(verified_index)?.is_none() {
                                                 Ok(RecvEvent::BackgroundStreamReceived((
                                                     connection_id,
+                                                    verified_index,
                                                     data_vec,
                                                     len,
                                                 )))
@@ -953,11 +906,8 @@ impl Endpoint {
                                     {
                                         return Err(Error::StreamCreation);
                                     }
-
-                                    Ok(RecvEvent::EstablishedOnce(ConnectionId {
-                                        id: conn_id,
-                                        probable_index: verified_index,
-                                    }))
+                                    self.last_valid_index = verified_index;
+                                    Ok(RecvEvent::EstablishedOnce(conn_id))
                                 }
                                 RecvResult::CloseInitiated => {
                                     // This is an unexpected spot but allowable
@@ -1000,7 +950,7 @@ impl Endpoint {
     ///
     /// Returns true when connection close process has started
     pub fn close_connection(&mut self, cid: &ConnectionId, error_code: u64) -> Result<bool, Error> {
-        if let Some(verified_index) = self.find_connection_from_cid(cid) {
+        if let Some(verified_index) = self.find_connection_from_cid(*cid) {
             match self.connections[verified_index].app_close(error_code, b"app-reason") {
                 Ok(_) => {
                     if self.send(verified_index)?.is_some() {
@@ -1016,6 +966,17 @@ impl Endpoint {
         }
     }
 
+    /// Get the socket address for a connection
+    ///
+    /// This address could change if a backend connection migration happens (not currently implemented / expected)
+    pub fn get_connection_socket_addr(&mut self, cid: &ConnectionId) -> Result<SocketAddr, Error> {
+        if let Some(verified_index) = self.find_connection_from_cid(*cid) {
+            Ok(self.connections[verified_index].get_socket_addr())
+        } else {
+            Err(Error::ConnectionNotFound)
+        }
+    }
+
     /// Send data over the main stream
     ///
     /// A reminder that the Endpoint connection will be taking ownership of the data so it can be sent out when possible
@@ -1024,7 +985,7 @@ impl Endpoint {
         cid: &ConnectionId,
         send_data: Vec<u8>,
     ) -> Result<(), Error> {
-        if let Some(verified_index) = self.find_connection_from_cid(cid) {
+        if let Some(verified_index) = self.find_connection_from_cid(*cid) {
             match self.connections[verified_index].main_stream_send(send_data) {
                 Ok(_) => {
                     if self.send(verified_index)?.is_some() {
@@ -1093,7 +1054,7 @@ impl Endpoint {
         cid: &ConnectionId,
         send_data: Vec<u8>,
     ) -> Result<(), Error> {
-        if let Some(verified_index) = self.find_connection_from_cid(cid) {
+        if let Some(verified_index) = self.find_connection_from_cid(*cid) {
             match self.connections[verified_index].bkgd_stream_send(send_data) {
                 Ok(_) => {
                     if self.send(verified_index)?.is_some() {

@@ -196,8 +196,7 @@ impl<'a> EndpointHandler<'a> {
                 RecvEvent::DoneReceiving => {
                     return Ok(false);
                 }
-                RecvEvent::MainStreamReceived((cid, mut data_vec, mut len)) => {
-                    let verified_index = cid.get_index();
+                RecvEvent::MainStreamReceived((cid, verified_index, mut data_vec, mut len)) => {
                     loop {
                         let target_len_opt =
                             self.events
@@ -234,49 +233,49 @@ impl<'a> EndpointHandler<'a> {
                         }
                     }
                 }
-                RecvEvent::RealtimeReceived(_cid) => {
+                RecvEvent::RealtimeReceived(_cid, _verified_index) => {
                     // Do nothing for now
                 }
-                RecvEvent::BackgroundStreamReceived((cid, mut data_vec, mut len)) => {
-                    let verified_index = cid.get_index();
-                    loop {
-                        let target_len_opt = self.events.background_stream_recv(
-                            self.endpoint,
-                            &cid,
-                            &data_vec[..len],
-                        );
-                        match self.endpoint.background_stream_read(
-                            verified_index,
-                            data_vec,
-                            target_len_opt,
-                        )? {
-                            ReadInfo::ReadData((new_data_vec, new_len)) => {
-                                data_vec = new_data_vec;
-                                len = new_len;
+                RecvEvent::BackgroundStreamReceived((
+                    cid,
+                    verified_index,
+                    mut data_vec,
+                    mut len,
+                )) => loop {
+                    let target_len_opt =
+                        self.events
+                            .background_stream_recv(self.endpoint, &cid, &data_vec[..len]);
+                    match self.endpoint.background_stream_read(
+                        verified_index,
+                        data_vec,
+                        target_len_opt,
+                    )? {
+                        ReadInfo::ReadData((new_data_vec, new_len)) => {
+                            data_vec = new_data_vec;
+                            len = new_len;
+                        }
+                        ReadInfo::DoneReceiving => {
+                            break;
+                        }
+                        ReadInfo::ConnectionEnded(reason) => {
+                            let remaining_connections = self.endpoint.get_num_connections();
+                            if self.events.connection_ended(
+                                self.endpoint,
+                                &cid,
+                                reason,
+                                remaining_connections,
+                            ) {
+                                return Ok(true);
                             }
-                            ReadInfo::DoneReceiving => {
-                                break;
-                            }
-                            ReadInfo::ConnectionEnded(reason) => {
-                                let remaining_connections = self.endpoint.get_num_connections();
-                                if self.events.connection_ended(
-                                    self.endpoint,
-                                    &cid,
-                                    reason,
-                                    remaining_connections,
-                                ) {
-                                    return Ok(true);
-                                }
-                                break;
-                            }
-                            ReadInfo::ConnectionEnding(reason) => {
-                                self.events
-                                    .connection_ending_warning(self.endpoint, &cid, reason);
-                                break;
-                            }
+                            break;
+                        }
+                        ReadInfo::ConnectionEnding(reason) => {
+                            self.events
+                                .connection_ending_warning(self.endpoint, &cid, reason);
+                            break;
                         }
                     }
-                }
+                },
                 RecvEvent::ConnectionEnded((cid, reason)) => {
                     let remaining_connections = self.endpoint.get_num_connections();
                     if self.events.connection_ended(

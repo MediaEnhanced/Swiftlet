@@ -26,7 +26,7 @@ autobenches = false
 
 [dependencies]
 mio = { version = "0.8.10", features = ["os-poll", "net"]}
-quiche = { version = "0.20.0" }
+quiche = { version = "0.20.0" } # features = ["boringssl-boring-crate"]
 ring = { version = "0.17.7" }
 
 

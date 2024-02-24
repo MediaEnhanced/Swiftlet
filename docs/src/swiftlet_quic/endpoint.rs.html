@@ -1115,30 +1115,6 @@
 <a href="#1115" id="1115">1115</a>
 <a href="#1116" id="1116">1116</a>
 <a href="#1117" id="1117">1117</a>
-<a href="#1118" id="1118">1118</a>
-<a href="#1119" id="1119">1119</a>
-<a href="#1120" id="1120">1120</a>
-<a href="#1121" id="1121">1121</a>
-<a href="#1122" id="1122">1122</a>
-<a href="#1123" id="1123">1123</a>
-<a href="#1124" id="1124">1124</a>
-<a href="#1125" id="1125">1125</a>
-<a href="#1126" id="1126">1126</a>
-<a href="#1127" id="1127">1127</a>
-<a href="#1128" id="1128">1128</a>
-<a href="#1129" id="1129">1129</a>
-<a href="#1130" id="1130">1130</a>
-<a href="#1131" id="1131">1131</a>
-<a href="#1132" id="1132">1132</a>
-<a href="#1133" id="1133">1133</a>
-<a href="#1134" id="1134">1134</a>
-<a href="#1135" id="1135">1135</a>
-<a href="#1136" id="1136">1136</a>
-<a href="#1137" id="1137">1137</a>
-<a href="#1138" id="1138">1138</a>
-<a href="#1139" id="1139">1139</a>
-<a href="#1140" id="1140">1140</a>
-<a href="#1141" id="1141">1141</a>
 </pre></div><pre class="rust"><code><span class="comment">//Media Enhanced Swiftlet Quic Rust Library for Real-time Internet Communications
 //MIT License
 //Copyright (c) 2024 Jared Loewenthal
@@ -1228,47 +1204,15 @@
     connection_config: connection::Config,
     next_connection_id: u64,
     connections: Vec&lt;Connection&gt;,
+    last_valid_index: usize,
     rand: SystemRandom,
     config: Config,
     is_server: bool,
     conn_id_seed_key: ring::hmac::Key, <span class="comment">// Value matters ONLY if is_server is true
 </span>}
 
-<span class="doccomment">/// A Connection ID structure to communicate with the endpoint about a specific connection.
-///
-/// Should be updated so that endpoint function calls are more efficient.
-</span><span class="kw">pub struct </span>ConnectionId {
-    id: u64,
-    probable_index: usize,
-}
-
-<span class="kw">impl </span>PartialEq <span class="kw">for </span>ConnectionId {
-    <span class="kw">fn </span>eq(<span class="kw-2">&amp;</span><span class="self">self</span>, other: <span class="kw-2">&amp;</span><span class="self">Self</span>) -&gt; bool {
-        <span class="self">self</span>.id == other.id
-    }
-}
-
-<span class="kw">impl </span>Clone <span class="kw">for </span>ConnectionId {
-    <span class="kw">fn </span>clone(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <span class="self">Self </span>{
-        ConnectionId {
-            id: <span class="self">self</span>.id,
-            probable_index: <span class="self">self</span>.probable_index,
-        }
-    }
-}
-
-<span class="kw">impl </span>ConnectionId {
-    <span class="comment">// Check if this function gets inlined in the future
-
-    </span><span class="doccomment">/// A way to update the Connection ID.
-    </span><span class="kw">pub fn </span>update(<span class="kw-2">&amp;mut </span><span class="self">self</span>, other: <span class="kw-2">&amp;</span><span class="self">Self</span>) {
-        <span class="self">self</span>.probable_index = other.probable_index;
-    }
-
-    <span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">fn </span>get_index(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; usize {
-        <span class="self">self</span>.probable_index
-    }
-}
+<span class="doccomment">/// A Connection ID used to communicate with the endpoint about a specific connection.
+</span><span class="kw">pub type </span>ConnectionId = u64;
 
 <span class="doccomment">/// Errors that the QUIC Endpoint can return
 </span><span class="attr">#[derive(Debug)]
@@ -1487,10 +1431,10 @@
     ConnectionEnded((ConnectionId, ConnectionEndReason)),
     ConnectionEnding((ConnectionId, ConnectionEndReason)),
     EstablishedOnce(ConnectionId),
-    MainStreamReceived((ConnectionId, Vec&lt;u8&gt;, usize)),
+    MainStreamReceived((ConnectionId, usize, Vec&lt;u8&gt;, usize)),
     <span class="comment">//RealtimeReceived((ConnectionId, Vec&lt;u8&gt;, usize)),
-    </span>RealtimeReceived(ConnectionId),
-    BackgroundStreamReceived((ConnectionId, Vec&lt;u8&gt;, usize)),
+    </span>RealtimeReceived(ConnectionId, usize),
+    BackgroundStreamReceived((ConnectionId, usize, Vec&lt;u8&gt;, usize)),
 }
 
 <span class="kw">pub</span>(<span class="kw">super</span>) <span class="kw">enum </span>ReadInfo {
@@ -1548,6 +1492,7 @@
                 connection_config,
                 next_connection_id: <span class="number">1</span>,
                 connections: Vec::new(),
+                last_valid_index: <span class="number">0</span>,
                 rand,
                 config,
                 is_server: <span class="bool-val">true</span>,
@@ -1605,6 +1550,7 @@
                 connection_config,
                 next_connection_id: <span class="number">1</span>,
                 connections: Vec::new(),
+                last_valid_index: <span class="number">0</span>,
                 rand,
                 config,
                 is_server: <span class="bool-val">false</span>,
@@ -1618,18 +1564,21 @@
     }
 
     <span class="attr">#[inline]
-    </span><span class="kw">fn </span>find_connection_from_cid(<span class="kw-2">&amp;</span><span class="self">self</span>, cid: <span class="kw-2">&amp;</span>ConnectionId) -&gt; <span class="prelude-ty">Option</span>&lt;usize&gt; {
-        <span class="kw">if </span>cid.probable_index &lt; <span class="self">self</span>.connections.len()
-            &amp;&amp; <span class="self">self</span>.connections[cid.probable_index].matches_id(cid.id)
-        {
-            <span class="prelude-val">Some</span>(cid.probable_index)
-        } <span class="kw">else </span>{
-            <span class="comment">// To be changed to binary search later
-            </span><span class="self">self</span>.connections
-                .iter()
-                .position(|conn| conn.matches_id(cid.id))
+    </span><span class="kw">fn </span>find_connection_from_cid(<span class="kw-2">&amp;</span><span class="self">self</span>, cid: ConnectionId) -&gt; <span class="prelude-ty">Option</span>&lt;usize&gt; {
+        <span class="comment">// To be changed to a binary search later depending on how many total connections there are
+        </span><span class="kw">for </span>i <span class="kw">in </span><span class="self">self</span>.last_valid_index..<span class="self">self</span>.connections.len() {
+            <span class="kw">if </span><span class="self">self</span>.connections[i].matches_id(cid) {
+                <span class="kw">return </span><span class="prelude-val">Some</span>(i);
+            }
         }
-    }
+        <span class="attr">#[allow(clippy::manual_find)]
+        </span><span class="kw">for </span>i <span class="kw">in </span><span class="number">0</span>..<span class="self">self</span>.last_valid_index {
+            <span class="kw">if </span><span class="self">self</span>.connections[i].matches_id(cid) {
+                <span class="kw">return </span><span class="prelude-val">Some</span>(i);
+            }
+        }
+        <span class="prelude-val">None
+    </span>}
 
     <span class="kw">fn </span>send(<span class="kw-2">&amp;mut </span><span class="self">self</span>, verified_index: usize) -&gt; <span class="prelude-ty">Result</span>&lt;<span class="prelude-ty">Option</span>&lt;CloseInfo&gt;, Error&gt; {
         <span class="comment">//let mut immediate_sends = 0;
@@ -1790,10 +1739,8 @@
             <span class="kw">match </span><span class="self">self</span>.connections[verified_index].handle_possible_timeout() {
                 <span class="prelude-val">None </span>=&gt; {
                     <span class="kw">if let </span><span class="prelude-val">Some</span>(close_info) = <span class="self">self</span>.send(verified_index)<span class="question-mark">? </span>{
-                        <span class="kw">let </span>connection_id = ConnectionId {
-                            id: close_info.id,
-                            probable_index: verified_index,
-                        };
+                        <span class="kw">let </span>connection_id = close_info.id;
+                        <span class="self">self</span>.last_valid_index = verified_index;
                         <span class="kw">let </span>end_reason = ConnectionEndReason::from_close_info(<span class="kw-2">&amp;</span>close_info);
                         <span class="kw">if </span>close_info.is_closed {
                             <span class="self">self</span>.remove_connection(verified_index);
@@ -1807,10 +1754,8 @@
                                 <span class="kw">if let </span><span class="prelude-val">Some</span>(vi) = conn_timeout_opt {
                                     <span class="kw">if </span><span class="self">self</span>.connections[vi].handle_possible_timeout().is_none() {
                                         <span class="kw">if let </span><span class="prelude-val">Some</span>(close_info) = <span class="self">self</span>.send(vi)<span class="question-mark">? </span>{
-                                            <span class="kw">let </span>connection_id = ConnectionId {
-                                                id: close_info.id,
-                                                probable_index: vi,
-                                            };
+                                            <span class="kw">let </span>connection_id = close_info.id;
+                                            <span class="self">self</span>.last_valid_index = vi;
                                             <span class="kw">let </span>end_reason =
                                                 ConnectionEndReason::from_close_info(<span class="kw-2">&amp;</span>close_info);
                                             <span class="kw">if </span>close_info.is_closed {
@@ -1869,10 +1814,8 @@
         } <span class="kw">else if let </span><span class="prelude-val">Some</span>(vi) = conn_timeout_opt {
             <span class="kw">if </span><span class="self">self</span>.connections[vi].handle_possible_timeout().is_none() {
                 <span class="kw">if let </span><span class="prelude-val">Some</span>(close_info) = <span class="self">self</span>.send(vi)<span class="question-mark">? </span>{
-                    <span class="kw">let </span>connection_id = ConnectionId {
-                        id: close_info.id,
-                        probable_index: vi,
-                    };
+                    <span class="kw">let </span>connection_id = close_info.id;
+                    <span class="self">self</span>.last_valid_index = vi;
                     <span class="kw">let </span>end_reason = ConnectionEndReason::from_close_info(<span class="kw-2">&amp;</span>close_info);
                     <span class="kw">if </span>close_info.is_closed {
                         <span class="self">self</span>.remove_connection(vi);
@@ -1910,7 +1853,7 @@
                             <span class="kw">let </span>scid_data = tag.as_ref();
 
                             <span class="kw">let </span>writer_opt = <span class="kw">match </span><span class="self">self</span>.connections.len() {
-                                <span class="number">0 </span>=&gt; <span class="kw">match </span>std::fs::File::create(<span class="string">&quot;security/key.log&quot;</span>) {
+                                <span class="number">0 </span>=&gt; <span class="kw">match </span>std::fs::File::create(<span class="string">&quot;key.log&quot;</span>) {
                                     <span class="prelude-val">Ok</span>(file) =&gt; <span class="prelude-val">Some</span>(Box::new(file)),
                                     <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">None</span>,
                                 },
@@ -1941,10 +1884,8 @@
                             {
                                 <span class="prelude-val">Ok</span>(res) =&gt; {
                                     <span class="kw">if let </span><span class="prelude-val">Some</span>(close_info) = <span class="self">self</span>.send(verified_index)<span class="question-mark">? </span>{
-                                        <span class="kw">let </span>connection_id = ConnectionId {
-                                            id: close_info.id,
-                                            probable_index: verified_index,
-                                        };
+                                        <span class="kw">let </span>connection_id = close_info.id;
+                                        <span class="self">self</span>.last_valid_index = verified_index;
                                         <span class="kw">let </span>end_reason =
                                             ConnectionEndReason::from_close_info(<span class="kw-2">&amp;</span>close_info);
                                         <span class="kw">if </span>close_info.is_closed {
@@ -1967,15 +1908,14 @@
                             };
                             <span class="kw">match </span>recv_res {
                                 RecvResult::StreamProcess(conn_id) =&gt; {
-                                    <span class="kw">let </span>connection_id = ConnectionId {
-                                        id: conn_id,
-                                        probable_index: verified_index,
-                                    };
+                                    <span class="kw">let </span>connection_id = conn_id;
+                                    <span class="self">self</span>.last_valid_index = verified_index;
                                     <span class="kw">match </span><span class="self">self</span>.connections[verified_index].stream_process() {
                                         <span class="prelude-val">Ok</span>(StreamResult::MainStreamReadable((data_vec, len))) =&gt; {
                                             <span class="kw">if </span><span class="self">self</span>.send(verified_index)<span class="question-mark">?</span>.is_none() {
                                                 <span class="prelude-val">Ok</span>(RecvEvent::MainStreamReceived((
                                                     connection_id,
+                                                    verified_index,
                                                     data_vec,
                                                     len,
                                                 )))
@@ -1985,7 +1925,10 @@
                                         }
                                         <span class="prelude-val">Ok</span>(StreamResult::RealtimeStreamReadable) =&gt; {
                                             <span class="kw">if </span><span class="self">self</span>.send(verified_index)<span class="question-mark">?</span>.is_none() {
-                                                <span class="prelude-val">Ok</span>(RecvEvent::RealtimeReceived(connection_id))
+                                                <span class="prelude-val">Ok</span>(RecvEvent::RealtimeReceived(
+                                                    connection_id,
+                                                    verified_index,
+                                                ))
                                             } <span class="kw">else </span>{
                                                 <span class="prelude-val">Err</span>(Error::UnexpectedClose)
                                             }
@@ -1994,6 +1937,7 @@
                                             <span class="kw">if </span><span class="self">self</span>.send(verified_index)<span class="question-mark">?</span>.is_none() {
                                                 <span class="prelude-val">Ok</span>(RecvEvent::BackgroundStreamReceived((
                                                     connection_id,
+                                                    verified_index,
                                                     data_vec,
                                                     len,
                                                 )))
@@ -2079,11 +2023,8 @@
                                     {
                                         <span class="kw">return </span><span class="prelude-val">Err</span>(Error::StreamCreation);
                                     }
-
-                                    <span class="prelude-val">Ok</span>(RecvEvent::EstablishedOnce(ConnectionId {
-                                        id: conn_id,
-                                        probable_index: verified_index,
-                                    }))
+                                    <span class="self">self</span>.last_valid_index = verified_index;
+                                    <span class="prelude-val">Ok</span>(RecvEvent::EstablishedOnce(conn_id))
                                 }
                                 RecvResult::CloseInitiated =&gt; {
                                     <span class="comment">// This is an unexpected spot but allowable
@@ -2103,7 +2044,7 @@
             }
             <span class="prelude-val">Err</span>(SocketError::RecvBlocked) =&gt; <span class="prelude-val">Ok</span>(RecvEvent::DoneReceiving),
             <span class="prelude-val">Err</span>(SocketError::RecvOtherIssue(e)) =&gt; <span class="prelude-val">Err</span>(Error::SocketRecv(e)),
-            <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Err</span>(Error::SocketRecv(std::io::ErrorKind::Other)),
+            <span class="prelude-val">Err</span>(<span class="kw">_</span>) =&gt; <span class="prelude-val">Err</span>(Error::SocketRecv(std::io::ErrorKind::WouldBlock)),
         }
     }
 
@@ -2126,7 +2067,7 @@
     ///
     /// Returns true when connection close process has started
     </span><span class="kw">pub fn </span>close_connection(<span class="kw-2">&amp;mut </span><span class="self">self</span>, cid: <span class="kw-2">&amp;</span>ConnectionId, error_code: u64) -&gt; <span class="prelude-ty">Result</span>&lt;bool, Error&gt; {
-        <span class="kw">if let </span><span class="prelude-val">Some</span>(verified_index) = <span class="self">self</span>.find_connection_from_cid(cid) {
+        <span class="kw">if let </span><span class="prelude-val">Some</span>(verified_index) = <span class="self">self</span>.find_connection_from_cid(<span class="kw-2">*</span>cid) {
             <span class="kw">match </span><span class="self">self</span>.connections[verified_index].app_close(error_code, <span class="string">b&quot;app-reason&quot;</span>) {
                 <span class="prelude-val">Ok</span>(<span class="kw">_</span>) =&gt; {
                     <span class="kw">if </span><span class="self">self</span>.send(verified_index)<span class="question-mark">?</span>.is_some() {
@@ -2142,6 +2083,17 @@
         }
     }
 
+    <span class="doccomment">/// Get the socket address for a connection
+    ///
+    /// This address could change if a backend connection migration happens (not currently implemented / expected)
+    </span><span class="kw">pub fn </span>get_connection_socket_addr(<span class="kw-2">&amp;mut </span><span class="self">self</span>, cid: <span class="kw-2">&amp;</span>ConnectionId) -&gt; <span class="prelude-ty">Result</span>&lt;SocketAddr, Error&gt; {
+        <span class="kw">if let </span><span class="prelude-val">Some</span>(verified_index) = <span class="self">self</span>.find_connection_from_cid(<span class="kw-2">*</span>cid) {
+            <span class="prelude-val">Ok</span>(<span class="self">self</span>.connections[verified_index].get_socket_addr())
+        } <span class="kw">else </span>{
+            <span class="prelude-val">Err</span>(Error::ConnectionNotFound)
+        }
+    }
+
     <span class="doccomment">/// Send data over the main stream
     ///
     /// A reminder that the Endpoint connection will be taking ownership of the data so it can be sent out when possible
@@ -2150,7 +2102,7 @@
         cid: <span class="kw-2">&amp;</span>ConnectionId,
         send_data: Vec&lt;u8&gt;,
     ) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
-        <span class="kw">if let </span><span class="prelude-val">Some</span>(verified_index) = <span class="self">self</span>.find_connection_from_cid(cid) {
+        <span class="kw">if let </span><span class="prelude-val">Some</span>(verified_index) = <span class="self">self</span>.find_connection_from_cid(<span class="kw-2">*</span>cid) {
             <span class="kw">match </span><span class="self">self</span>.connections[verified_index].main_stream_send(send_data) {
                 <span class="prelude-val">Ok</span>(<span class="kw">_</span>) =&gt; {
                     <span class="kw">if </span><span class="self">self</span>.send(verified_index)<span class="question-mark">?</span>.is_some() {
@@ -2219,7 +2171,7 @@
         cid: <span class="kw-2">&amp;</span>ConnectionId,
         send_data: Vec&lt;u8&gt;,
     ) -&gt; <span class="prelude-ty">Result</span>&lt;(), Error&gt; {
-        <span class="kw">if let </span><span class="prelude-val">Some</span>(verified_index) = <span class="self">self</span>.find_connection_from_cid(cid) {
+        <span class="kw">if let </span><span class="prelude-val">Some</span>(verified_index) = <span class="self">self</span>.find_connection_from_cid(<span class="kw-2">*</span>cid) {
             <span class="kw">match </span><span class="self">self</span>.connections[verified_index].bkgd_stream_send(send_data) {
                 <span class="prelude-val">Ok</span>(<span class="kw">_</span>) =&gt; {
                     <span class="kw">if </span><span class="self">self</span>.send(verified_index)<span class="question-mark">?</span>.is_some() {

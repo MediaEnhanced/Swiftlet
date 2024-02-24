@@ -515,7 +515,7 @@ impl ServerState {
         read_data: &[u8],
     ) -> bool {
         let username_len = read_data[0] as usize;
-        if let Some(cs) = ClientState::new(cid.clone(), &read_data[1..username_len + 1]) {
+        if let Some(cs) = ClientState::new(*cid, &read_data[1..username_len + 1]) {
             let cs_ind = self.client_states.len();
             self.client_states.push(cs);
 
@@ -727,7 +727,6 @@ impl EndpointEventCallbacks for ServerState {
         read_data: &[u8],
     ) -> Option<usize> {
         if let Some(vi) = self.find_connection_index_from_cid(cid) {
-            self.client_states[vi].cid.update(cid);
             if let Some(msg_type) = self.client_states[vi].main_recv_type.take() {
                 if self.handle_stream_msg(endpoint, vi, msg_type, read_data) {
                     Some(MESSAGE_HEADER_SIZE)
@@ -782,7 +781,7 @@ impl EndpointEventCallbacks for ServerState {
         } else if let Some((StreamMsgType::NewClientAnnounce, size)) =
             StreamMsgType::from_header(read_data)
         {
-            self.potential_clients.push(cid.clone());
+            self.potential_clients.push(*cid);
             Some(size as usize)
         } else {
             None // Close Connection
@@ -796,7 +795,6 @@ impl EndpointEventCallbacks for ServerState {
         read_data: &[u8],
     ) -> Option<usize> {
         if let Some(vi) = self.find_connection_index_from_cid(cid) {
-            self.client_states[vi].cid.update(cid);
             if let Some(msg_type) = self.client_states[vi].bkgd_recv_type.take() {
                 if self.handle_stream_msg(endpoint, vi, msg_type, read_data) {
                     Some(MESSAGE_HEADER_SIZE)
@@ -1134,7 +1132,6 @@ impl EndpointEventCallbacks for ClientHandler {
     ) -> Option<usize> {
         if let Some(my_cid) = &mut self.cid_option {
             if *my_cid == *cid {
-                my_cid.update(cid);
                 if let Some(msg_type) = self.main_recv_type.take() {
                     if self.handle_stream_msg(endpoint, cid, msg_type, read_data) {
                         Some(MESSAGE_HEADER_SIZE)
@@ -1158,7 +1155,7 @@ impl EndpointEventCallbacks for ClientHandler {
         } else if let Some((StreamMsgType::ServerStateRefresh, size)) =
             StreamMsgType::from_header(read_data)
         {
-            self.cid_option = Some(cid.clone());
+            self.cid_option = Some(*cid);
             self.main_recv_type = Some(StreamMsgType::ServerStateRefresh);
             Some(size as usize)
         } else {
@@ -1174,7 +1171,6 @@ impl EndpointEventCallbacks for ClientHandler {
     ) -> Option<usize> {
         if let Some(my_cid) = &mut self.cid_option {
             if *my_cid == *cid {
-                my_cid.update(cid);
                 if let Some(msg_type) = self.background_recv_type.take() {
                     if self.handle_stream_msg(endpoint, cid, msg_type, read_data) {
                         Some(MESSAGE_HEADER_SIZE)
