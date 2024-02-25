@@ -60,7 +60,7 @@ pub struct Config {
 
     /// The initial main stream recieve buffer size.
     ///
-    /// This could be set to the max size of the expected data to process if there is enough RAM.
+    /// This could be set to the max size of the expected data to process to avoid the minimal resize costs.
     pub initial_main_recv_size: usize,
 
     /// The number of bytes to receive on the main stream before calling main_stream_recv for the first time.
@@ -68,9 +68,19 @@ pub struct Config {
     /// If this value is set to 0 it will be changed to 1 during endpoint creation
     pub main_recv_first_bytes: usize,
 
+    /// The initial real-time stream recieve buffer size.
+    ///
+    /// This could be set to the max size of the expected data to process to avoid the minimal resize costs.
+    pub initial_rt_recv_size: usize,
+
+    /// The number of bytes to receive on the real-time stream before calling main_stream_recv for the first time.
+    ///
+    /// If this value is set to 0 the  
+    pub rt_recv_first_bytes: usize,
+
     /// The initial background stream recieve buffer size.
     ///
-    /// This could be set to the max size of the expected data to process if there is enough RAM.
+    /// This could be set to the max size of the expected data to process to avoid the minimal resize costs.
     pub initial_background_recv_size: usize,
 
     /// The number of bytes to receive on the background stream before calling main_stream_recv for the first time.
@@ -315,8 +325,7 @@ pub(super) enum RecvEvent {
     ConnectionEnding((ConnectionId, ConnectionEndReason)),
     EstablishedOnce(ConnectionId),
     MainStreamReceived((ConnectionId, usize, Vec<u8>, usize)),
-    //RealtimeReceived((ConnectionId, Vec<u8>, usize)),
-    RealtimeReceived(ConnectionId, usize),
+    RealtimeReceived(ConnectionId, usize, Vec<u8>, usize, u64),
     BackgroundStreamReceived((ConnectionId, usize, Vec<u8>, usize)),
 }
 
@@ -806,11 +815,18 @@ impl Endpoint {
                                                 Err(Error::UnexpectedClose)
                                             }
                                         }
-                                        Ok(StreamResult::RealtimeStreamReadable) => {
+                                        Ok(StreamResult::RealtimeStreamReadable((
+                                            data_vec,
+                                            len,
+                                            rt_id,
+                                        ))) => {
                                             if self.send(verified_index)?.is_none() {
                                                 Ok(RecvEvent::RealtimeReceived(
                                                     connection_id,
                                                     verified_index,
+                                                    data_vec,
+                                                    len,
+                                                    rt_id,
                                                 ))
                                             } else {
                                                 Err(Error::UnexpectedClose)
@@ -892,6 +908,8 @@ impl Endpoint {
                                     let main_recv_data =
                                         vec![0; self.config.initial_main_recv_size]; // Faster according to clippy and github issue discussion but unsure why...?
 
+                                    let rt_recv_data = vec![0; self.config.initial_rt_recv_size];
+
                                     let background_recv_data =
                                         vec![0; self.config.initial_background_recv_size];
 
@@ -899,6 +917,8 @@ impl Endpoint {
                                         .finish_establishment(
                                             main_recv_data,
                                             self.config.main_recv_first_bytes,
+                                            rt_recv_data,
+                                            self.config.rt_recv_first_bytes,
                                             background_recv_data,
                                             self.config.background_recv_first_bytes,
                                         )
@@ -977,7 +997,10 @@ impl Endpoint {
         }
     }
 
-    /// Send data over the main stream
+    /// Send data over the main stream. This data is queued up if it cannot be sent immediately.
+    ///
+    /// The main stream is a reliable (ordered) stream that focuses on communicating
+    /// high-priority, small(ish) messages between the server and client.
     ///
     /// A reminder that the Endpoint connection will be taking ownership of the data so it can be sent out when possible
     pub fn main_stream_send(
@@ -1009,7 +1032,7 @@ impl Endpoint {
     ) -> Result<ReadInfo, Error> {
         if let Some(mut target_len) = target_len_opt {
             if target_len == 0 {
-                target_len = 1;
+                target_len = self.config.initial_main_recv_size;
             }
             match self.connections[verified_index].main_stream_read(data_vec, target_len) {
                 Ok(Some(vec_data)) => Ok(ReadInfo::ReadData((vec_data, target_len))),
@@ -1046,7 +1069,67 @@ impl Endpoint {
         }
     }
 
-    /// Send data over the background stream
+    /// Send data over the real-time stream. This data is queued up if it cannot be sent immediately.
+    ///
+    /// The real-time "stream" is different than the main stream because it uses multiple
+    /// incremental QUIC unidirectional streams in the backend where each stream id represents
+    /// a single time segment that has unreliability the moment when the next single time segment
+    /// arrives before the previous stream (time segment) had finished.
+    ///
+    /// When last_send_of_time_segment is set to true, the currently transmitting time segment will
+    /// finish after sending all the data that is in the queue (including the optional send_data) and
+    /// the real-time stream id will be incremented for any future real-time stream send data.
+    ///
+    /// If not all of the send data for a previous real-time stream id has made it to the peer by the
+    /// time the next time segement real-time stream data is ready to be sent (with a call to this function)
+    /// then the send queue will be cleared (unreliable transmission) and the next send data will take its place.
+    ///
+    /// A reminder that the Endpoint connection will be taking ownership of the data so it can be sent out when possible
+    pub fn rt_stream_send(
+        &mut self,
+        cid: &ConnectionId,
+        send_data: Option<Vec<u8>>,
+        last_send_of_time_segment: bool,
+    ) -> Result<(), Error> {
+        if let Some(verified_index) = self.find_connection_from_cid(*cid) {
+            match self.connections[verified_index]
+                .rt_stream_send(send_data, last_send_of_time_segment)
+            {
+                Ok(_) => {
+                    if self.send(verified_index)?.is_some() {
+                        Err(Error::UnexpectedClose)
+                    } else {
+                        Ok(())
+                    }
+                }
+                Err(_) => Err(Error::StreamSend),
+            }
+        } else {
+            Err(Error::ConnectionNotFound)
+        }
+    }
+
+    pub(super) fn rt_stream_read(
+        &mut self,
+        verified_index: usize,
+        data_vec: Vec<u8>,
+        target_len: usize,
+    ) -> Result<Option<(Vec<u8>, usize)>, Error> {
+        match self.connections[verified_index].rt_stream_read(data_vec, target_len) {
+            Ok(Some((vec_data, vec_len))) => Ok(Some((vec_data, vec_len))),
+            Ok(None) => Ok(None),
+            Err(connection::Error::Done) => {
+                // Might do more here in future...?
+                Ok(None)
+            }
+            Err(_) => Err(Error::StreamSend),
+        }
+    }
+
+    /// Send data over the background stream. This data is queued up if it cannot be sent immediately.
+    ///
+    /// The background stream is a reliable (ordered) stream that focuses on communicating
+    /// large(ish) messages between the server and client such as a file transfer.
     ///
     /// A reminder that the Endpoint connection will be taking ownership of the data so it can be sent out when possible
     pub fn background_stream_send(
@@ -1078,7 +1161,7 @@ impl Endpoint {
     ) -> Result<ReadInfo, Error> {
         if let Some(mut target_len) = target_len_opt {
             if target_len == 0 {
-                target_len = 1;
+                target_len = self.config.initial_background_recv_size;
             }
             match self.connections[verified_index].bkgd_stream_read(data_vec, target_len) {
                 Ok(Some(vec_data)) => Ok(ReadInfo::ReadData((vec_data, target_len))),

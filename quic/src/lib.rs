@@ -80,12 +80,16 @@ pub trait EndpointEventCallbacks {
 
     /// Called when there is something to read on the main stream.
     ///
+    /// The main stream is a reliable (ordered) stream that focuses on communicating
+    /// high-priority, small(ish) messages between the server and client.
+    ///
     /// The read_data length will be the number of bytes asked for on the previous call.
-    /// The first time it is called the length will be the number of bytes set by the Endpoint Config.
-    /// This data can be processed based on the application protocol.
+    /// The first time it is called the length will be the number of bytes set by the Endpoint Config
+    /// (initial_main_recv_size). This data can be processed based on the application protocol.
     ///
     /// Return the number of bytes you want to read the next time this callback is called.
-    /// If the optional usize value is set to zero (0) it will be interpreted as a one (1).
+    /// If the optional usize value is set to zero (0) it will be interpreted as the Endpoint Config
+    /// initial_main_recv_size value.
     /// Returning a None will close the main stream but since the main stream is required,
     /// the connection will start the close process.
     fn main_stream_recv(
@@ -95,14 +99,46 @@ pub trait EndpointEventCallbacks {
         read_data: &[u8],
     ) -> Option<usize>; // Just a usize in future where 0 represents close the stream...?
 
-    /// Called when there is something to read on the background stream.
+    /// Called when there is something to read on the real-time stream.
+    ///
+    /// The real-time "stream" is different than the main stream because it uses multiple
+    /// incremental QUIC unidirectional streams in the backend where each stream id represents
+    /// a single time segment that has unreliability the moment when the next single time segment
+    /// arrives before the previous stream had finished.
     ///
     /// The read_data length will be the number of bytes asked for on the previous call.
-    /// The first time it is called the length will be the number of bytes set by the Endpoint Config.
-    /// This data can be processed based on the application protocol.
+    /// The first time it is called the length will be the number of bytes set by the Endpoint Config
+    /// (initial_rt_recv_size). This data can be processed based on the application protocol.
     ///
     /// Return the number of bytes you want to read the next time this callback is called.
-    /// If the optional usize value is set to zero (0) it will be interpreted as a one (1).
+    /// If the usize value is set to zero (0) it will be interpreted as waiting for the next finished
+    /// real-time stream.
+    ///
+    /// By default, this function will return 0, which translates to waiting for the next finished
+    /// real-time stream as indicated above. This function should be overwritten in order to handle
+    /// processing real-time stream data.
+    fn rt_stream_recv(
+        &mut self,
+        _endpoint: &mut Endpoint,
+        _cid: &ConnectionId,
+        _read_data: &[u8],
+        _rt_id: u64,
+    ) -> usize {
+        0
+    }
+
+    /// Called when there is something to read on the background stream.
+    ///
+    /// The background stream is a reliable (ordered) stream that focuses on communicating
+    /// large(ish) messages between the server and client such as a file transfer.
+    ///
+    /// The read_data length will be the number of bytes asked for on the previous call.
+    /// The first time it is called the length will be the number of bytes set by the Endpoint Config
+    /// (initial_background_recv_size). This data can be processed based on the application protocol.
+    ///
+    /// Return the number of bytes you want to read the next time this callback is called.
+    /// If the optional usize value is set to zero (0) it will be interpreted as the as the Endpoint Config
+    /// initial_background_recv_size value.
     /// Returning a None will close the background stream but since the background stream is required,
     /// the connection will start the close process.
     ///
@@ -233,8 +269,27 @@ impl<'a> EndpointHandler<'a> {
                         }
                     }
                 }
-                RecvEvent::RealtimeReceived(_cid, _verified_index) => {
-                    // Do nothing for now
+                RecvEvent::RealtimeReceived(cid, verified_index, mut data_vec, mut len, rt_id) => {
+                    loop {
+                        let target_len = self.events.rt_stream_recv(
+                            self.endpoint,
+                            &cid,
+                            &data_vec[..len],
+                            rt_id,
+                        );
+                        match self
+                            .endpoint
+                            .rt_stream_read(verified_index, data_vec, target_len)?
+                        {
+                            Some((new_data_vec, new_len)) => {
+                                data_vec = new_data_vec;
+                                len = new_len;
+                            }
+                            None => {
+                                break;
+                            }
+                        }
+                    }
                 }
                 RecvEvent::BackgroundStreamReceived((
                     cid,

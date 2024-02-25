@@ -27,15 +27,20 @@ use std::time::Instant;
 pub(super) use quiche::Config;
 pub(super) use quiche::Error;
 
-// Real-time Communication Connection Constants
-const MAIN_STREAM_ID: u64 = 0; // Bidirectional stream ID# used for reliable communication in the application between the server and the client
-                               // This stream is started by the Client when it announces itself to the server when it connects to it
+// Communication Connection Constants
+// Bidirectional Stream ID# used for the main reliable communication in the application between the server and the client (started by client)
+// This stream has the first (#1) send priority compared to other streams
+const MAIN_STREAM_ID: u64 = 0;
+const MAIN_STREAM_PRIORITY: u8 = 100; //
 
-const MAIN_STREAM_PRIORITY: u8 = 100;
+// Real-time Unidirectional Stream ID# start constants used for "unreliable" communication in the application
+const SERVER_REALTIME_START_ID: u64 = 3;
+const CLIENT_REALTIME_START_ID: u64 = 2;
+
+// Bidirectional Stream ID# used for the background reliable communication in the application between the server and the client (started by client)
+// This stream has the last send priority compared to other streams
 const BACKGROUND_STREAM_ID: u64 = 4;
 const BACKGROUND_STREAM_PRIORITY: u8 = 200;
-//const SERVER_REALTIME_START_ID: u64 = 3;
-//const CLIENT_REALTIME_START_ID: u64 = 2;
 
 struct StreamRecv {
     captured: usize,
@@ -44,7 +49,7 @@ struct StreamRecv {
 }
 
 impl StreamRecv {
-    fn new() -> Self {
+    fn empty() -> Self {
         StreamRecv {
             captured: 0,
             target: 0,
@@ -64,6 +69,31 @@ impl SendBuffer {
     }
 }
 
+struct RealtimeRecv {
+    id: u64,
+    captured: usize,
+    target: usize,
+    data: Option<Vec<u8>>,
+    count: u64,
+}
+
+impl RealtimeRecv {
+    fn empty(is_server: bool) -> Self {
+        let id = if is_server {
+            CLIENT_REALTIME_START_ID
+        } else {
+            SERVER_REALTIME_START_ID
+        };
+        RealtimeRecv {
+            id,
+            captured: 0,
+            target: 0,
+            data: None,
+            count: 0,
+        }
+    }
+}
+
 // QUIC Connection (Using the quiche crate)
 pub(super) struct Connection {
     id: u64,                                     // ID to be used by the application
@@ -75,7 +105,11 @@ pub(super) struct Connection {
     established_once: bool,
     main_recv: StreamRecv,
     main_send_queue: VecDeque<SendBuffer>,
-    background_recv: StreamRecv,
+    rt_recv: RealtimeRecv,
+    rt_send_queue: VecDeque<SendBuffer>,
+    rt_send_finished: bool,
+    rt_send_stream_id: u64,
+    bkgd_recv: StreamRecv,
     bkgd_send_queue: VecDeque<SendBuffer>,
 }
 
@@ -111,8 +145,7 @@ pub(super) enum RecvResult {
 pub(super) enum StreamResult {
     Nothing,
     MainStreamReadable((Vec<u8>, usize)),
-    //RealtimeStreamReadable((Vec<u8>, usize)),
-    RealtimeStreamReadable,
+    RealtimeStreamReadable((Vec<u8>, usize, u64)),
     BkgdStreamReadable((Vec<u8>, usize)),
     MainStreamFinished,
     BkgdStreamFinished,
@@ -232,10 +265,14 @@ impl Connection {
                 last_send_instant: Instant::now(),
                 next_timeout_instant: None,
                 established_once: false,
-                main_recv: StreamRecv::new(),
-                main_send_queue: VecDeque::new(),
-                background_recv: StreamRecv::new(),
-                bkgd_send_queue: VecDeque::new(),
+                main_recv: StreamRecv::empty(),
+                main_send_queue: VecDeque::with_capacity(4),
+                rt_recv: RealtimeRecv::empty(false),
+                rt_send_queue: VecDeque::with_capacity(4),
+                rt_send_finished: false,
+                rt_send_stream_id: CLIENT_REALTIME_START_ID,
+                bkgd_recv: StreamRecv::empty(),
+                bkgd_send_queue: VecDeque::with_capacity(4),
             };
 
             Ok(conn_mgr)
@@ -263,10 +300,14 @@ impl Connection {
                 last_send_instant: Instant::now(),
                 next_timeout_instant: None,
                 established_once: false,
-                main_recv: StreamRecv::new(),
-                main_send_queue: VecDeque::new(),
-                background_recv: StreamRecv::new(),
-                bkgd_send_queue: VecDeque::new(),
+                main_recv: StreamRecv::empty(),
+                main_send_queue: VecDeque::with_capacity(4),
+                rt_recv: RealtimeRecv::empty(true),
+                rt_send_queue: VecDeque::with_capacity(4),
+                rt_send_finished: false,
+                rt_send_stream_id: SERVER_REALTIME_START_ID,
+                bkgd_recv: StreamRecv::empty(),
+                bkgd_send_queue: VecDeque::with_capacity(4),
             };
 
             Ok(conn_mgr)
@@ -437,6 +478,43 @@ impl Connection {
         }
     }
 
+    fn rt_stream_send_next(&mut self) -> Result<usize, Error> {
+        let mut total_bytes_sent = 0;
+        loop {
+            // Finish logic should be correct here based on the internals of stream_send()
+            let fin = self.rt_send_finished && (self.rt_send_queue.len() == 1);
+            if let Some(send_buf) = self.rt_send_queue.front_mut() {
+                match self.connection.stream_send(
+                    self.rt_send_stream_id,
+                    &send_buf.data[send_buf.sent..],
+                    fin,
+                ) {
+                    Ok(bytes_sent) => {
+                        total_bytes_sent += bytes_sent;
+                        send_buf.sent += bytes_sent;
+                        if send_buf.sent >= send_buf.data.len() {
+                            self.rt_send_queue.pop_front();
+                            if fin {
+                                self.rt_send_stream_id += 4;
+                                self.rt_send_finished = false;
+                            }
+                        } else {
+                            return Ok(total_bytes_sent);
+                        }
+                    }
+                    Err(Error::Done) => {
+                        return Ok(total_bytes_sent);
+                    }
+                    Err(e) => {
+                        return Err(e);
+                    }
+                }
+            } else {
+                return Ok(total_bytes_sent);
+            }
+        }
+    }
+
     fn bkgd_stream_send_next(&mut self) -> Result<usize, Error> {
         let mut total_bytes_sent = 0;
         loop {
@@ -503,6 +581,8 @@ impl Connection {
         &mut self,
         main_recv_data: Vec<u8>,
         main_recv_bytes: usize,
+        rt_recv_data: Vec<u8>,
+        rt_recv_bytes_initial: usize,
         background_recv_data: Vec<u8>,
         background_recv_bytes: usize,
     ) -> Result<(), Error> {
@@ -519,8 +599,10 @@ impl Connection {
 
         self.main_recv.target = main_recv_bytes;
         self.main_recv.data = Some(main_recv_data);
-        self.background_recv.target = background_recv_bytes;
-        self.background_recv.data = Some(background_recv_data);
+        self.rt_recv.target = rt_recv_bytes_initial;
+        self.rt_recv.data = Some(rt_recv_data);
+        self.bkgd_recv.target = background_recv_bytes;
+        self.bkgd_recv.data = Some(background_recv_data);
 
         self.established_once = true;
         Ok(())
@@ -529,6 +611,7 @@ impl Connection {
     // A returned Error::InvalidState indicates something went wrong with the read process
     pub(super) fn stream_process(&mut self) -> Result<StreamResult, Error> {
         self.main_stream_send_next()?;
+        self.rt_stream_send_next()?;
         self.bkgd_stream_send_next()?;
 
         if let Some(next_readable_stream) = self.connection.stream_readable_next() {
@@ -553,44 +636,139 @@ impl Connection {
                             Err(Error::InvalidState)
                         }
                     } else {
-                        //self.connection.close(false, 1, b"Stream0Finished")?;
                         Ok(StreamResult::MainStreamFinished)
                     }
                 } else {
                     Err(Error::InvalidState)
                 }
             } else if next_readable_stream == BACKGROUND_STREAM_ID {
-                if let Some(mut recv_data) = self.background_recv.data.take() {
+                if let Some(mut recv_data) = self.bkgd_recv.data.take() {
                     let (bytes_read, is_finished) = self.connection.stream_recv(
                         BACKGROUND_STREAM_ID,
-                        &mut recv_data[self.background_recv.captured..self.background_recv.target],
+                        &mut recv_data[self.bkgd_recv.captured..self.bkgd_recv.target],
                     )?; // Shouldn't throw a done since it was stated to be readable
                     if !is_finished {
-                        self.background_recv.captured += bytes_read;
+                        self.bkgd_recv.captured += bytes_read;
                         #[allow(clippy::comparison_chain)]
-                        if self.background_recv.captured == self.background_recv.target {
+                        if self.bkgd_recv.captured == self.bkgd_recv.target {
                             Ok(StreamResult::BkgdStreamReadable((
                                 recv_data,
-                                self.background_recv.target,
+                                self.bkgd_recv.target,
                             )))
-                        } else if self.background_recv.captured < self.background_recv.target {
-                            self.background_recv.data = Some(recv_data);
+                        } else if self.bkgd_recv.captured < self.bkgd_recv.target {
+                            self.bkgd_recv.data = Some(recv_data);
                             Ok(StreamResult::Nothing)
                         } else {
                             Err(Error::InvalidState)
                         }
                     } else {
-                        //self.connection.close(false, 1, b"Stream4Finished")?;
                         Ok(StreamResult::BkgdStreamFinished)
                     }
                 } else {
                     Err(Error::InvalidState)
                 }
+            } else if let Some(recv_data) = self.rt_recv.data.take() {
+                self.stream_process_realtime(next_readable_stream, recv_data)
             } else {
-                Ok(StreamResult::RealtimeStreamReadable)
+                Err(Error::InvalidState)
             }
         } else {
             Ok(StreamResult::Nothing)
+        }
+    }
+
+    fn stream_process_realtime(
+        &mut self,
+        next_readable_stream: u64,
+        mut recv_data: Vec<u8>,
+    ) -> Result<StreamResult, Error> {
+        if next_readable_stream > self.rt_recv.id {
+            let stream_id_difference = next_readable_stream - self.rt_recv.id;
+            if (stream_id_difference & 0x3) > 0 {
+                return Err(Error::InvalidState);
+            }
+            //let rt_period = stream_id_difference >> 2;
+            for i in (0..stream_id_difference).step_by(4) {
+                self.connection.stream_shutdown(
+                    self.rt_recv.id + i,
+                    quiche::Shutdown::Read,
+                    self.rt_recv.id + i,
+                )?;
+            }
+            self.rt_recv.id = next_readable_stream;
+            self.rt_recv.captured = 0;
+            self.rt_recv.count += stream_id_difference >> 2;
+        } else if next_readable_stream != self.rt_recv.id {
+            return Err(Error::InvalidState);
+        }
+
+        if self.rt_recv.target == 0 {
+            // Loop for the potential case of resizing recv_data
+            loop {
+                match self
+                    .connection
+                    .stream_recv(self.rt_recv.id, &mut recv_data[self.rt_recv.captured..])
+                {
+                    Ok((bytes_read, is_finished)) => {
+                        self.rt_recv.captured += bytes_read;
+                        if is_finished {
+                            return Ok(StreamResult::RealtimeStreamReadable((
+                                recv_data,
+                                self.rt_recv.captured,
+                                self.rt_recv.count,
+                            )));
+                        } else if self.rt_recv.captured < recv_data.len() {
+                            self.rt_recv.data = Some(recv_data);
+                            return Ok(StreamResult::Nothing);
+                        } else if self.rt_recv.captured == recv_data.len() {
+                            recv_data.resize(self.rt_recv.captured + 65536, 0);
+                        } else {
+                            return Err(Error::InvalidState);
+                        }
+                    }
+                    Err(Error::Done) => {
+                        self.rt_recv.data = Some(recv_data);
+                        return Ok(StreamResult::Nothing);
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        } else {
+            let (bytes_read, is_finished) = self.connection.stream_recv(
+                self.rt_recv.id,
+                &mut recv_data[self.rt_recv.captured..self.rt_recv.target],
+            )?;
+            self.rt_recv.captured += bytes_read;
+            if !is_finished {
+                #[allow(clippy::comparison_chain)]
+                if self.rt_recv.captured == self.rt_recv.target {
+                    Ok(StreamResult::RealtimeStreamReadable((
+                        recv_data,
+                        self.rt_recv.target,
+                        self.rt_recv.count,
+                    )))
+                } else if self.rt_recv.captured < self.rt_recv.target {
+                    self.rt_recv.data = Some(recv_data);
+                    Ok(StreamResult::Nothing)
+                } else {
+                    Err(Error::InvalidState)
+                }
+            } else if self.rt_recv.captured == self.rt_recv.target {
+                self.rt_recv.target = 0;
+                Ok(StreamResult::RealtimeStreamReadable((
+                    recv_data,
+                    self.rt_recv.captured,
+                    self.rt_recv.count,
+                )))
+            } else if self.rt_recv.captured < self.rt_recv.target {
+                // Unexpected finish (recoverable)
+                self.rt_recv.id += 4;
+                self.rt_recv.captured = 0;
+                self.rt_recv.count += 1;
+                Err(Error::Done)
+            } else {
+                Err(Error::InvalidState)
+            }
         }
     }
 
@@ -671,6 +849,117 @@ impl Connection {
         }
     }
 
+    pub(super) fn rt_stream_send(
+        &mut self,
+        data_vec_opt: Option<Vec<u8>>,
+        last_send_of_time_segment: bool,
+    ) -> Result<usize, Error> {
+        if self.rt_send_finished {
+            // Clear send queue and "finish" / shutdown the current send stream here
+            self.rt_send_queue.clear();
+            self.connection.stream_shutdown(
+                self.rt_send_stream_id,
+                quiche::Shutdown::Write,
+                self.rt_send_stream_id,
+            )?;
+            // Increment Stream ID
+            self.rt_send_stream_id += 4;
+            self.rt_send_finished = false;
+        }
+        if let Some(data_vec) = data_vec_opt {
+            self.rt_send_queue.push_back(SendBuffer::new(data_vec));
+        }
+        if last_send_of_time_segment {
+            self.rt_send_finished = true;
+        }
+
+        self.rt_stream_send_next()
+    }
+
+    // A returned Error::InvalidState indicates something went wrong with the read process
+    // A returned Error::Done indicates an unexpected real-time stream finish
+    pub(super) fn rt_stream_read(
+        &mut self,
+        mut data_vec: Vec<u8>,
+        target_len: usize,
+    ) -> Result<Option<(Vec<u8>, usize)>, Error> {
+        if self.rt_recv.target == 0 {
+            self.rt_recv.id += 4;
+            self.rt_recv.captured = 0;
+            self.rt_recv.target = target_len;
+            self.rt_recv.data = Some(data_vec);
+            self.rt_recv.count += 1;
+            return Ok(None);
+        }
+
+        if target_len == 0 {
+            self.rt_recv.captured = 0;
+            self.rt_recv.target = target_len;
+            loop {
+                match self
+                    .connection
+                    .stream_recv(self.rt_recv.id, &mut data_vec[self.rt_recv.captured..])
+                {
+                    Ok((bytes_read, is_finished)) => {
+                        self.rt_recv.captured += bytes_read;
+                        if is_finished {
+                            return Ok(Some((data_vec, self.rt_recv.captured)));
+                        } else if self.rt_recv.captured < data_vec.len() {
+                            self.rt_recv.data = Some(data_vec);
+                            return Ok(None);
+                        } else if self.rt_recv.captured == data_vec.len() {
+                            data_vec.resize(self.rt_recv.captured + 65536, 0);
+                        } else {
+                            return Err(Error::InvalidState);
+                        }
+                    }
+                    Err(Error::Done) => {
+                        self.rt_recv.data = Some(data_vec);
+                        return Ok(None);
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        } else {
+            if target_len > data_vec.len() {
+                data_vec.resize(target_len, 0);
+            }
+            match self
+                .connection
+                .stream_recv(self.rt_recv.id, &mut data_vec[..target_len])
+            {
+                Ok((bytes_read, is_finished)) => {
+                    if !is_finished {
+                        #[allow(clippy::comparison_chain)]
+                        if bytes_read == target_len {
+                            Ok(Some((data_vec, target_len)))
+                        } else if bytes_read < target_len {
+                            self.rt_recv.captured = bytes_read;
+                            self.rt_recv.target = target_len;
+                            self.rt_recv.data = Some(data_vec);
+                            Ok(None)
+                        } else {
+                            Err(Error::InvalidState)
+                        }
+                    } else {
+                        // Unexpected Finish (recoverable)
+                        self.rt_recv.id += 4;
+                        self.rt_recv.captured = 0;
+                        self.rt_recv.count += 1;
+                        Err(Error::Done)
+                    }
+                }
+                Err(Error::Done) => {
+                    self.rt_recv.captured = 0;
+                    self.rt_recv.target = target_len;
+                    self.rt_recv.data = Some(data_vec);
+                    Ok(None)
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
+
     pub(super) fn bkgd_stream_send(&mut self, data_vec: Vec<u8>) -> Result<usize, Error> {
         self.bkgd_send_queue.push_back(SendBuffer::new(data_vec));
         self.bkgd_stream_send_next()
@@ -696,9 +985,9 @@ impl Connection {
                     if bytes_read == target_len {
                         Ok(Some(data_vec))
                     } else if bytes_read < target_len {
-                        self.background_recv.captured = bytes_read;
-                        self.background_recv.target = target_len;
-                        self.background_recv.data = Some(data_vec);
+                        self.bkgd_recv.captured = bytes_read;
+                        self.bkgd_recv.target = target_len;
+                        self.bkgd_recv.data = Some(data_vec);
                         Ok(None)
                     } else {
                         Err(Error::InvalidState)
@@ -708,9 +997,9 @@ impl Connection {
                 }
             }
             Err(Error::Done) => {
-                self.background_recv.captured = 0;
-                self.background_recv.target = target_len;
-                self.background_recv.data = Some(data_vec);
+                self.bkgd_recv.captured = 0;
+                self.bkgd_recv.target = target_len;
+                self.bkgd_recv.data = Some(data_vec);
                 Ok(None)
             }
             Err(e) => Err(e),

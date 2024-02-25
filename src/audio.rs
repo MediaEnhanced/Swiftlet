@@ -269,9 +269,7 @@ fn output_callback(
 
     // Samples are Left Right Interleaved for normal stereo stuff
     // Does NOT currently assume that the samples are zero to begin with
-    for sample in &mut *samples {
-        *sample = 0.0;
-    }
+    samples.fill(0.0);
 
     for (playback_ind, playback) in state.playbacks.iter_mut().enumerate() {
         let opus_data = match opus_list[playback.probable_index].matches_id(playback.id) {

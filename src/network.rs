@@ -657,7 +657,8 @@ impl EndpointEventCallbacks for ServerState {
         if let Some(playback) = &mut self.music_playback {
             playback.tick += 1; // 4 ticks should be the 20ms music currently hidden requirement
             if playback.tick >= 4 {
-                let mut send_data = StreamMsgType::NextMusicPacket.get_send_data_vec(None);
+                //let mut send_data = StreamMsgType::NextMusicPacket.get_send_data_vec(None);
+                let mut send_data = Vec::new();
                 send_data.push(playback.stereo_byte);
 
                 let len =
@@ -677,15 +678,17 @@ impl EndpointEventCallbacks for ServerState {
                 }
                 playback.tick = 0;
 
-                set_stream_msg_size(&mut send_data);
+                //set_stream_msg_size(&mut send_data);
 
                 let mut num_listeners = 0;
                 for cs in self.client_states.iter() {
                     if (cs.state & 2) > 0 {
-                        let _ = endpoint.main_stream_send(
+                        //let _ = endpoint.main_stream_send(
+                        let _ = endpoint.rt_stream_send(
                             &cs.cid,
-                            send_data.clone(), // Makes copies here which isn't ideal
-                                               // Especially one more than number of sends
+                            //send_data.clone(), // Makes copies here which isn't ideal (especially one more than number of sends)
+                            Some(send_data.clone()),
+                            true,
                         );
                         num_listeners += 1;
                     }
@@ -1163,6 +1166,25 @@ impl EndpointEventCallbacks for ClientHandler {
         }
     }
 
+    fn rt_stream_recv(
+        &mut self,
+        _endpoint: &mut Endpoint,
+        _cid: &ConnectionId,
+        read_data: &[u8],
+        rt_id: u64,
+    ) -> usize {
+        let vec_data = Vec::from(read_data);
+        let _ = self
+            .audio_channels
+            .packet_send
+            .send(NetworkAudioPackets::MusicPacket((1, vec_data)));
+        if (rt_id % 500) == 0 && rt_id != 0 {
+            self.send_debug_text("10 Seconds Passed\n");
+        }
+
+        0
+    }
+
     fn background_stream_recv(
         &mut self,
         endpoint: &mut Endpoint,
@@ -1217,6 +1239,8 @@ pub(crate) fn server_thread(
         keep_alive_timeout: None,
         initial_main_recv_size: BUFFER_SIZE_PER_CONNECTION,
         main_recv_first_bytes: MESSAGE_HEADER_SIZE,
+        initial_rt_recv_size: 65536,
+        rt_recv_first_bytes: 0,
         initial_background_recv_size: 65536,
         background_recv_first_bytes: MESSAGE_HEADER_SIZE,
     };
@@ -1268,6 +1292,8 @@ pub(crate) fn client_thread(
         keep_alive_timeout: Some(Duration::from_millis(2000)),
         initial_main_recv_size: BUFFER_SIZE_PER_CONNECTION,
         main_recv_first_bytes: MESSAGE_HEADER_SIZE,
+        initial_rt_recv_size: 65536,
+        rt_recv_first_bytes: 0,
         initial_background_recv_size: 65536,
         background_recv_first_bytes: MESSAGE_HEADER_SIZE,
     };

@@ -81,6 +81,8 @@ fn server_thread(port: u16, server_name: String) {
         keep_alive_timeout: None,
         initial_main_recv_size: BUFFER_SIZE_PER_CONNECTION,
         main_recv_first_bytes: MESSAGE_HEADER_SIZE,
+        initial_rt_recv_size: 65536,
+        rt_recv_first_bytes: 0,
         initial_background_recv_size: BUFFER_SIZE_PER_CONNECTION,
         background_recv_first_bytes: MESSAGE_HEADER_SIZE,
     };
@@ -129,6 +131,8 @@ fn client_thread(server_address: SocketAddr, user_name: String) {
         keep_alive_timeout: Some(Duration::from_millis(2000)),
         initial_main_recv_size: BUFFER_SIZE_PER_CONNECTION,
         main_recv_first_bytes: MESSAGE_HEADER_SIZE,
+        initial_rt_recv_size: 65536,
+        rt_recv_first_bytes: 0,
         initial_background_recv_size: BUFFER_SIZE_PER_CONNECTION,
         background_recv_first_bytes: MESSAGE_HEADER_SIZE,
     };
