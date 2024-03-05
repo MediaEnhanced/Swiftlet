@@ -1,18 +1,35 @@
-fn main() {
-    // Tells rust program linker where to find the dynamic librarys
-    // *.dll and/or *.so files should be in this folder
-    // Will probably have this be in .config/config.toml in future if needed
-    //println!("cargo:rustc-link-search=./bin");
+// Rust Cross Compile Support
 
-    if let Ok(tgt) = std::env::var("TARGET") {
-        //println!("Build Target: {}", tgt);
-        match tgt.as_str() {
+fn main() {
+    let host_str = match std::env::var("HOST") {
+        Ok(s) => s,
+        Err(e) => {
+            panic!("Could not find host triple: {}", e);
+        }
+    };
+    let target_str = match std::env::var("TARGET") {
+        Ok(s) => s,
+        Err(e) => {
+            panic!("Could not find target triple: {}", e);
+        }
+    };
+    if target_str != host_str {
+        // Cross Compiling
+        // Each Target should set the appropriate OS library link search paths
+        // and dynamic library search path if necessary
+        // For now it is based on zig helper files
+        match target_str.as_str() {
             "x86_64-pc-windows-gnu" => {
                 // Windows 64-bit
-                //std::env::set_var("CARGO_TARGET_DIR", "./target/win-x64");
+                if host_str.as_str() == "x86_64-pc-windows-msvc" {
+                    // Partial cross compiling
+                }
             }
             "x86_64-pc-windows-msvc" => {
                 // Windows 64-bit Alt
+                if host_str.as_str() == "x86_64-pc-windows-gnu" {
+                    // Partial cross compiling
+                }
             }
             "aarch64-pc-windows-msvc" => {
                 // Windows 64-bit Arm
@@ -30,10 +47,8 @@ fn main() {
                 // MacOS 64-bit Intel/Legacy
             }
             _ => {
-                panic!("Not a valid build target!");
+                panic!("Not a valid build target: {}", target_str);
             }
         }
     }
-
-    //println!("Building for: {:?}", std::env::var("TARGET"));
 }

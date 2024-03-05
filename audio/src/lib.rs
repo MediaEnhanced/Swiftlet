@@ -24,11 +24,11 @@
 
 pub mod raw;
 
-#[cfg_attr(target_os = "windows", path = "windows.rs")]
-#[cfg_attr(target_os = "linux", path = "linux.rs")]
-#[cfg_attr(target_os = "macos", path = "mac.rs")]
+#[cfg_attr(target_os = "windows", path = "windows/os.rs")]
+#[cfg_attr(target_os = "linux", path = "linux/os.rs")]
+#[cfg_attr(target_os = "macos", path = "mac/os.rs")]
 mod os;
-use os::AudioDevice;
+use os::{AudioDevice, AudioInput, AudioOutput};
 
 #[cfg(feature = "opus")]
 pub mod opus;
@@ -38,7 +38,9 @@ pub enum Error {
 }
 
 pub struct AudioIO {
-    device: os::AudioDevice,
+    device: AudioDevice,
+    output: Option<AudioOutput>,
+    input: Option<AudioInput>,
 }
 
 impl AudioIO {
@@ -47,14 +49,60 @@ impl AudioIO {
             Some(d) => d,
             None => return Err(Error::DeviceCreation),
         };
-        Ok(AudioIO { device })
+        Ok(AudioIO {
+            device,
+            output: None,
+            input: None,
+        })
     }
 
     pub fn create_output(&mut self, desired_period: u32) -> Option<u32> {
-        self.device.create_or_edit_output(desired_period)
+        if let Some(output) = AudioOutput::new(&self.device, desired_period) {
+            let channels = output.get_channels();
+            self.output = Some(output);
+            Some(channels)
+        } else {
+            None
+        }
     }
 
-    pub fn run_output_event_loop(&self, callback: &mut dyn FnMut(&mut [f32]) -> bool) -> bool {
-        self.device.event_loop_output(callback)
+    /// Takes control of thread and calls the callback function with a fillable sample buffer every
+    /// previously setup desired_period.
+    ///
+    /// This function returns false if exited prematurely, otherwise true indicating that
+    /// the output was safely stopped after the callback returned true.
+    /// On false return a new output will be created in the future.
+    pub fn run_output_event_loop(&mut self, callback: &mut dyn FnMut(&mut [f32]) -> bool) -> bool {
+        if let Some(mut output) = self.output.take() {
+            if !output.start() {
+                return false;
+            }
+            loop {
+                match output.wait_for_next_output(15) {
+                    Ok(Some(buffer)) => {
+                        let callback_quit = callback(buffer);
+                        if !output.release_output() {
+                            return false;
+                        }
+                        if callback_quit {
+                            break;
+                        }
+                    }
+                    Ok(None) => {
+                        // Timeout here
+                    }
+                    Err(e) => {
+                        println!("Output Wait Error: {:?}", e);
+                    }
+                }
+            }
+            if !output.stop() {
+                return false;
+            }
+            self.output = Some(output);
+            true
+        } else {
+            true
+        }
     }
 }

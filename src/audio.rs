@@ -30,8 +30,8 @@ use crate::communication::{
     Receiver, Sender, TryRecvError,
 };
 
+use swiftlet_audio::opus::Decoder;
 pub(crate) use swiftlet_audio::opus::OpusData;
-use swiftlet_audio::opus::{Decoder, Mono, Stereo};
 use swiftlet_audio::AudioIO;
 
 struct OutputState {
@@ -135,11 +135,7 @@ fn output_callback(
                 ConsoleAudioCommands::PlayOpus(id) => {
                     for (index, opus_data) in opus_list.iter().enumerate() {
                         if opus_data.matches_id(id) {
-                            let opus_channels = match opus_data.is_stereo() {
-                                true => Stereo,
-                                false => Mono,
-                            };
-                            let decoder = match Decoder::new(48000, opus_channels) {
+                            let decoder = match Decoder::new(opus_data.is_stereo()) {
                                 Ok(decoder) => decoder,
                                 Err(err) => {
                                     let _ =
@@ -209,11 +205,7 @@ fn output_callback(
                     realtime.data_queue.push_back(output_data);
                 } else {
                     let is_stereo = music_data[0] > 0;
-                    let opus_channels = match is_stereo {
-                        true => Stereo,
-                        false => Mono,
-                    };
-                    let mut decoder = match Decoder::new(48000, opus_channels) {
+                    let mut decoder = match Decoder::new(is_stereo) {
                         Ok(decoder) => decoder,
                         Err(err) => {
                             let _ = channels.debug_send.send("Cannot Create Opus Decoder\n");

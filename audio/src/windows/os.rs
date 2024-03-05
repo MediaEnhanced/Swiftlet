@@ -37,10 +37,16 @@ fn cmp_guid(a: &GUID, b: &GUID) -> bool {
     (a.data1, a.data2, a.data3, a.data4) == (b.data1, b.data2, b.data3, b.data4)
 }
 
+#[derive(Debug)]
+pub(super) enum Error {
+    Uncertain,
+    WaitFailed,
+    WaitAbandoned,
+    GetBuffer,
+}
+
 pub(super) struct AudioDevice {
     enumerator: Audio::IMMDeviceEnumerator,
-    output: Option<AudioOutput>,
-    input: Option<AudioInput>,
 }
 
 impl AudioDevice {
@@ -59,67 +65,9 @@ impl AudioDevice {
                 None,
                 Com::CLSCTX_ALL,
             ) {
-                Ok(enumerator) => Some(AudioDevice {
-                    enumerator,
-                    output: None,
-                    input: None,
-                }),
+                Ok(enumerator) => Some(AudioDevice { enumerator }),
                 Err(_) => None,
             }
-        }
-    }
-
-    // Returns number of channels on success
-    pub(super) fn create_or_edit_output(&mut self, desired_period: u32) -> Option<u32> {
-        let _ = self.output.take();
-        self.output = AudioOutput::new(&self.enumerator, desired_period);
-        self.output.as_ref().map(|out| out.channels)
-    }
-
-    pub(super) fn start_output(&self) -> bool {
-        if let Some(out) = &self.output {
-            println!("Has Audio Output");
-            out.start()
-        } else {
-            false
-        }
-    }
-
-    pub(super) fn stop_output(&self) {
-        if let Some(out) = &self.output {
-            out.stop();
-        }
-    }
-
-    pub(super) fn wait_for_next_output(
-        &self,
-        millisecond_timeout: u32,
-    ) -> Option<(&mut [f32], u32)> {
-        if let Some(out) = &self.output {
-            let res = out.wait_for_next_output(millisecond_timeout);
-            if res.is_some() {
-                println!("Data Seems Valid!");
-            }
-            res
-        } else {
-            None
-        }
-    }
-
-    pub(super) fn release_output(&self, num_frames: u32) -> bool {
-        if let Some(out) = &self.output {
-            out.release_output(num_frames)
-        } else {
-            false
-        }
-    }
-
-    pub(super) fn event_loop_output(&self, callback: &mut dyn FnMut(&mut [f32]) -> bool) -> bool {
-        if let Some(out) = &self.output {
-            out.event_loop(callback);
-            true
-        } else {
-            false
         }
     }
 }
@@ -135,7 +83,7 @@ impl Drop for AudioDevice {
     }
 }
 
-struct AudioOutput {
+pub(super) struct AudioOutput {
     device: Audio::IMMDevice,
     manager: Audio::IAudioClient3,
     channels: u32,
@@ -148,9 +96,12 @@ struct AudioOutput {
 }
 
 impl AudioOutput {
-    fn new(enumerator: &Audio::IMMDeviceEnumerator, desired_period: u32) -> Option<Self> {
+    pub(super) fn new(audio_device: &AudioDevice, desired_period: u32) -> Option<Self> {
         unsafe {
-            let device = match enumerator.GetDefaultAudioEndpoint(Audio::eRender, Audio::eConsole) {
+            let device = match audio_device
+                .enumerator
+                .GetDefaultAudioEndpoint(Audio::eRender, Audio::eConsole)
+            {
                 Ok(d) => d,
                 Err(_) => return None,
             };
@@ -338,7 +289,11 @@ impl AudioOutput {
         }
     }
 
-    fn start(&self) -> bool {
+    pub(super) fn get_channels(&self) -> u32 {
+        self.channels
+    }
+
+    pub(super) fn start(&self) -> bool {
         // Need to do an initial read to clear stuff based on documentation
         unsafe {
             let num_frames = match self.manager.GetCurrentPadding() {
@@ -365,49 +320,46 @@ impl AudioOutput {
         }
     }
 
-    fn stop(&self) -> bool {
+    pub(super) fn stop(&self) -> bool {
         unsafe { self.manager.Stop().is_ok() }
     }
 
-    fn wait_for_next_output(&self, millisecond_timeout: u32) -> Option<(&mut [f32], u32)> {
+    pub(super) fn wait_for_next_output(
+        &mut self,
+        millisecond_timeout: u32,
+    ) -> Result<Option<&mut [f32]>, Error> {
         unsafe {
             match Threading::WaitForSingleObject(self.event, millisecond_timeout) {
                 Foundation::WAIT_OBJECT_0 => {
                     //println!("Wait Finished!");
                 }
                 Foundation::WAIT_TIMEOUT => {
-                    return None;
+                    return Ok(None);
                 }
                 Foundation::WAIT_FAILED => {
                     // Additional info with GetLastError
-                    return None;
+                    return Err(Error::WaitFailed);
                 }
                 Foundation::WAIT_ABANDONED => {
-                    return None;
+                    return Err(Error::WaitAbandoned);
                 }
-                _ => return None,
+                _ => return Err(Error::Uncertain),
             }
 
-            // GetNextPacketSize is for input
-            let num_frames = match self.manager.GetCurrentPadding() {
-                Ok(f) => f,
-                Err(_) => return None,
-            };
-
-            match self.writer.GetBuffer(num_frames) {
+            match self.writer.GetBuffer(self.frame_period) {
                 Ok(b) => {
-                    let num_floats = num_frames * self.channels;
+                    let num_floats = self.frame_period * self.channels;
                     let buffer = std::slice::from_raw_parts_mut(b as *mut f32, num_floats as usize);
-                    Some((buffer, num_frames))
+                    Ok(Some(buffer))
                 }
-                Err(_) => None,
+                Err(_) => Err(Error::GetBuffer),
             }
         }
     }
 
-    fn release_output(&self, num_frames: u32) -> bool {
+    pub(super) fn release_output(&self) -> bool {
         // Handle different flags in future
-        unsafe { self.writer.ReleaseBuffer(num_frames, 0).is_ok() }
+        unsafe { self.writer.ReleaseBuffer(self.frame_period, 0).is_ok() }
     }
 
     fn event_loop(&self, callback: &mut dyn FnMut(&mut [f32]) -> bool) -> bool {
@@ -423,7 +375,7 @@ impl AudioOutput {
                     }
                     Foundation::WAIT_TIMEOUT => {
                         println!("Wait Timeout!");
-                        return false;
+                        //return false;
                     }
                     Foundation::WAIT_FAILED => {
                         // Additional info with GetLastError
@@ -456,10 +408,10 @@ impl AudioOutput {
     }
 }
 
-struct AudioInput {
+pub(super) struct AudioInput {
     device: Audio::IMMDevice,
 }
 
 impl AudioInput {
-    //fn new() -> Self {}
+    //pub(super) fn new() -> Self {}
 }

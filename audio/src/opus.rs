@@ -20,8 +20,127 @@
 //OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //SOFTWARE.
 
-pub use opus::Channels::{Mono, Stereo};
-pub use opus::Decoder;
+use std::os::raw::{c_int, c_uchar};
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+enum Channels {
+    Mono = 1,
+    Stereo = 2,
+}
+
+extern "C" {
+    fn opus_decoder_get_size(channels: Channels) -> c_int;
+
+    fn opus_decoder_init(decoder: *mut u8, sample_rate: c_int, channels: Channels) -> c_int;
+
+    fn opus_decode_float(
+        decoder: *mut u8,
+        data: *const c_uchar,
+        data_len: c_int,
+        samples: *mut f32,
+        samples_len: c_int,
+        decode_fec: c_int,
+    ) -> c_int;
+
+    //fn opus_encoder_get_size(channels: c_int) -> c_int;
+}
+
+#[derive(Debug)]
+pub enum Error {
+    SliceTooLong = 1,
+    Ok = 0,
+    BadArg = -1,
+    BufferTooSmall = -2,
+    InternalError = -3,
+    InvalidPacket = -4,
+    Unimplemented = -5,
+    InvalidState = -6,
+    AllocFail = -7,
+    Unknown = -8,
+}
+
+impl Error {
+    fn from_i32(v: i32) -> Self {
+        match v {
+            x if x == Error::Ok as i32 => Error::Ok,
+            x if x == Error::BadArg as i32 => Error::BadArg,
+            x if x == Error::BufferTooSmall as i32 => Error::BufferTooSmall,
+            x if x == Error::InternalError as i32 => Error::InternalError,
+            x if x == Error::InvalidPacket as i32 => Error::InvalidPacket,
+            x if x == Error::Unimplemented as i32 => Error::Unimplemented,
+            x if x == Error::InvalidState as i32 => Error::InvalidState,
+            x if x == Error::AllocFail as i32 => Error::AllocFail,
+            _ => Error::Unknown,
+        }
+    }
+}
+
+pub struct Decoder {
+    decoder: Vec<u8>,
+    is_stereo: bool,
+}
+
+impl Decoder {
+    pub fn new(is_stereo: bool) -> Result<Self, Error> {
+        let channels = match is_stereo {
+            true => Channels::Stereo,
+            false => Channels::Mono,
+        };
+        let decoder_size = unsafe { opus_decoder_get_size(channels) };
+        let mut decoder = vec![0; decoder_size as usize];
+
+        let status = unsafe { opus_decoder_init(decoder.as_mut_ptr(), 48000, channels) };
+        if status != Error::Ok as i32 {
+            return Err(Error::from_i32(status));
+        }
+        Ok(Decoder { decoder, is_stereo })
+    }
+
+    pub fn decode_float(
+        &mut self,
+        input: &[u8],
+        output: &mut [f32],
+        fec: bool,
+    ) -> Result<usize, Error> {
+        // Packet loss when input.len() is zero
+        let ptr = match input.len() {
+            0 => std::ptr::null(),
+            _ => input.as_ptr(),
+        };
+        let data_len = match c_int::try_from(input.len()) {
+            Ok(v) => v,
+            Err(_) => return Err(Error::SliceTooLong),
+        };
+
+        let samples_len = match c_int::try_from(output.len()) {
+            Ok(v) => {
+                if self.is_stereo {
+                    v >> 1
+                } else {
+                    v
+                }
+            }
+            Err(_) => return Err(Error::SliceTooLong),
+        };
+
+        let status = unsafe {
+            opus_decode_float(
+                self.decoder.as_mut_ptr(),
+                ptr,
+                data_len,
+                output.as_mut_ptr(),
+                samples_len,
+                fec as c_int,
+            )
+        };
+
+        if status < 0 {
+            return Err(Error::from_i32(status));
+        }
+        Ok(status as usize)
+    }
+}
 
 enum OggPageHeaderAnalysisResult {
     InvalidPage,
@@ -146,7 +265,7 @@ fn analyze_ogg_page_header(
 
 pub struct OpusData {
     id: u64,
-    stereo: bool, // 1 or 2 channels
+    is_stereo: bool, // 1 or 2 channels
     pre_skip: u16,
     output_gain: f32,
     packet_len: Vec<u16>,
@@ -212,7 +331,7 @@ impl OpusData {
 
         let mut opus_data = OpusData {
             id,
-            stereo,
+            is_stereo: stereo,
             pre_skip,
             output_gain,
             packet_len: Vec::new(),
@@ -334,7 +453,7 @@ impl OpusData {
     }
 
     pub fn is_stereo(&self) -> bool {
-        self.stereo
+        self.is_stereo
     }
 
     pub fn get_input_slice(&self, packet: usize, data_offset: usize) -> Option<&[u8]> {
@@ -345,10 +464,45 @@ impl OpusData {
         }
     }
 
+    pub fn get_stereo(&self) -> Option<Vec<f32>> {
+        if self.is_stereo {
+            let mut decoder = match Decoder::new(true) {
+                Ok(decoder) => decoder,
+                Err(_) => {
+                    return None;
+                }
+            };
+
+            let mut stereo = Vec::new();
+            let mut stereo_data = vec![0.0; 1920];
+            let mut packet_data_postion = 0;
+            for l in &self.packet_len {
+                let next_packet_data_position = packet_data_postion + (*l as usize);
+                match decoder.decode_float(
+                    &self.packet_data[packet_data_postion..next_packet_data_position],
+                    &mut stereo_data,
+                    false,
+                ) {
+                    Ok(frames_decoded) => {
+                        stereo.extend_from_slice(&stereo_data[..frames_decoded * 2]);
+                        packet_data_postion = next_packet_data_position;
+                    }
+                    Err(_) => {
+                        return None;
+                    }
+                }
+            }
+
+            Some(stereo)
+        } else {
+            None
+        }
+    }
+
     pub fn to_data(&self) -> (u8, usize, usize, Vec<u8>) {
         let mut data = Vec::new();
 
-        let stereo_byte = if self.stereo { 1 } else { 0 };
+        let stereo_byte = if self.is_stereo { 1 } else { 0 };
 
         //data.extend_from_slice(&self.packet_len.len().to_ne_bytes());
         for d in &self.packet_len {
@@ -366,7 +520,7 @@ impl OpusData {
     }
 
     pub fn add_to_vec(&self, data: &mut Vec<u8>) {
-        if self.stereo {
+        if self.is_stereo {
             data.push(1);
         } else {
             data.push(0);

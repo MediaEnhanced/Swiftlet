@@ -1,0 +1,3 @@
+[submodule "audio/src/opus"]
+	path = audio/src/opus
+	url = https://github.com/xiph/opus.git

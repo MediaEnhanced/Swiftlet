@@ -4,14 +4,19 @@
 # Cargo Command Aliases that have partial usefulness
 [alias]
 run-quic-example = "run -p swiftlet_quic --example simple"
+run-audio-playback-example = "run -p swiftlet_audio --example playback --features opus"
 run-binaural-example = "run -p swiftlet_binaural --example demo"
+cross-audio-playback-example-mac = "build -p swiftlet_audio --example playback --features opus --target aarch64-apple-darwin"
 cross-windows-x64 = "zigbuild --target x86_64-pc-windows-gnu"
-cross-windows-x64m = "zigbuild --target x86_64-pc-windows-msvc"
+#cross-windows-x64-alt = "zigbuild --target x86_64-pc-windows-msvc"
 cross-windows-arm = "zigbuild --target aarch64-pc-windows-msvc"
 cross-linux-x64 = "zigbuild --target x86_64-unknown-linux-gnu"
 cross-linux-arm = "zigbuild --target aarch64-unknown-linux-gnu"
 cross-macos-arm = "zigbuild --target aarch64-apple-darwin"
 cross-macos-x64 = "zigbuild --target x86_64-apple-darwin"
+
+#[target.aarch64-apple-darwin]
+#linker = "rust-lld"
 
 #[env]
 #RUST_BACKTRACE="1"
