@@ -243,7 +243,7 @@ impl StreamMsgType {
 }
 
 #[inline]
-fn set_stream_msg_size(vec_data: &mut Vec<u8>) {
+fn set_stream_msg_size(vec_data: &mut [u8]) {
     let num_bytes = usize::to_ne_bytes(vec_data.len() - MESSAGE_HEADER_SIZE);
     vec_data[1] = num_bytes[0];
     vec_data[2] = num_bytes[1];

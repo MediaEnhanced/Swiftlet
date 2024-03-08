@@ -43,9 +43,6 @@ windows = { version = "0.52.0", features = [
 	"Win32_Security",
 ]}
 
-[target.'cfg(target_os = "macos")'.dependencies]
-#coreaudio-rs = { version = "0.11.3", default-features = false, features = ["audio_unit", "core_audio"] }
-
 [features]
 opus = []
 
@@ -76,4 +73,13 @@ test = false
 harness = false
 bench = false
 required-features = ["opus"]
+
+[[example]]
+name = "sine"
+path = "examples/sine.rs"
+crate-type = ["bin"]
+doc = false
+test = false
+harness = false
+bench = false
 

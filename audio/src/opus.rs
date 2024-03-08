@@ -29,6 +29,7 @@ enum Channels {
     Stereo = 2,
 }
 
+#[link(name = "opus", kind = "static")]
 extern "C" {
     fn opus_decoder_get_size(channels: Channels) -> c_int;
 

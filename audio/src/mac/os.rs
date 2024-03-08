@@ -26,22 +26,10 @@
 
 mod coreaudio;
 use coreaudio::Object;
-// use alsa::{Pcm, PcmState};
 
-// fn handle_alsa_error(e: alsa::Error) {
-//     match e {
-//         alsa::Error::Generic((num, s)) => {
-//             println!("Alsa Generic Error: {}; {}", num, s);
-//         }
-//         alsa::Error::StringCreation(num) => {
-//             println!("Alsa String Creation Error: {}", num);
-//         }
-//     }
-// }
-
-// fn handle_alsa_state(s: PcmState) {
-//     //println!("Alsa PCM State: {:?}", s);
-// }
+fn handle_coreaudio_error(e: coreaudio::Error) {
+    println!("Coreaudio Error: {:?}", e);
+}
 
 #[derive(Debug)]
 pub(super) enum Error {
@@ -70,14 +58,14 @@ pub(super) struct AudioOutput {
 
 impl AudioOutput {
     pub(super) fn new(audio_device: &AudioDevice, desired_period: u32) -> Option<Self> {
-        // Open default playback device
-        // let pcm_device = match alsa::Pcm::new_from_default_playback() {
-        //     Ok(p) => p,
-        //     Err(e) => {
-        //         handle_alsa_error(e);
-        //         return None;
-        //     }
-        // };
+        //Open default playback device
+        let _device = match Object::new_from_default_playback() {
+            Ok(o) => o,
+            Err(e) => {
+                handle_coreaudio_error(e);
+                return None;
+            }
+        };
 
         // handle_alsa_state(pcm_device.get_state());
 

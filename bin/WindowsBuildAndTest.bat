@@ -3,15 +3,15 @@ cls
 
 rem This script provides an easy way to test swiftlet during development
 
-IF [%1] EQU [] (
-	GOTO Debug
-) ELSE (
-	GOTO Release
+if [%1] EQU [] (
+	goto Debug
+) else (
+	goto Release
 )
 
 :Debug
 cargo.exe build
-IF %ERRORLEVEL% NEQ 0 EXIT /b %ERRORLEVEL%
+if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
 
 Start "Swiftlet Server" "..\target\debug\swiftlet.exe" --sname Server --ipv6
 timeout /t 1
@@ -28,7 +28,7 @@ exit 0
 
 :Release
 cargo.exe build -r
-IF %ERRORLEVEL% NEQ 0 EXIT /b %ERRORLEVEL%
+if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
 
 Start "Swiftlet Server" "..\target\release\swiftlet.exe" --sname Server --ipv6
 timeout /t 1

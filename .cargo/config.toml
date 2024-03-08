@@ -1,30 +1,29 @@
 # Media Enhanced Swiftlet Cargo Config
-# Real-time Communication of Media over the Internet using QUIC
+# Cross Linking Supported by Zig
 
-# Cargo Command Aliases that have partial usefulness
+# Cargo Command Aliases that have usefulness
 [alias]
 run-quic-example = "run -p swiftlet_quic --example simple"
 run-audio-playback-example = "run -p swiftlet_audio --example playback --features opus"
+run-audio-sine-example = "run -p swiftlet_audio --example sine"
 run-binaural-example = "run -p swiftlet_binaural --example demo"
-cross-audio-playback-example-mac = "build -p swiftlet_audio --example playback --features opus --target aarch64-apple-darwin"
-cross-windows-x64 = "zigbuild --target x86_64-pc-windows-gnu"
-#cross-windows-x64-alt = "zigbuild --target x86_64-pc-windows-msvc"
-cross-windows-arm = "zigbuild --target aarch64-pc-windows-msvc"
-cross-linux-x64 = "zigbuild --target x86_64-unknown-linux-gnu"
-cross-linux-arm = "zigbuild --target aarch64-unknown-linux-gnu"
-cross-macos-arm = "zigbuild --target aarch64-apple-darwin"
-cross-macos-x64 = "zigbuild --target x86_64-apple-darwin"
 
-#[target.aarch64-apple-darwin]
-#linker = "rust-lld"
+windows-cross-windows-x64 = "--config target.x86_64-pc-windows-gnu.linker='../zig/zcc.bat' --config target.x86_64-pc-windows-gnu.rustflags=['-C','link-arg=--target=x86_64-windows'] build --target x86_64-pc-windows-gnu"
+#windows-cross-windows-x64-msvc = "--config target.x86_64-pc-windows-msvc.linker='../zig/zcc.bat' --config target.x86_64-pc-windows-msvc.rustflags=['-C','link-arg=--target=x86_64-windows'] build --target x86_64-pc-windows-msvc"
+#windows-cross-windows-arm = "--config target.aarch64-pc-windows-msvc.linker='../zig/zcc.bat' --config target.aarch64-pc-windows-msvc.rustflags=['-C','link-arg=--target=aarch64-windows'] build --target aarch64-pc-windows-msvc"
+windows-cross-linux-x64 = "--config target.x86_64-unknown-linux-gnu.linker='../zig/zcc.bat' --config target.x86_64-unknown-linux-gnu.rustflags=['-C','link-arg=--target=x86_64-linux-gnu','-C','link-arg=-L','-C','link-arg=./zig/debian-amd64'] build --target x86_64-unknown-linux-gnu"
+windows-cross-linux-arm = "--config target.aarch64-unknown-linux-gnu.linker='../zig/zcc.bat' --config target.aarch64-unknown-linux-gnu.rustflags=['-C','link-arg=--target=aarch64-linux-gnu','-C','link-arg=-L','-C','link-arg=./zig/debian-arm64'] build --target aarch64-unknown-linux-gnu"
+windows-cross-macos-arm = "--config target.aarch64-apple-darwin.linker='../zig/zcc.bat' --config target.aarch64-apple-darwin.rustflags=['-C','link-arg=--target=aarch64-macos-none','-C','link-arg=-F','-C','link-arg=./zig'] build --target aarch64-apple-darwin"
+windows-cross-macos-x64 = "--config target.x86_64-apple-darwin.linker='../zig/zcc.bat' --config target.x86_64-apple-darwin.rustflags=['-C','link-arg=--target=x86_64-macos-none','-C','link-arg=-F','-C','link-arg=./zig'] build --target x86_64-apple-darwin"
 
-#[env]
-#RUST_BACKTRACE="1"
+unix-cross-windows-x64 = "--config target.x86_64-pc-windows-gnu.linker='../zig/zcc.sh' --config target.x86_64-pc-windows-gnu.rustflags=['-C','link-arg=--target=x86_64-windows'] build --target x86_64-pc-windows-gnu"
+#unix-cross-windows-x64-msvc = "--config target.x86_64-pc-windows-msvc.linker='../zig/zcc.sh' --config target.x86_64-pc-windows-msvc.rustflags=['-C','link-arg=--target=x86_64-windows'] build --target x86_64-pc-windows-msvc"
+#unix-cross-windows-arm = "--config target.aarch64-pc-windows-msvc.linker='../zig/zcc.sh' --config target.aarch64-pc-windows-msvc.rustflags=['-C','link-arg=--target=aarch64-windows'] build --target aarch64-pc-windows-msvc"
+unix-cross-linux-x64 = "--config target.x86_64-unknown-linux-gnu.linker='../zig/zcc.sh' --config target.x86_64-unknown-linux-gnu.rustflags=['-C','link-arg=--target=x86_64-linux-gnu','-C','link-arg=-L','-C','link-arg=./zig/debian-amd64'] build --target x86_64-unknown-linux-gnu"
+unix-cross-linux-arm = "--config target.aarch64-unknown-linux-gnu.linker='../zig/zcc.sh' --config target.aarch64-unknown-linux-gnu.rustflags=['-C','link-arg=--target=aarch64-linux-gnu','-C','link-arg=-L','-C','link-arg=./zig/debian-arm64'] build --target aarch64-unknown-linux-gnu"
+unix-cross-macos-arm = "--config target.aarch64-apple-darwin.linker='../zig/zcc.sh' --config target.aarch64-apple-darwin.rustflags=['-C','link-arg=--target=aarch64-macos-none','-C','link-arg=-F','-C','link-arg=./zig'] build --target aarch64-apple-darwin"
+unix-cross-macos-x64 = "--config target.x86_64-apple-darwin.linker='../zig/zcc.sh' --config target.x86_64-apple-darwin.rustflags=['-C','link-arg=--target=x86_64-macos-none','-C','link-arg=-F','-C','link-arg=./zig'] build --target x86_64-apple-darwin"
 
-# OLD STUFF TO BE REMOVED IN THE FUTURE
-#CARGO_TARGET_DIR = "./target/$(rustc -vV:target_arch)/"
-#COREAUDIO_SDK_PATH="MacOSX.sdk"
-
-#[target.x86_64-unknown-linux-gnu]
-#rustflags = ["-G MinGW Makefiles"]
+[install]
+root = "./"
 

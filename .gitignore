@@ -5,25 +5,26 @@ debug
 # Cargo Build File
 Cargo.lock
 
-# Moved Executables
-bin/Swiftlet*
+# Binary Folder
+# Ignore everything that is not a Windows or Unix Script or is within the audio & security sub-directories
+bin/*
+!bin/README.md
+!bin/*.bat
+!bin/*.sh
+!bin/audio/
+!bin/security/
 
-# Created Releases
-bin/releases
+# Cargo Install Files
+.crates.toml
+.crates2.json
 
-# Ignored security log file created by a swiftlet_quic server endpoint on it's first connection
-# This file is useful when debugging the server side network with Wireshark
-bin/key.log
-
-# Developing Resources (that cannot be made public)
-bin/resources
-
-# Cross Compiler
+# Cross Compiler/Linker Folder
 zig/*
-!zig/zcc.bat
-!zig/zar.bat
-!zig/zcc.sh
-!zig/zar.sh
+!zig/*.bat
+!zig/*.sh
+!zig/debian-amd64/
+!zig/debian-arm64/
+!zig/*.framework/
 
 # VsCode Misc Settings
 .vscode

@@ -24,35 +24,37 @@ use std::ffi::{c_char, CStr, CString};
 use std::os::raw::{c_int, c_uchar, c_uint};
 use std::ptr;
 
+#[repr(C)]
+struct PropertyAddress {
+    selector: u32,
+    scope: u32,
+    element: u32,
+}
+
+#[link(name = "CoreAudio", kind = "framework")]
 extern "C" {
+    fn AudioObjectGetPropertyDataSize(
+        object_id: c_uint,
+        property_address: *const PropertyAddress,
+        qualifier_data_size: c_uint,
+        qualifier_data: *const c_uchar,
+        out_data_size: *mut c_uint,
+    ) -> c_int;
+
     fn AudioObjectGetPropertyData(
         object_id: c_uint,
-        property_address: *const c_uchar,
+        property_address: *const PropertyAddress,
         qualifier_data_size: c_uint,
         qualifier_data: *const c_uchar,
         io_data_size: *mut c_uint,
         out_data: *mut c_char,
     ) -> c_int;
-
-    // fn opus_decoder_get_size(channels: Channels) -> c_int;
-
-    // fn opus_decoder_init(decoder: *mut u8, sample_rate: c_int, channels: Channels) -> c_int;
-
-    // fn opus_decode_float(
-    //     decoder: *mut u8,
-    //     data: *const c_uchar,
-    //     data_len: c_int,
-    //     samples: *mut f32,
-    //     samples_len: c_int,
-    //     decode_fec: c_int,
-    // ) -> c_int;
-
-    //fn opus_encoder_get_size(channels: c_int) -> c_int;
 }
 
 /// CoreAudio Error
 #[derive(Debug)]
 pub enum Error {
+    Test = 2,
     SliceTooLong = 1,
     Ok = 0, // No Error
     Unimplemented = -4,
@@ -79,6 +81,8 @@ impl Error {
     }
 }
 
+//const AudioObjectSystemObject: c_uint = 1;
+
 // A private structure that is only used as a Raw Pointer handle
 // This handle "points" to the private structure
 #[repr(C)]
@@ -90,6 +94,35 @@ struct OpaqueStructure {
 pub(super) struct Object {
     handle: *mut OpaqueStructure,
     is_capture: bool,
+}
+
+impl Object {
+    pub(super) fn new_from_default_playback() -> Result<Self, Error> {
+        let property_address = PropertyAddress {
+            selector: u32::from_be_bytes([b'd', b'e', b'v', b'#']),
+            scope: u32::from_be_bytes([b'g', b'l', b'o', b'b']),
+            element: 0,
+        };
+
+        let null_ptr = ptr::null();
+        let mut device_size = 0;
+
+        let errnum = unsafe {
+            AudioObjectGetPropertyDataSize(1, &property_address, 0, null_ptr, &mut device_size)
+        };
+        if errnum != 0 {
+            return Err(Error::from_i32(errnum));
+        }
+
+        println!("Device Size: {}", device_size);
+
+        Err(Error::Test)
+        //println!("Hw Parameters Pointer: {:?}", handle);
+        // Ok(Object {
+        //     handle,
+        //     is_capture: false,
+        // })
+    }
 }
 
 // /// Alsa PCM Stream Direction

@@ -80,7 +80,7 @@ fn main() {
 fn output_callback(
     samples: &mut [f32],
     stereo_position: &mut usize,
-    stereo_data: &Vec<f32>,
+    stereo_data: &[f32],
     callback_count: &mut u64,
 ) -> bool {
     *callback_count += 1;

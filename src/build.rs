@@ -1,54 +1,26 @@
-// Rust Cross Compile Support
+// Media Enhanced Swiftlet Build Script
 
 fn main() {
-    let host_str = match std::env::var("HOST") {
+    // Get the Host and Target Triple Strings
+    let host_string = match std::env::var("HOST") {
         Ok(s) => s,
         Err(e) => {
-            panic!("Could not find host triple: {}", e);
+            panic!("Could not get the host triple string from the Cargo build script set environment variable: {}", e);
         }
     };
-    let target_str = match std::env::var("TARGET") {
+    let target_string = match std::env::var("TARGET") {
         Ok(s) => s,
         Err(e) => {
-            panic!("Could not find target triple: {}", e);
+            panic!("Could not get the target triple string from the Cargo build script set environment variable: {}", e);
         }
     };
-    if target_str != host_str {
-        // Cross Compiling
-        // Each Target should set the appropriate OS library link search paths
-        // and dynamic library search path if necessary
-        // For now it is based on zig helper files
-        match target_str.as_str() {
-            "x86_64-pc-windows-gnu" => {
-                // Windows 64-bit
-                if host_str.as_str() == "x86_64-pc-windows-msvc" {
-                    // Partial cross compiling
-                }
-            }
-            "x86_64-pc-windows-msvc" => {
-                // Windows 64-bit Alt
-                if host_str.as_str() == "x86_64-pc-windows-gnu" {
-                    // Partial cross compiling
-                }
-            }
-            "aarch64-pc-windows-msvc" => {
-                // Windows 64-bit Arm
-            }
-            "x86_64-unknown-linux-gnu" => {
-                // Linux 64-bit
-            }
-            "aarch64-unknown-linux-gnu" => {
-                // Linux 64-bit Arm
-            }
-            "aarch64-apple-darwin" => {
-                // MacOS 64-bit Arm
-            }
-            "x86_64-apple-darwin" => {
-                // MacOS 64-bit Intel/Legacy
-            }
-            _ => {
-                panic!("Not a valid build target: {}", target_str);
-            }
-        }
+
+    if host_string != target_string {
+        panic!("Cross Compiling Not Currently Supported!");
     }
+
+    // Distributed dynamic library search paths could be added here based on the target and program requirements
+    //println!("cargo:rustc-link-search=bin/lib/");
+
+    //panic!("Panic and Print Build Debug");
 }
