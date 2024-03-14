@@ -1,5 +1,5 @@
 #!/bin/sh
 
-# Need to make it more like zcc.bat in future
+# Need to make it more like zcc.bat soon
 zig cc $@
 
