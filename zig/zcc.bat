@@ -19,7 +19,7 @@ if !firstChar!==@ (
             set line=!line:-Wl,-Bdynamic=-Wl,-search_paths_first!
             set line=!line:-lgcc_eh=!
             set line=!line:-lmsvcrt=!
-						set line=!line:-lgcc_s=!
+			set line=!line:-lgcc_s=!
             set line=!line:-lgcc=!
             set line=!line:-l:libpthread.a=!
             >>"!paramFile!" echo(!line!
@@ -40,6 +40,7 @@ set params=!params:-lgcc_s=!
 set params=!params:-lgcc=!
 set params=!params:-l:libpthread.a=!
 
+rem Might need to make this do an operation similar to zcc.sh in future
 set builtinNum=!params:*libcompiler_builtins-=!
 set builtinNum=%builtinNum:.rlib=&rem.%
 set "builtin=libcompiler_builtins-%builtinNum%.rlib"
@@ -53,6 +54,5 @@ set "params=!params! -lunwind"
 rem set params=!params:-lmingw32=!
 rem set params=!params:-lmingwex=!
 
-echo Adjusted parameters: !params!
-
+rem echo Adjusted parameters: !params!
 zig.exe cc !params!

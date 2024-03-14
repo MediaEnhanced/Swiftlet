@@ -94,9 +94,9 @@ pub(super) enum PcmHwParam {
     NearestRate(u32),
     FormatFloat,
     BufferInterleaved,
-    NearestPeriod(u64),
-    BufferSize(u32),
     Channels(u32),
+    NearestPeriod(u64),
+    NearestBufferSize(u64),
 }
 
 #[repr(C)]
@@ -142,12 +142,6 @@ enum PcmHwParamAccess {
 pub(super) struct PcmSwParams<'a> {
     handle: *mut OpaqueStructure,
     pcm_link: &'a Pcm,
-}
-
-pub(super) enum PcmSwParam {
-    NearestRate(u32),
-    FormatFloat,
-    BufferInterleaved,
 }
 
 #[link(name = "asound")]
@@ -227,6 +221,12 @@ extern "C" {
         access: PcmHwParamAccess,
     ) -> c_int;
 
+    fn snd_pcm_hw_params_set_channels(
+        pcm_handle: *mut OpaqueStructure,
+        hw_params_handle: *mut OpaqueStructure,
+        channel_count: c_uint,
+    ) -> c_int;
+
     fn snd_pcm_hw_params_set_period_size_near(
         pcm_handle: *mut OpaqueStructure,
         hw_params_handle: *mut OpaqueStructure,
@@ -234,10 +234,10 @@ extern "C" {
         direction: *mut PcmHwParamDirection,
     ) -> c_int;
 
-    fn snd_pcm_hw_params_set_channels(
+    fn snd_pcm_hw_params_set_buffer_size_near(
         pcm_handle: *mut OpaqueStructure,
         hw_params_handle: *mut OpaqueStructure,
-        channel_count: c_uint,
+        buffer: *mut c_ulong,
     ) -> c_int;
 
     // Sw Parameter Functions
@@ -455,6 +455,14 @@ impl<'a> PcmHwParams<'a> {
                     return Err(Error::from_errnum(errnum));
                 }
             }
+            PcmHwParam::Channels(channel_count) => {
+                let errnum = unsafe {
+                    snd_pcm_hw_params_set_channels(self.pcm_link.handle, self.handle, channel_count)
+                };
+                if errnum != 0 {
+                    return Err(Error::from_errnum(errnum));
+                }
+            }
             PcmHwParam::NearestPeriod(mut period) => {
                 let errnum = unsafe {
                     snd_pcm_hw_params_set_period_size_near(
@@ -468,13 +476,15 @@ impl<'a> PcmHwParams<'a> {
                     return Err(Error::from_errnum(errnum));
                 }
             }
-            PcmHwParam::BufferSize(buffer_size) => {
-                // Nothing right now
-            }
-            PcmHwParam::Channels(channel_count) => {
+            PcmHwParam::NearestBufferSize(mut buffer_size) => {
                 let errnum = unsafe {
-                    snd_pcm_hw_params_set_channels(self.pcm_link.handle, self.handle, channel_count)
+                    snd_pcm_hw_params_set_buffer_size_near(
+                        self.pcm_link.handle,
+                        self.handle,
+                        &mut buffer_size,
+                    )
                 };
+
                 if errnum != 0 {
                     return Err(Error::from_errnum(errnum));
                 }
@@ -509,50 +519,6 @@ impl<'a> PcmSwParams<'a> {
             handle,
             pcm_link: pcm,
         })
-    }
-
-    pub(super) fn set_param(&self, param: PcmSwParam) -> Result<(), Error> {
-        match param {
-            PcmSwParam::NearestRate(rate) => {
-                let errnum = unsafe {
-                    snd_pcm_hw_params_set_rate(
-                        self.pcm_link.handle,
-                        self.handle,
-                        rate,
-                        PcmHwParamDirection::Nearest,
-                    )
-                };
-                if errnum != 0 {
-                    return Err(Error::from_errnum(errnum));
-                }
-            }
-            PcmSwParam::FormatFloat => {
-                #[cfg(target_endian = "little")]
-                let format = PcmHwParamFormat::FloatLE;
-                #[cfg(target_endian = "big")]
-                let format = PcmHwParamFormat::FloatBE;
-
-                let errnum = unsafe {
-                    snd_pcm_hw_params_set_format(self.pcm_link.handle, self.handle, format)
-                };
-                if errnum != 0 {
-                    return Err(Error::from_errnum(errnum));
-                }
-            }
-            PcmSwParam::BufferInterleaved => {
-                let errnum = unsafe {
-                    snd_pcm_hw_params_set_access(
-                        self.pcm_link.handle,
-                        self.handle,
-                        PcmHwParamAccess::RWInterleaved,
-                    )
-                };
-                if errnum != 0 {
-                    return Err(Error::from_errnum(errnum));
-                }
-            }
-        }
-        Ok(())
     }
 }
 

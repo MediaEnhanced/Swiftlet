@@ -115,6 +115,7 @@ fn main() {
         }
     };
 
+    #[allow(unused_variables)]
     let cross_info_opt = CrossCompileInfo::new(host_string.as_str(), target_string.as_str());
 
     // Build Linkable Opus "Static" Library if the opus feature is selected

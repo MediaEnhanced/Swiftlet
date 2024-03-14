@@ -62,7 +62,7 @@ pub fn run_output(
 
     let output = match AudioOutput::new(&owner, desired_period) {
         Some(d) => d,
-        None => return Err(Error::OwnerCreation),
+        None => return Err(Error::OutputCreation),
     };
 
     if output.get_channels() != expected_channels {

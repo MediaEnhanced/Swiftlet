@@ -61,7 +61,6 @@ pub(super) struct AudioOutput<'a> {
     owner: &'a AudioOwner,
     device: Pcm,
     frame_period: u32,
-    //buffer_size: i64,
     channels: u32,
     //channel_mask: u32,
     //volume_control: Audio::ISimpleAudioVolume,
@@ -104,6 +103,10 @@ impl<'a> AudioOutput<'a> {
             return None;
         }
 
+        if hw_params.set_param(alsa::PcmHwParam::Channels(2)).is_err() {
+            return None;
+        }
+
         if hw_params
             .set_param(alsa::PcmHwParam::NearestPeriod(desired_period as u64))
             .is_err()
@@ -111,9 +114,13 @@ impl<'a> AudioOutput<'a> {
             return None;
         }
 
-        if hw_params.set_param(alsa::PcmHwParam::Channels(2)).is_err() {
+        if hw_params
+            .set_param(alsa::PcmHwParam::NearestBufferSize(desired_period as u64))
+            .is_err()
+        {
             return None;
         }
+
         if pcm_device.set_hw_params(&hw_params).is_err() {
             return None;
         }
@@ -137,6 +144,8 @@ impl<'a> AudioOutput<'a> {
         //     }
         // };
 
+        // drop(sw_params);
+
         let num_floats = (desired_period as usize) * 2;
 
         Some(AudioOutput {
@@ -146,119 +155,6 @@ impl<'a> AudioOutput<'a> {
             channels: 2,
         })
         // None
-
-        // // Open default playback device
-        // let pcm = PCM::new("default", Direction::Playback, false).unwrap();
-
-        // let hwp = HwParams::any(&pcm).unwrap();
-        // hwp.set_channels(2).unwrap();
-        // hwp.set_rate(48000, ValueOr::Nearest).unwrap();
-        // hwp.set_format(Format::float()).unwrap();
-        // hwp.set_access(Access::RWInterleaved).unwrap();
-        // pcm.hw_params(&hwp).unwrap();
-
-        // // Make sure we don't start the stream too early
-        // let hwp2 = pcm.hw_params_current().unwrap();
-        // let swp = pcm.sw_params_current().unwrap();
-        // swp.set_start_threshold(hwp2.get_buffer_size().unwrap())
-        //     .unwrap();
-        // pcm.sw_params(&swp).unwrap();
-
-        // drop(swp);
-        // drop(hwp2);
-        // drop(hwp);
-
-        // Some(AudioOutput {
-        //     device: pcm,
-        //     channels: 2,
-        //     frame_period: desired_period,
-        // })
-
-        // let device = match PCM::new("default", Direction::Playback, true) {
-        //     Ok(pcm) => pcm,
-        //     Err(_) => return None,
-        // };
-
-        // // Fill params with a full configuration space for a PCM
-        // // The configuration space will be filled with all possible ranges for the PCM device.
-        // // Note that the configuration space may be constrained by the currently installed configuration on the PCM device.
-        // let parameters = match HwParams::any(&device) {
-        //     Ok(hwp) => hwp,
-        //     Err(_) => return None,
-        // };
-
-        // // Restrict configuration space with the following sets...?
-        // if parameters.set_channels(2).is_err() {
-        //     return None;
-        // }
-        // // let channels = match parameters.get_channels() {
-        // //     Ok(c) => c,
-        // //     Err(_) => return None,
-        // // };
-
-        // if parameters.set_rate(48000, ValueOr::Nearest).is_err() {
-        //     return None;
-        // }
-        // if parameters.set_format(Format::float()).is_err() {
-        //     return None;
-        // }
-        // if parameters.set_access(Access::RWInterleaved).is_err() {
-        //     return None;
-        // }
-        // if parameters
-        //     .set_period_size_near((desired_period / 4) as Frames, ValueOr::Nearest)
-        //     .is_err()
-        // {
-        //     return None;
-        // }
-        // if parameters
-        //     .set_buffer_size(desired_period as Frames)
-        //     .is_err()
-        // {
-        //     return None;
-        // }
-
-        // // Install one PCM hardware configuration chosen from a configuration space and snd_pcm_prepare it.
-        // if device.hw_params(&parameters).is_err() {
-        //     return None;
-        // }
-
-        // //let io = device.io_f32().unwrap();
-
-        // // Retreive current PCM hardware configuration chosen with snd_pcm_hw_params
-        // let hwp = match device.hw_params_current() {
-        //     Ok(p) => p,
-        //     Err(_) => return None,
-        // };
-
-        // // Return current software configuration for a PCM
-        // let swp = match device.sw_params_current() {
-        //     Ok(p) => p,
-        //     Err(_) => return None,
-        // };
-
-        // // let buffer_size = match hwp.get_buffer_size() {
-        // //     Ok(bs) => bs,
-        // //     Err(_) => return None,
-        // // };
-
-        // // if swp.set_start_threshold(desired_period as i64).is_err() {
-        // //     return None;
-        // // }
-        // // if device.sw_params(&swp).is_err() {
-        // //     return None;
-        // // }
-
-        // drop(parameters);
-        // drop(hwp);
-        // drop(swp);
-
-        // Some(AudioOutput {
-        //     device,
-        //     channels: 2,
-        //     //buffer_size: ,
-        //     frame_period: desired_period,
-        // })
     }
 
     pub(super) fn get_channels(&self) -> u32 {
