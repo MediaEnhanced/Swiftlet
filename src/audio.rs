@@ -32,7 +32,6 @@ use crate::communication::{
 
 use swiftlet_audio::opus::Decoder;
 pub(crate) use swiftlet_audio::opus::OpusData;
-use swiftlet_audio::AudioIO;
 
 struct OutputState {
     callback_count: u64,
@@ -67,41 +66,25 @@ struct OutputData {
 }
 
 pub(crate) fn audio_thread(output_channels: AudioOutputThreadChannels) {
-    let mut audio_io = match swiftlet_audio::AudioIO::new() {
-        Ok(a) => a,
-        Err(_) => {
-            let _ = output_channels
-                .debug_send
-                .send("Could not create Audio IO!");
-            return;
-        }
+    let debug_send = output_channels.debug_send.clone();
+
+    let mut output_state = OutputState {
+        callback_count: 0,
+        prev_callback_time: Instant::now(),
+        playbacks: Vec::new(),
+        playback_cleanup: Vec::new(),
+        realtimes: Vec::new(),
+    };
+    let mut opus_list = Vec::new();
+    let mut f = move |samples: &mut [f32]| {
+        output_callback(samples, &mut output_state, &mut opus_list, &output_channels)
     };
 
-    match audio_io.create_output(480) {
-        Some(2) => {
-            let mut output_state = OutputState {
-                callback_count: 0,
-                prev_callback_time: Instant::now(),
-                playbacks: Vec::new(),
-                playback_cleanup: Vec::new(),
-                realtimes: Vec::new(),
-            };
-            let mut opus_list = Vec::new();
-            let mut f = move |samples: &mut [f32]| {
-                output_callback(samples, &mut output_state, &mut opus_list, &output_channels)
-            };
-
-            audio_io.run_output_event_loop(&mut f);
-        }
-        Some(_) => {
-            let _ = output_channels
-                .debug_send
-                .send("Wrong Output Channel Count!");
-        }
-        None => {
-            let _ = output_channels
-                .debug_send
-                .send("Could not create Audio IO Output!");
+    match swiftlet_audio::run_output(480, 2, &mut f) {
+        Ok(true) => println!("Played the whole song!"),
+        Ok(false) => println!("Playback loop ended sooner than expected!"),
+        Err(_e) => {
+            let _ = debug_send.send("Playback Error");
         }
     }
 }

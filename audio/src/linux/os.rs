@@ -47,28 +47,28 @@ pub(super) enum Error {
     Generic,
 }
 
-pub(super) struct AudioDevice {
+pub(super) struct AudioOwner {
     info: u64,
 }
 
-impl AudioDevice {
+impl AudioOwner {
     pub(super) fn new() -> Option<Self> {
-        Some(AudioDevice { info: 0 })
+        Some(AudioOwner { info: 0 })
     }
 }
 
-pub(super) struct AudioOutput {
+pub(super) struct AudioOutput<'a> {
+    owner: &'a AudioOwner,
     device: Pcm,
     frame_period: u32,
     //buffer_size: i64,
     channels: u32,
     //channel_mask: u32,
-    data_vec: Vec<f32>,
     //volume_control: Audio::ISimpleAudioVolume,
 }
 
-impl AudioOutput {
-    pub(super) fn new(audio_device: &AudioDevice, desired_period: u32) -> Option<Self> {
+impl<'a> AudioOutput<'a> {
+    pub(super) fn new(audio_owner: &'a AudioOwner, desired_period: u32) -> Option<Self> {
         // Open default playback device
         let pcm_device = match alsa::Pcm::new_from_default_playback() {
             Ok(p) => p,
@@ -140,10 +140,10 @@ impl AudioOutput {
         let num_floats = (desired_period as usize) * 2;
 
         Some(AudioOutput {
+            owner: audio_owner,
             device: pcm_device,
             frame_period: desired_period,
             channels: 2,
-            data_vec: vec![0.0; num_floats],
         })
         // None
 
@@ -266,202 +266,64 @@ impl AudioOutput {
     }
 
     // Returns true if started
-    pub(super) fn start(&self) -> bool {
+    fn start(&self) -> bool {
         // Need to do an initial read to clear stuff based on documentation
         self.device.start().is_ok()
     }
 
-    pub(super) fn stop(&self) -> bool {
+    fn stop(&self) -> bool {
         self.device.stop().is_ok()
     }
 
-    pub(super) fn wait_for_next_output(
-        &mut self,
-        millisecond_timeout: u32,
-    ) -> Result<Option<&mut [f32]>, Error> {
-        match self.device.wait_until_ready(millisecond_timeout as i32) {
-            Ok(true) => {
-                // Process Frames
-                let available_frames = self.device.get_available_frames();
-
-                //println!("Frames Available: {}", available_frames);
-                if available_frames >= (self.frame_period as i64) {
-                    let float_p = self.data_vec.as_mut_ptr() as *mut f32;
-                    let buffer_len = (self.frame_period * self.channels) as usize;
-                    let buffer = unsafe { std::slice::from_raw_parts_mut(float_p, buffer_len) };
-                    Ok(Some(buffer))
-                } else {
-                    Ok(None)
-                }
-            }
-            Ok(false) => {
-                // Timeout
-                Ok(None)
-            }
-            Err(e) => {
-                handle_alsa_error(e);
-                //return false;
-                Err(Error::Generic)
-            }
-        }
-    }
-
-    pub(super) fn release_output(&self) -> bool {
-        match self
-            .device
-            .write_interleaved_float_frames(&self.data_vec, self.frame_period as u64)
-        {
-            Ok(frames) => {
-                //println!("Frames Written: {}", frames);
-                if frames == self.frame_period as u64 {
-                    true
-                } else {
-                    false
-                }
-            }
-            Err(e) => {
-                handle_alsa_error(e);
-                false
-            }
-        }
-    }
-
-    fn event_loop(&self, callback: &mut dyn FnMut(&mut [f32]) -> bool) -> bool {
-        // // Make a sine wave
-        // let mut buf = [0i16; 1024];
-        // for (i, a) in buf.iter_mut().enumerate() {
-        //     *a = ((i as f32 * 2.0 * ::std::f32::consts::PI / 128.0).sin() * 8192.0) as i16
-        // }
-
-        // let mut buf2 = [0i16; 1024];
-        // for (i, a) in buf2.iter_mut().enumerate() {
-        //     *a = ((i as f32 * 2.0 * ::std::f32::consts::PI / 128.0).sin() * 8192.0) as i16
-        // }
-
-        // let io = self.device.io_f32().unwrap();
-
-        // let sample_float_divisor = (1 << (16 - 1)) as f32;
-        // let sample_float_multiplier = 1.0 / sample_float_divisor;
-
-        // let mut buf3 = [0.0; 2048];
-        // let mut ind2 = 0;
-        // for (i, a) in buf.iter().enumerate() {
-        //     buf3[ind2] = (*a as f32) * sample_float_multiplier;
-        //     //buf3[ind2 + 1] = (*a as f32) * sample_float_multiplier;
-        //     buf3[ind2 + 1] = (buf2[i] as f32) * sample_float_multiplier;
-        //     ind2 += 2;
-        // }
-
-        // // Play it back for 2 seconds.
-        // for _ in 0..2 * 48000 / 1024 {
-        //     assert_eq!(io.writei(&buf3[..]).unwrap(), 1024);
-        // }
-
-        // // In case the buffer was larger than 2 seconds, start the stream manually.
-        // if self.device.state() != State::Running {
-        //     self.device.start().unwrap()
-        // };
-        // // Wait for the stream to finish playback.
-        // self.device.drain().unwrap();
+    pub(super) fn run_callback_loop(&self, callback: &mut crate::OutputCallback) -> bool {
+        let buffer_len = (self.frame_period * self.channels) as usize;
+        let mut data_vec = vec![0.0 as f32; buffer_len];
+        let float_p = data_vec.as_mut_ptr() as *mut f32;
+        let buffer = unsafe { std::slice::from_raw_parts_mut(float_p, buffer_len) };
 
         if !self.start() {
             return false;
         }
-        handle_alsa_state(self.device.get_state());
-
-        // let pollfd_blank = alsa::poll::pollfd {
-        //     fd: 0,
-        //     events: 0,
-        //     revents: 0,
-        // };
-
-        // let mut pollfd_array = vec![pollfd_blank; self.device.count()];
-
-        let num_floats = (self.frame_period as usize) * (self.channels as usize);
-        let mut data_vec = vec![0.0; num_floats];
-
         loop {
-            // In the loop...?
-            // if self.device.fill(&mut pollfd_array).is_err() {
-            //     return false;
-            // }
-
-            // let poll_res = match alsa::poll::poll(&mut pollfd_array, 100) {
-            //     Ok(r) => r,
-            //     Err(_) => return false,
-            // };
-
-            // if poll_res == 0 {
-            //     // Weird spot...?
-            //     return false;
-            // }
-
-            // if pollfd_array[0].revents != 0 {
-            //     // Stream wants to be destroyed...?
-            //     return false;
-            // }
-
-            // let revents = match self.device.revents(&pollfd_array) {
-            //     Ok(re) => re,
-            //     Err(_) => return false,
-            // };
-            // if revents.contains(alsa::poll::Flags::ERR) {
-            //     return false;
-            // }
-            // if revents != alsa::poll::Flags::OUT {
-            //     continue;
-            // }
-
-            match self.device.wait_until_ready(-1) {
+            match self.device.wait_until_ready(15) {
                 Ok(true) => {
                     // Process Frames
+                    let available_frames = self.device.get_available_frames();
+                    //println!("Frames Available: {}", available_frames);
+                    if available_frames >= (self.frame_period as i64) {
+                        let callback_quit = callback(buffer);
+                        match self
+                            .device
+                            .write_interleaved_float_frames(&data_vec, self.frame_period as u64)
+                        {
+                            Ok(frames) => {
+                                //println!("Frames Written: {}", frames);
+                                if frames != self.frame_period as u64 {
+                                    return false;
+                                }
+                            }
+                            Err(e) => {
+                                handle_alsa_error(e);
+                                return false;
+                            }
+                        }
+                        if callback_quit {
+                            break;
+                        }
+                    }
                 }
                 Ok(false) => {
-                    continue;
+                    // Timeout
                 }
                 Err(e) => {
+                    // Alsa Wait Error
                     handle_alsa_error(e);
                     return false;
                 }
             }
-            //handle_alsa_state();
-
-            let available_frames = self.device.get_available_frames();
-
-            //println!("Frames Available: {}", available_frames);
-            if available_frames >= (self.frame_period as i64) {
-                let float_p = data_vec.as_mut_ptr() as *mut f32;
-                let buffer = unsafe { std::slice::from_raw_parts_mut(float_p, num_floats) };
-                let callback_quit = callback(buffer);
-
-                match self
-                    .device
-                    .write_interleaved_float_frames(&data_vec, self.frame_period as u64)
-                {
-                    Ok(frames) => {
-                        //println!("Frames Written: {}", frames);
-                        if frames < self.frame_period as u64 {
-                            return false;
-                        }
-                    }
-                    Err(e) => {
-                        handle_alsa_error(e);
-                        return false;
-                    }
-                }
-
-                if callback_quit {
-                    break;
-                }
-            }
         }
 
-        if !self.stop() {
-            return false;
-        }
-        handle_alsa_state(self.device.get_state());
-
-        true
+        self.stop()
     }
 }
 

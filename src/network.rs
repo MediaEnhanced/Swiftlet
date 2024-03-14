@@ -77,22 +77,22 @@ impl StreamMsgType {
     #[inline] // Verbose but compiles down to minimal instructions
     fn from_u8(byte: u8) -> Self {
         match byte {
-            x if x == StreamMsgType::ServerStateRefresh as u8 => StreamMsgType::ServerStateRefresh,
-            x if x == StreamMsgType::NewClient as u8 => StreamMsgType::NewClient,
-            x if x == StreamMsgType::RemoveClient as u8 => StreamMsgType::RemoveClient,
-            x if x == StreamMsgType::ClientNewState as u8 => StreamMsgType::ClientNewState,
-            x if x == StreamMsgType::MusicIdReady as u8 => StreamMsgType::MusicIdReady,
-            x if x == StreamMsgType::NextMusicPacket as u8 => StreamMsgType::NextMusicPacket,
+            x if x == Self::ServerStateRefresh as u8 => Self::ServerStateRefresh,
+            x if x == Self::NewClient as u8 => Self::NewClient,
+            x if x == Self::RemoveClient as u8 => Self::RemoveClient,
+            x if x == Self::ClientNewState as u8 => Self::ClientNewState,
+            x if x == Self::MusicIdReady as u8 => Self::MusicIdReady,
+            x if x == Self::NextMusicPacket as u8 => Self::NextMusicPacket,
 
-            x if x == StreamMsgType::TransferRequest as u8 => StreamMsgType::TransferRequest,
-            x if x == StreamMsgType::TransferResponse as u8 => StreamMsgType::TransferResponse,
-            x if x == StreamMsgType::TransferData as u8 => StreamMsgType::TransferData,
+            x if x == Self::TransferRequest as u8 => Self::TransferRequest,
+            x if x == Self::TransferResponse as u8 => Self::TransferResponse,
+            x if x == Self::TransferData as u8 => Self::TransferData,
 
-            x if x == StreamMsgType::NewClientAnnounce as u8 => StreamMsgType::NewClientAnnounce,
-            x if x == StreamMsgType::NewStateRequest as u8 => StreamMsgType::NewStateRequest,
-            x if x == StreamMsgType::MusicRequest as u8 => StreamMsgType::MusicRequest,
+            x if x == Self::NewClientAnnounce as u8 => Self::NewClientAnnounce,
+            x if x == Self::NewStateRequest as u8 => Self::NewStateRequest,
+            x if x == Self::MusicRequest as u8 => Self::MusicRequest,
 
-            _ => StreamMsgType::InvalidType,
+            _ => Self::InvalidType,
         }
     }
 
@@ -111,22 +111,22 @@ impl StreamMsgType {
     #[inline]
     fn to_u8(&self) -> u8 {
         match self {
-            StreamMsgType::ServerStateRefresh => StreamMsgType::ServerStateRefresh as u8,
-            StreamMsgType::NewClient => StreamMsgType::NewClient as u8,
-            StreamMsgType::RemoveClient => StreamMsgType::RemoveClient as u8,
-            StreamMsgType::ClientNewState => StreamMsgType::ClientNewState as u8,
-            StreamMsgType::MusicIdReady => StreamMsgType::MusicIdReady as u8,
-            StreamMsgType::NextMusicPacket => StreamMsgType::NextMusicPacket as u8,
+            Self::ServerStateRefresh => Self::ServerStateRefresh as u8,
+            Self::NewClient => Self::NewClient as u8,
+            Self::RemoveClient => Self::RemoveClient as u8,
+            Self::ClientNewState => Self::ClientNewState as u8,
+            Self::MusicIdReady => Self::MusicIdReady as u8,
+            Self::NextMusicPacket => Self::NextMusicPacket as u8,
 
-            StreamMsgType::TransferRequest => StreamMsgType::TransferRequest as u8,
-            StreamMsgType::TransferResponse => StreamMsgType::TransferResponse as u8,
-            StreamMsgType::TransferData => StreamMsgType::TransferData as u8,
+            Self::TransferRequest => Self::TransferRequest as u8,
+            Self::TransferResponse => Self::TransferResponse as u8,
+            Self::TransferData => Self::TransferData as u8,
 
-            StreamMsgType::NewClientAnnounce => StreamMsgType::NewClientAnnounce as u8,
-            StreamMsgType::NewStateRequest => StreamMsgType::NewStateRequest as u8,
-            StreamMsgType::MusicRequest => StreamMsgType::MusicRequest as u8,
+            Self::NewClientAnnounce => Self::NewClientAnnounce as u8,
+            Self::NewStateRequest => Self::NewStateRequest as u8,
+            Self::MusicRequest => Self::MusicRequest as u8,
 
-            _ => StreamMsgType::InvalidType as u8,
+            _ => Self::InvalidType as u8,
         }
     }
 
@@ -134,15 +134,15 @@ impl StreamMsgType {
     fn intended_for_client(&self) -> bool {
         matches!(
             self,
-            StreamMsgType::ServerStateRefresh
-                | StreamMsgType::NewClient
-                | StreamMsgType::RemoveClient
-                | StreamMsgType::ClientNewState
-                | StreamMsgType::MusicIdReady
-                | StreamMsgType::NextMusicPacket
-                | StreamMsgType::TransferRequest
-                | StreamMsgType::TransferResponse
-                | StreamMsgType::TransferData
+            Self::ServerStateRefresh
+                | Self::NewClient
+                | Self::RemoveClient
+                | Self::ClientNewState
+                | Self::MusicIdReady
+                | Self::NextMusicPacket
+                | Self::TransferRequest
+                | Self::TransferResponse
+                | Self::TransferData
         )
     }
 
@@ -150,12 +150,12 @@ impl StreamMsgType {
     fn intended_for_server(&self) -> bool {
         matches!(
             self,
-            StreamMsgType::TransferRequest
-                | StreamMsgType::TransferResponse
-                | StreamMsgType::TransferData
-                | StreamMsgType::NewClientAnnounce
-                | StreamMsgType::NewStateRequest
-                | StreamMsgType::MusicRequest
+            Self::TransferRequest
+                | Self::TransferResponse
+                | Self::TransferData
+                | Self::NewClientAnnounce
+                | Self::NewStateRequest
+                | Self::MusicRequest
         )
     }
 

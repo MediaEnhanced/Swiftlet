@@ -22,87 +22,52 @@
 
 #![allow(dead_code)] // Temporary
 
-pub mod raw;
+pub type OutputCallback = dyn FnMut(&mut [f32]) -> bool;
 
 #[cfg_attr(target_os = "windows", path = "windows/os.rs")]
 #[cfg_attr(target_os = "linux", path = "linux/os.rs")]
 #[cfg_attr(target_os = "macos", path = "mac/os.rs")]
 mod os;
-use os::{AudioDevice, AudioInput, AudioOutput};
+use os::{AudioOutput, AudioOwner};
+
+pub mod raw;
 
 #[cfg(feature = "opus")]
 pub mod opus;
 
+#[derive(Debug)]
 pub enum Error {
-    DeviceCreation,
+    OwnerCreation,
+    OutputCreation,
+    InputCreation,
+    OutputPlayback,
+    InputCapture,
+    ChannelMismatch,
 }
 
-pub struct AudioIO {
-    device: AudioDevice,
-    output: Option<AudioOutput>,
-    input: Option<AudioInput>,
-}
+/// Takes control of thread and calls the callback function with a fillable sample buffer every
+/// desired_period with the expected_channel count
+///
+/// This function returns false if exited prematurely, otherwise true indicating that
+/// the output was safely stopped after the callback returned true.
+pub fn run_output(
+    desired_period: u32,
+    expected_channels: u32,
+    callback: &mut OutputCallback,
+) -> Result<bool, Error> {
+    let owner = match AudioOwner::new() {
+        Some(d) => d,
+        None => return Err(Error::OwnerCreation),
+    };
 
-impl AudioIO {
-    pub fn new() -> Result<Self, Error> {
-        let device = match AudioDevice::new() {
-            Some(d) => d,
-            None => return Err(Error::DeviceCreation),
-        };
-        Ok(AudioIO {
-            device,
-            output: None,
-            input: None,
-        })
+    let output = match AudioOutput::new(&owner, desired_period) {
+        Some(d) => d,
+        None => return Err(Error::OwnerCreation),
+    };
+
+    if output.get_channels() != expected_channels {
+        return Err(Error::ChannelMismatch);
     }
 
-    pub fn create_output(&mut self, desired_period: u32) -> Option<u32> {
-        if let Some(output) = AudioOutput::new(&self.device, desired_period) {
-            let channels = output.get_channels();
-            self.output = Some(output);
-            Some(channels)
-        } else {
-            None
-        }
-    }
-
-    /// Takes control of thread and calls the callback function with a fillable sample buffer every
-    /// previously setup desired_period.
-    ///
-    /// This function returns false if exited prematurely, otherwise true indicating that
-    /// the output was safely stopped after the callback returned true.
-    /// On false return a new output will be created in the future.
-    pub fn run_output_event_loop(&mut self, callback: &mut dyn FnMut(&mut [f32]) -> bool) -> bool {
-        if let Some(mut output) = self.output.take() {
-            if !output.start() {
-                return false;
-            }
-            loop {
-                match output.wait_for_next_output(15) {
-                    Ok(Some(buffer)) => {
-                        let callback_quit = callback(buffer);
-                        if !output.release_output() {
-                            return false;
-                        }
-                        if callback_quit {
-                            break;
-                        }
-                    }
-                    Ok(None) => {
-                        // Timeout here
-                    }
-                    Err(e) => {
-                        println!("Output Wait Error: {:?}", e);
-                    }
-                }
-            }
-            if !output.stop() {
-                return false;
-            }
-            self.output = Some(output);
-            true
-        } else {
-            true
-        }
-    }
+    Ok(output.run_callback_loop(callback))
 }

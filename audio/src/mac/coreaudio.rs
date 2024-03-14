@@ -21,8 +21,50 @@
 //SOFTWARE.
 
 use std::ffi::{c_char, CStr, CString};
-use std::os::raw::{c_int, c_uchar, c_uint};
+use std::mem::size_of;
+use std::os::raw::{c_int, c_uchar, c_uint, c_void};
 use std::ptr;
+
+enum PropertySelector {
+    Devices,
+    InputDefault,
+    OutputDefault,
+    NominalSampleRate,
+    BufferFrameSize,
+    BufferFrameSizeRange,
+}
+
+impl PropertySelector {
+    fn get_u32(&self) -> u32 {
+        let bytes = match self {
+            Self::Devices => b"dev#",
+            Self::InputDefault => b"dIn ",
+            Self::OutputDefault => b"dOut",
+            Self::NominalSampleRate => b"nsrt",
+            Self::BufferFrameSize => b"fsiz",
+            Self::BufferFrameSizeRange => b"fsz#",
+        };
+        u32::from_be_bytes(*bytes)
+    }
+}
+
+#[repr(u32)]
+enum PropertyScope {
+    Global,
+    Input,
+    Output,
+}
+
+impl PropertyScope {
+    fn get_u32(&self) -> u32 {
+        let bytes = match self {
+            Self::Global => b"glob",
+            Self::Input => b"inpt",
+            Self::Output => b"outp",
+        };
+        u32::from_be_bytes(*bytes)
+    }
+}
 
 #[repr(C)]
 struct PropertyAddress {
@@ -30,6 +72,20 @@ struct PropertyAddress {
     scope: u32,
     element: u32,
 }
+
+impl PropertyAddress {
+    fn new(selector: PropertySelector, scope: &PropertyScope) -> Self {
+        PropertyAddress {
+            selector: selector.get_u32(),
+            scope: scope.get_u32(),
+            element: 0,
+        }
+    }
+}
+
+// Reference
+// type OSStatus = c_int;
+// type
 
 #[link(name = "CoreAudio", kind = "framework")]
 extern "C" {
@@ -49,6 +105,149 @@ extern "C" {
         io_data_size: *mut c_uint,
         out_data: *mut c_char,
     ) -> c_int;
+
+    fn AudioObjectSetPropertyData(
+        object_id: c_uint,
+        property_address: *const PropertyAddress,
+        qualifier_data_size: c_uint,
+        qualifier_data: *const c_uchar,
+        data_size: c_uint,
+        data: *const c_char,
+    ) -> c_int;
+
+    // Can add functions to detect default device changing in future (and possibly nominal sample rate changing)
+}
+
+// A private structure that is only used as a Raw Pointer handle
+// This handle "points" to the private structure
+#[repr(C)]
+struct OpaqueStructure {
+    _unused: [u8; 0],
+}
+
+#[repr(C)]
+struct AudioComponentDescription {
+    component_type: u32,
+    sub_type: u32,
+    manufacturer: u32,
+    flags: u32,
+    flag_mask: u32,
+}
+
+#[repr(C)]
+struct RenderCallbackData {
+    closure_ptr: *mut c_void,
+    is_capture: bool,
+    sync_tx_ptr: *const c_void,
+}
+
+#[repr(u32)]
+enum AudioUnitActionFlags {
+    PreRender = 0x4,
+    PostRender = 0x8,
+    OutputIsSilence = 0x10,
+    Preflight = 0x20,
+    Render = 0x40,
+    Complete = 0x80,
+    PostRenderError = 0x100,
+    DoNotCheckRenderArgs = 0x200,
+}
+
+#[inline]
+fn check_action_flag(action_flags: u32, flag: AudioUnitActionFlags) -> bool {
+    ((flag as u32) & action_flags) > 0
+}
+
+// SMPTE Time
+#[repr(C)]
+struct SmpteTime {
+    subframes: i16,
+    subframe_divisor: i16,
+    counter: u32,
+    time_type: u32, // Future SmpteTimeType Enum
+    flags: u32,     // Future SmpteTimeFlags Enum
+    hours: i16,
+    minutes: i16,
+    seconds: i16,
+    frames: i16,
+}
+
+#[repr(C)]
+struct AudioTimeStamp {
+    sample_time: f64,
+    host_time: u64,
+    rate_scalar: f64,
+    word_clock_time: u64,
+    smpte_time: SmpteTime,
+    flags: u32,
+    reserved: u32,
+}
+
+#[repr(C)]
+struct AudioBuffer {
+    num_channels: u32,
+    data_byte_size: u32,
+    data: *mut u8,
+}
+
+#[repr(C)]
+struct AudioBufferList {
+    num_buffers: u32,
+    buffers: [AudioBuffer; 1], //[AudioBuffer]
+}
+
+#[link(name = "AudioToolbox", kind = "framework")]
+extern "C" {
+    fn AudioComponentFindNext(
+        search_after: *const OpaqueStructure,
+        description: *const AudioComponentDescription,
+    ) -> *const OpaqueStructure;
+
+    fn AudioComponentInstanceNew(
+        component: *const OpaqueStructure,
+        instance: *mut *const OpaqueStructure,
+    ) -> c_int;
+
+    fn AudioComponentInstanceDispose(instance: *const OpaqueStructure) -> c_int;
+
+    fn AudioUnitSetProperty(
+        audio_unit: *const OpaqueStructure,
+        property_id: c_uint,
+        scope: c_uint,
+        element: c_uint,
+        data: *const c_char,
+        data_size: c_uint,
+    ) -> c_int;
+
+    fn AudioUnitGetProperty(
+        audio_unit: *const OpaqueStructure,
+        property_id: c_uint,
+        scope: c_uint,
+        element: c_uint,
+        data: *mut c_char,
+        data_size: *mut c_uint,
+    ) -> c_int;
+
+    fn AudioUnitAddRenderNotify(
+        audio_unit: *const OpaqueStructure,
+        callback_function: extern "C" fn(
+            *mut RenderCallbackData,
+            *mut u32,
+            *const AudioTimeStamp,
+            u32,
+            u32,
+            *mut AudioBufferList,
+        ) -> c_int,
+        callback_data: *mut RenderCallbackData,
+    ) -> c_int;
+
+    fn AudioUnitInitialize(audio_unit: *const OpaqueStructure) -> c_int;
+
+    fn AudioOutputUnitStart(audio_unit: *const OpaqueStructure) -> c_int;
+    fn AudioOutputUnitStop(audio_unit: *const OpaqueStructure) -> c_int;
+
+    // fn AudioUnitGetPropertyInfo() -> c_int;
+    // fn AudioUnitRender() -> c_int;
 }
 
 /// CoreAudio Error
@@ -81,567 +280,749 @@ impl Error {
     }
 }
 
-//const AudioObjectSystemObject: c_uint = 1;
+const SYSTEM_OBJECT_ID: c_uint = 1;
 
-// A private structure that is only used as a Raw Pointer handle
-// This handle "points" to the private structure
 #[repr(C)]
-struct OpaqueStructure {
-    _unused: [u8; 0],
+struct ValueRange {
+    minimum: f64,
+    maximum: f64,
 }
 
-/// CoreAudio Object Handle
-pub(super) struct Object {
-    handle: *mut OpaqueStructure,
+fn list_audio_objects() -> Result<(), Error> {
+    let property_address = PropertyAddress::new(PropertySelector::Devices, &PropertyScope::Global);
+
+    let null_ptr = ptr::null();
+    let mut object_id_bytes = 0;
+
+    let errnum = unsafe {
+        AudioObjectGetPropertyDataSize(
+            SYSTEM_OBJECT_ID,
+            &property_address,
+            0,
+            null_ptr,
+            &mut object_id_bytes,
+        )
+    };
+    if errnum != 0 {
+        return Err(Error::from_i32(errnum));
+    }
+
+    //println!("Device Size: {}", device_size);
+    let mut object_ids: Vec<i8> = vec![0; object_id_bytes as usize];
+
+    let errnum = unsafe {
+        AudioObjectGetPropertyData(
+            SYSTEM_OBJECT_ID,
+            &property_address,
+            0,
+            null_ptr,
+            &mut object_id_bytes,
+            object_ids.as_mut_ptr(),
+        )
+    };
+    if errnum != 0 {
+        return Err(Error::from_i32(errnum));
+    }
+
+    for ind in 0..(object_id_bytes >> 2) as usize {
+        let id = u32::from_ne_bytes([
+            object_ids[ind * 4] as u8,
+            object_ids[ind * 4 + 1] as u8,
+            object_ids[ind * 4 + 2] as u8,
+            object_ids[ind * 4 + 3] as u8,
+        ]);
+        //println!("Object ID: {}", id);
+    }
+
+    Ok(())
+}
+
+#[repr(u32)]
+enum AudioUnitPropertyId {
+    SampleRate = 2,
+    StreamFormat = 8,
+    MaximumFramesPerSlice = 14,
+    LastRenderError = 22,
+    SetRenderCallback = 23,
+    CurrentDevice = 2000,
+    EnableIo = 2003,
+    SetInputCallback = 2005,
+}
+
+#[repr(u32)]
+enum AudioUnitScope {
+    Global = 0,
+    Input = 1,
+    Output = 2,
+}
+
+#[repr(u32)]
+enum AudioFormatId {
+    LinearPcm, // Should account for fixed-point representation in future
+    Opus,
+}
+
+impl AudioFormatId {
+    fn get_u32(&self) -> u32 {
+        let bytes = match self {
+            Self::LinearPcm => b"lpcm",
+            Self::Opus => b"opus",
+        };
+        u32::from_be_bytes(*bytes)
+    }
+}
+
+#[repr(u32)]
+enum AudioFormatFlags {
+    IsFloat = 0x1,
+    IsBigEndian = 0x2,
+    IsSignedInteger = 0x4,
+    IsPacked = 0x8,
+    IsAlignedHigh = 0x10,
+    IsNonInterleaved = 0x20,
+    IsNonMixable = 0x40,
+    AreAllClear = 0x80,
+}
+
+#[inline]
+fn check_format_flag(format_flags: u32, flag: AudioFormatFlags) -> bool {
+    ((flag as u32) & format_flags) > 0
+}
+
+#[repr(C)]
+struct AudioStreamBasicDescription {
+    sample_rate: f64,
+    format_id: u32,
+    format_flags: u32,
+    bytes_per_packet: u32,
+    frames_per_packet: u32,
+    bytes_per_frame: u32,
+    channels_per_frame: u32,
+    bits_per_channel: u32,
+    reserved: u32,
+}
+
+impl AudioStreamBasicDescription {
+    fn new_blank() -> Self {
+        AudioStreamBasicDescription {
+            sample_rate: 0.0,
+            format_id: 0,
+            format_flags: 0,
+            bytes_per_packet: 0,
+            frames_per_packet: 0,
+            bytes_per_frame: 0,
+            channels_per_frame: 0,
+            bits_per_channel: 0,
+            reserved: 0,
+        }
+    }
+
+    fn print(&self) {
+        println!("Sample Rate: {}", self.sample_rate);
+        println!("Channels Per Frame: {}", self.channels_per_frame);
+        println!("Bits Per Channel: {}", self.bits_per_channel);
+        println!("Bytes Per Frame: {}", self.bytes_per_frame);
+        println!("Frames Per Packet: {}", self.frames_per_packet);
+        println!("Bytes Per Packet: {}", self.bytes_per_packet);
+        println!("Format Flags: {}", self.format_flags);
+    }
+}
+
+#[repr(C)]
+struct AudioUnitRenderCallback {
+    function: extern "C" fn(
+        *mut RenderCallbackData,
+        *mut u32,
+        *const AudioTimeStamp,
+        u32,
+        u32,
+        *mut AudioBufferList,
+    ) -> c_int,
+    data: *mut RenderCallbackData,
+}
+
+/// CoreAudio Device Manager
+pub(super) struct Device {
+    //handle: OpaqueStructure,
+    id: u32,
     is_capture: bool,
+    audio_unit: *const OpaqueStructure,
 }
 
-impl Object {
-    pub(super) fn new_from_default_playback() -> Result<Self, Error> {
-        let property_address = PropertyAddress {
-            selector: u32::from_be_bytes([b'd', b'e', b'v', b'#']),
-            scope: u32::from_be_bytes([b'g', b'l', b'o', b'b']),
-            element: 0,
+impl Device {
+    fn get_audio_unit(id: u32, is_capture: bool) -> Result<*const OpaqueStructure, Error> {
+        let description = AudioComponentDescription {
+            component_type: u32::from_be_bytes(*b"auou"),
+            sub_type: u32::from_be_bytes(*b"ahal"),
+            manufacturer: u32::from_be_bytes(*b"appl"),
+            flags: 0,
+            flag_mask: 0,
         };
 
+        if let Some(component) =
+            unsafe { AudioComponentFindNext(ptr::null(), &description).as_ref() }
+        {
+            let mut audio_unit = ptr::null();
+            let errnum = unsafe { AudioComponentInstanceNew(component, &mut audio_unit) };
+            if errnum != 0 {
+                return Err(Error::from_i32(errnum));
+            }
+
+            let element_bus_output = 0;
+            let element_bus_input = 1;
+            let data_disable = 0;
+            let data_enable = 1;
+
+            if !is_capture {
+                let errnum = unsafe {
+                    AudioUnitSetProperty(
+                        audio_unit,
+                        AudioUnitPropertyId::EnableIo as u32,
+                        AudioUnitScope::Input as u32,
+                        element_bus_input,
+                        ptr::addr_of!(data_disable) as *const i8,
+                        size_of::<u32>() as u32,
+                    )
+                };
+                if errnum != 0 {
+                    return Err(Error::from_i32(errnum));
+                }
+                let errnum = unsafe {
+                    AudioUnitSetProperty(
+                        audio_unit,
+                        AudioUnitPropertyId::EnableIo as u32,
+                        AudioUnitScope::Output as u32,
+                        element_bus_output,
+                        ptr::addr_of!(data_enable) as *const i8,
+                        size_of::<u32>() as u32,
+                    )
+                };
+                if errnum != 0 {
+                    return Err(Error::from_i32(errnum));
+                }
+            } else {
+                let errnum = unsafe {
+                    AudioUnitSetProperty(
+                        audio_unit,
+                        AudioUnitPropertyId::EnableIo as u32,
+                        AudioUnitScope::Output as u32,
+                        element_bus_output,
+                        ptr::addr_of!(data_disable) as *const i8,
+                        size_of::<u32>() as u32,
+                    )
+                };
+                if errnum != 0 {
+                    return Err(Error::from_i32(errnum));
+                }
+                let errnum = unsafe {
+                    AudioUnitSetProperty(
+                        audio_unit,
+                        AudioUnitPropertyId::EnableIo as u32,
+                        AudioUnitScope::Input as u32,
+                        element_bus_input,
+                        ptr::addr_of!(data_enable) as *const i8,
+                        size_of::<u32>() as u32,
+                    )
+                };
+                if errnum != 0 {
+                    return Err(Error::from_i32(errnum));
+                }
+            }
+
+            let errnum = unsafe {
+                AudioUnitSetProperty(
+                    audio_unit,
+                    AudioUnitPropertyId::CurrentDevice as u32,
+                    AudioUnitScope::Global as u32,
+                    0,
+                    ptr::addr_of!(id) as *const i8,
+                    size_of::<u32>() as u32,
+                )
+            };
+            if errnum != 0 {
+                return Err(Error::from_i32(errnum));
+            }
+
+            Ok(audio_unit)
+        } else {
+            Err(Error::Test)
+        }
+    }
+
+    pub(super) fn new_from_default_playback(sample_rate: u32, period: u32) -> Result<Self, Error> {
+        //list_audio_objects()?;
+
+        let property_address =
+            PropertyAddress::new(PropertySelector::OutputDefault, &PropertyScope::Global);
+
         let null_ptr = ptr::null();
-        let mut device_size = 0;
+        let mut object_id_bytes = 4;
+        let mut object_id_data: [i8; 4] = [0; 4];
 
         let errnum = unsafe {
-            AudioObjectGetPropertyDataSize(1, &property_address, 0, null_ptr, &mut device_size)
+            AudioObjectGetPropertyData(
+                SYSTEM_OBJECT_ID,
+                &property_address,
+                0,
+                null_ptr,
+                &mut object_id_bytes,
+                object_id_data.as_mut_ptr(),
+            )
         };
         if errnum != 0 {
             return Err(Error::from_i32(errnum));
         }
 
-        println!("Device Size: {}", device_size);
+        let id = u32::from_ne_bytes([
+            object_id_data[0] as u8,
+            object_id_data[1] as u8,
+            object_id_data[2] as u8,
+            object_id_data[3] as u8,
+        ]);
+        //println!("Object ID: {}", id);
 
-        Err(Error::Test)
-        //println!("Hw Parameters Pointer: {:?}", handle);
-        // Ok(Object {
-        //     handle,
-        //     is_capture: false,
-        // })
+        let is_capture = false;
+        let audio_unit = Device::get_audio_unit(id, is_capture)?;
+
+        let device = Device {
+            id,
+            is_capture,
+            audio_unit,
+        };
+
+        device.set_sample_rate(sample_rate)?;
+        device.set_period(period)?;
+
+        Ok(device)
+    }
+
+    pub(super) fn new_from_default_capture(sample_rate: u32, period: u32) -> Result<Self, Error> {
+        //list_audio_objects()?;
+
+        let property_address =
+            PropertyAddress::new(PropertySelector::InputDefault, &PropertyScope::Global);
+
+        let null_ptr = ptr::null();
+        let mut object_id_bytes = 4;
+        let mut object_id_data: [i8; 4] = [0; 4];
+
+        let errnum = unsafe {
+            AudioObjectGetPropertyData(
+                SYSTEM_OBJECT_ID,
+                &property_address,
+                0,
+                null_ptr,
+                &mut object_id_bytes,
+                object_id_data.as_mut_ptr(),
+            )
+        };
+        if errnum != 0 {
+            return Err(Error::from_i32(errnum));
+        }
+
+        let id = u32::from_ne_bytes([
+            object_id_data[0] as u8,
+            object_id_data[1] as u8,
+            object_id_data[2] as u8,
+            object_id_data[3] as u8,
+        ]);
+        //println!("Object ID: {}", id);
+
+        let is_capture = true;
+        let audio_unit = Device::get_audio_unit(id, is_capture)?;
+
+        let device = Device {
+            id,
+            is_capture,
+            audio_unit,
+        };
+
+        device.set_sample_rate(sample_rate)?;
+        device.set_period(period)?;
+
+        Ok(device)
+    }
+
+    fn get_stream_description(&self) -> Result<AudioStreamBasicDescription, Error> {
+        let (scope, element) = match self.is_capture {
+            false => (AudioUnitScope::Output as u32, 0),
+            true => (AudioUnitScope::Input as u32, 1),
+        };
+
+        let mut data_size = size_of::<AudioStreamBasicDescription>() as u32;
+        let data = AudioStreamBasicDescription::new_blank();
+
+        let errnum = unsafe {
+            AudioUnitGetProperty(
+                self.audio_unit,
+                AudioUnitPropertyId::StreamFormat as u32,
+                scope,
+                element,
+                ptr::addr_of!(data) as *mut i8,
+                &mut data_size,
+            )
+        };
+        if errnum != 0 {
+            return Err(Error::from_i32(errnum));
+        }
+
+        Ok(data)
+    }
+
+    fn set_sample_rate(&self, sample_rate: u32) -> Result<(), Error> {
+        if self.get_stream_description()?.sample_rate != sample_rate as f64 {
+            let scope = match self.is_capture {
+                false => PropertyScope::Output,
+                true => PropertyScope::Input,
+            };
+
+            let property_address =
+                PropertyAddress::new(PropertySelector::NominalSampleRate, &scope);
+
+            let data_size = size_of::<ValueRange>();
+            let data = ValueRange {
+                minimum: sample_rate as f64,
+                maximum: sample_rate as f64,
+            };
+
+            let errnum = unsafe {
+                AudioObjectSetPropertyData(
+                    self.id,
+                    &property_address,
+                    0,
+                    ptr::null(),
+                    data_size as u32,
+                    ptr::addr_of!(data) as *const i8,
+                )
+            };
+            if errnum != 0 {
+                return Err(Error::from_i32(errnum));
+            }
+
+            std::thread::sleep(std::time::Duration::from_secs(4));
+        }
+
+        Ok(())
+    }
+
+    fn set_period(&self, period: u32) -> Result<(), Error> {
+        let adjusted_period = period; // *self.get_num_channels()?;
+
+        let scope = match self.is_capture {
+            false => PropertyScope::Output,
+            true => PropertyScope::Input,
+        };
+
+        let property_address = PropertyAddress::new(PropertySelector::BufferFrameSizeRange, &scope);
+
+        let mut data_size = size_of::<ValueRange>() as u32;
+        let data = ValueRange {
+            minimum: adjusted_period as f64,
+            maximum: adjusted_period as f64,
+        };
+
+        let errnum = unsafe {
+            AudioObjectGetPropertyData(
+                self.id,
+                &property_address,
+                0,
+                ptr::null(),
+                &mut data_size,
+                ptr::addr_of!(data) as *mut i8,
+            )
+        };
+        if errnum != 0 {
+            return Err(Error::from_i32(errnum));
+        }
+
+        let period_check = adjusted_period as f64;
+        if (period_check < data.minimum) || (period_check > data.maximum) {
+            return Err(Error::Test);
+        }
+
+        let property_address = PropertyAddress::new(PropertySelector::BufferFrameSize, &scope);
+        let errnum = unsafe {
+            AudioObjectSetPropertyData(
+                self.id,
+                &property_address,
+                0,
+                ptr::null(),
+                size_of::<u32>() as u32,
+                ptr::addr_of!(adjusted_period) as *const i8,
+            )
+        };
+        if errnum != 0 {
+            return Err(Error::from_i32(errnum));
+        }
+
+        // Should possibly double check that it was actually set here
+
+        let adjusted_period = adjusted_period * 2;
+        let errnum = unsafe {
+            AudioUnitSetProperty(
+                self.audio_unit,
+                AudioUnitPropertyId::MaximumFramesPerSlice as u32,
+                AudioUnitScope::Global as u32,
+                0,
+                ptr::addr_of!(adjusted_period) as *const i8,
+                size_of::<u32>() as u32,
+            )
+        };
+        if errnum != 0 {
+            return Err(Error::from_i32(errnum));
+        }
+
+        Ok(())
+    }
+
+    pub(super) fn get_num_channels(&self) -> Result<u32, Error> {
+        let stream_data = self.get_stream_description()?;
+        Ok(stream_data.channels_per_frame)
+    }
+
+    pub(super) fn print_stream_format(&self) -> Result<(), Error> {
+        let stream_data = self.get_stream_description()?;
+        stream_data.print();
+        Ok(())
+    }
+
+    pub(super) fn print_device_period(&self) -> Result<(), Error> {
+        let scope = match self.is_capture {
+            false => PropertyScope::Output,
+            true => PropertyScope::Input,
+        };
+
+        let property_address = PropertyAddress::new(PropertySelector::BufferFrameSize, &scope);
+
+        let mut data_size = size_of::<u32>() as u32;
+        let data = 0;
+
+        let errnum = unsafe {
+            AudioObjectGetPropertyData(
+                self.id,
+                &property_address,
+                0,
+                ptr::null(),
+                &mut data_size,
+                ptr::addr_of!(data) as *mut i8,
+            )
+        };
+        if errnum != 0 {
+            return Err(Error::from_i32(errnum));
+        }
+
+        println!("Device Period: {}", data);
+
+        Ok(())
+    }
+
+    pub(super) fn run_output_callback_loop(
+        &self,
+        mut callback: &mut crate::OutputCallback,
+    ) -> Result<(), Error> {
+        // Double check the canonical default
+        let stream_data = self.get_stream_description()?;
+        if stream_data.format_id != AudioFormatId::LinearPcm.get_u32() {
+            return Err(Error::Test);
+        }
+        if !check_format_flag(stream_data.format_flags, AudioFormatFlags::IsFloat) {
+            return Err(Error::Test);
+        }
+        if !check_format_flag(stream_data.format_flags, AudioFormatFlags::IsPacked) {
+            return Err(Error::Test);
+        }
+        if check_format_flag(stream_data.format_flags, AudioFormatFlags::IsNonInterleaved) {
+            return Err(Error::Test);
+        }
+
+        let errnum = unsafe {
+            AudioUnitSetProperty(
+                self.audio_unit,
+                AudioUnitPropertyId::StreamFormat as u32,
+                AudioUnitScope::Input as u32,
+                0,
+                ptr::addr_of!(stream_data) as *const i8,
+                size_of::<AudioStreamBasicDescription>() as u32,
+            )
+        };
+        if errnum != 0 {
+            return Err(Error::from_i32(errnum));
+        }
+
+        let (sync_tx, sync_rx) = std::sync::mpsc::sync_channel::<CallbackStop>(1);
+
+        let mut callback_data = RenderCallbackData {
+            closure_ptr: ptr::addr_of_mut!(callback) as *mut c_void,
+            is_capture: self.is_capture,
+            sync_tx_ptr: ptr::addr_of!(sync_tx) as *const c_void,
+        };
+
+        // let errnum = unsafe {
+        //     AudioUnitAddRenderNotify(self.audio_unit, render_callback, &mut callback_data)
+        // };
+        // if errnum != 0 {
+        //     return Err(Error::from_i32(errnum));
+        // }
+
+        let callback_info = AudioUnitRenderCallback {
+            function: render_callback,
+            data: &mut callback_data,
+        };
+
+        let errnum = unsafe {
+            AudioUnitSetProperty(
+                self.audio_unit,
+                AudioUnitPropertyId::SetRenderCallback as u32,
+                AudioUnitScope::Global as u32,
+                0,
+                ptr::addr_of!(callback_info) as *const i8,
+                size_of::<AudioUnitRenderCallback>() as u32,
+            )
+        };
+        if errnum != 0 {
+            return Err(Error::from_i32(errnum));
+        }
+
+        let errnum = unsafe { AudioUnitInitialize(self.audio_unit) };
+        if errnum != 0 {
+            return Err(Error::from_i32(errnum));
+        }
+
+        let errnum = unsafe { AudioOutputUnitStart(self.audio_unit) };
+        if errnum != 0 {
+            return Err(Error::from_i32(errnum));
+        }
+
+        let callback_stop = match sync_rx.recv() {
+            Ok(cs) => cs,
+            Err(_) => return Err(Error::Test),
+        };
+
+        let errnum = unsafe { AudioOutputUnitStop(self.audio_unit) };
+        if errnum != 0 {
+            return Err(Error::from_i32(errnum));
+        }
+
+        match callback_stop {
+            CallbackStop::Normal => Ok(()),
+            CallbackStop::UnexpectedBufferListNum(_num) => Err(Error::Test),
+            CallbackStop::LastRenderError => {
+                let mut data_size = size_of::<i32>() as u32;
+                let data = Error::Ok as i32;
+                let errnum = unsafe {
+                    AudioUnitGetProperty(
+                        self.audio_unit,
+                        AudioUnitPropertyId::LastRenderError as u32,
+                        AudioUnitScope::Global as u32,
+                        0,
+                        ptr::addr_of!(data) as *mut i8,
+                        &mut data_size,
+                    )
+                };
+                if errnum != 0 {
+                    return Err(Error::from_i32(errnum));
+                }
+
+                println!("Last Render Error: {}", data);
+                Err(Error::Test)
+            }
+        }
     }
 }
 
-// /// Alsa PCM Stream Direction
-// #[repr(C)]
-// pub(super) enum PcmStream {
-//     Playback = 0,
-//     Capture = 1,
-// }
+impl Drop for Device {
+    fn drop(&mut self) {
+        unsafe {
+            // Error Not Currently Handled:
+            AudioComponentInstanceDispose(self.audio_unit);
+        }
+    }
+}
 
-// /// Alsa PCM State
-// #[derive(Debug)]
-// #[repr(C)]
-// pub(super) enum PcmState {
-//     Open = 0,
-//     Setup = 1,
-//     Prepared,
-//     Running,
-//     XRun,
-//     Draining,
-//     Paused,
-//     Suspended,
-//     Disconnected,
-//     Unknown,
-// }
+enum CallbackStop {
+    Normal,
+    UnexpectedBufferListNum(u32),
+    LastRenderError,
+}
 
-// impl PcmState {
-//     fn from_u32(v: u32) -> Self {
-//         match v {
-//             x if x == PcmState::Open as u32 => PcmState::Open,
-//             x if x == PcmState::Setup as u32 => PcmState::Setup,
-//             x if x == PcmState::Prepared as u32 => PcmState::Prepared,
-//             x if x == PcmState::Running as u32 => PcmState::Running,
-//             x if x == PcmState::XRun as u32 => PcmState::XRun,
-//             x if x == PcmState::Draining as u32 => PcmState::Draining,
-//             x if x == PcmState::Paused as u32 => PcmState::Paused,
-//             x if x == PcmState::Suspended as u32 => PcmState::Suspended,
-//             x if x == PcmState::Disconnected as u32 => PcmState::Disconnected,
-//             _ => PcmState::Unknown,
-//         }
-//     }
-// }
+fn sync_send(sync_tx_ptr: *const c_void, callback_stop: CallbackStop) {
+    if let Some(sync) = unsafe { sync_tx_ptr.as_ref() } {
+        let sync_tx: &std::sync::mpsc::SyncSender<CallbackStop> =
+            unsafe { std::mem::transmute(sync) };
+        if sync_tx.send(callback_stop).is_err() {
+            panic!("Sender Error!");
+        }
+    }
+}
 
-// /// Alsa PCM Hardware Configuration Parameters
-// pub(super) struct PcmHwParams<'a> {
-//     handle: *mut OpaqueStructure,
-//     pcm_link: &'a Object,
-// }
+extern "C" fn render_callback(
+    callback_data: *mut RenderCallbackData,
+    action_flags_ptr: *mut u32,
+    time_stamp: *const AudioTimeStamp,
+    bus_number: u32,
+    frame_count: u32,
+    buffer_list: *mut AudioBufferList,
+) -> c_int {
+    //println!("Render Callback Frames: {}", frame_count);
 
-// pub(super) enum PcmHwParam {
-//     NearestRate(u32),
-//     FormatFloat,
-//     BufferInterleaved,
-//     NearestPeriod(u64),
-//     BufferSize(u32),
-//     Channels(u32),
-// }
+    if let Some(cb_data) = unsafe { callback_data.as_mut() } {
+        // if let Some(action_flags) = unsafe { action_flags_ptr.as_mut() } {
+        //     //println!("Action Flags: {}", action_flags);
+        //     if check_action_flag(*action_flags, AudioUnitActionFlags::OutputIsSilence) {
+        //         return Error::Ok as c_int;
+        //         //*action_flags = 0;
+        //     } else if check_action_flag(*action_flags, AudioUnitActionFlags::PostRenderError) {
+        //         sync_send(cb_data.sync_tx_ptr, CallbackStop::LastRenderError);
+        //         return Error::Ok as c_int;
+        //     }
+        // } //else {
+        //   //  panic!("Callback not working as expected")
+        //   //}
 
-// #[repr(C)]
-// enum PcmHwParamDirection {
-//     Less = -1,
-//     Nearest = 0,
-//     Greater = 1,
-// }
+        if !cb_data.is_capture {
+            if let Some(cb_fn) = unsafe { cb_data.closure_ptr.as_mut() } {
+                let closure: &mut &mut crate::OutputCallback =
+                    unsafe { std::mem::transmute(cb_fn) };
 
-// #[repr(C)]
-// enum PcmHwParamFormat {
-//     Unknown = -1,
-//     S8 = 0,
-//     U8 = 1,
-//     S16LE,
-//     S16BE,
-//     U16LE,
-//     U16BE,
-//     S24LE,
-//     S24BE,
-//     U24LE,
-//     U24BE,
-//     S32LE,
-//     S32BE,
-//     U32LE,
-//     U32BE,
-//     FloatLE,
-//     FloatBE,
-//     Float64LE,
-//     Float64BE,
-// }
+                if let Some(buffer_list) = unsafe { buffer_list.as_mut() } {
+                    // println!("Buffers Address: {:?}", buffer_list.buffers);
+                    // let buffers = unsafe {
+                    //     std::slice::from_raw_parts_mut(
+                    //         buffer_list.buffers,
+                    //         buffer_list.num_buffers as usize,
+                    //     )
+                    // };
 
-// #[repr(C)]
-// enum PcmHwParamAccess {
-//     MMapInterleaved = 0,
-//     MMapNonInterleaved = 1,
-//     MMapComplex,
-//     RWInterleaved,
-//     RWNonInterleaved,
-// }
+                    if buffer_list.num_buffers == 1 {
+                        //println!("Buffer Channels: {}", buffer_list.buffers[0].num_channels);
+                        //println!("Buffer Bytes: {}", buffer_list.buffers[0].data_byte_size);
 
-// /// Alsa PCM Software Configuration Parameters
-// pub(super) struct PcmSwParams<'a> {
-//     handle: *mut OpaqueStructure,
-//     pcm_link: &'a Object,
-// }
+                        let float_data = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                buffer_list.buffers[0].data as *mut f32,
+                                // (buffer_list.buffers[0].data_byte_size
+                                //     / (4 * buffer_list.buffers[0].num_channels))
+                                (buffer_list.buffers[0].data_byte_size >> 2) as usize,
+                            )
+                        };
 
-// pub(super) enum PcmSwParam {
-//     NearestRate(u32),
-//     FormatFloat,
-//     BufferInterleaved,
-// }
+                        if closure(float_data) {
+                            sync_send(cb_data.sync_tx_ptr, CallbackStop::Normal);
+                        }
+                    } else {
+                        sync_send(
+                            cb_data.sync_tx_ptr,
+                            CallbackStop::UnexpectedBufferListNum(buffer_list.num_buffers),
+                        );
+                    }
+                }
+            }
+        } else {
+            //println!("Got to Else!");
+        }
 
-// #[link(name = "asound")]
-// extern "C" {
-//     /// Convert a typically returned errorcode into a debug string
-//     fn snd_strerror(errnum: c_int) -> *const c_char;
-
-//     /// Open an Alsa PCM device for the given stream direction.
-//     ///
-//     /// Using "default" for the name field yields the default device.
-//     ///
-//     /// Returns 0 on success otherwise a negative error code
-//     fn snd_pcm_open(
-//         handle_ptr: *mut *mut OpaqueStructure,
-//         name: *const c_char,
-//         stream: PcmStream,
-//         mode: c_int,
-//     ) -> c_int;
-//     fn snd_pcm_close(pcm_handle: *mut OpaqueStructure) -> c_int;
-
-//     /// Get Alsa PCM state
-//     fn snd_pcm_state(pcm_handle: *mut OpaqueStructure) -> u32;
-
-//     /// Set Alsa PCM Hardware Parameters
-//     fn snd_pcm_hw_params(
-//         pcm_handle: *mut OpaqueStructure,
-//         hw_params_handle: *mut OpaqueStructure,
-//     ) -> c_int;
-
-//     // Start and stop the PCM device
-//     fn snd_pcm_start(pcm_handle: *mut OpaqueStructure) -> c_int;
-//     fn snd_pcm_drop(pcm_handle: *mut OpaqueStructure) -> c_int;
-
-//     /// Alsa PCM wait til ready
-//     fn snd_pcm_wait(pcm_handle: *mut OpaqueStructure, timeout: c_int) -> c_int;
-
-//     /// Alsa PCM get available frames
-//     fn snd_pcm_avail(pcm_handle: *mut OpaqueStructure) -> c_long;
-
-//     /// Alsa PCM write interleaved data
-//     fn snd_pcm_writei(
-//         pcm_handle: *mut OpaqueStructure,
-//         frame_buffer: *const c_void,
-//         num_frames: c_ulong,
-//     ) -> c_long;
-
-//     // Hw Parameter Functions
-//     fn snd_pcm_hw_params_malloc(handle_ptr: *mut *mut OpaqueStructure) -> c_int;
-//     fn snd_pcm_hw_params_free(pcm_handle: *mut OpaqueStructure) -> c_int;
-
-//     fn snd_pcm_hw_params_any(
-//         pcm_handle: *mut OpaqueStructure,
-//         hw_params_handle: *mut OpaqueStructure,
-//     ) -> c_int;
-
-//     fn snd_pcm_hw_params_current(
-//         pcm_handle: *mut OpaqueStructure,
-//         hw_params_handle: *mut OpaqueStructure,
-//     ) -> c_int;
-
-//     fn snd_pcm_hw_params_set_rate(
-//         pcm_handle: *mut OpaqueStructure,
-//         hw_params_handle: *mut OpaqueStructure,
-//         rate: c_uint,
-//         direction: PcmHwParamDirection,
-//     ) -> c_int;
-
-//     fn snd_pcm_hw_params_set_format(
-//         pcm_handle: *mut OpaqueStructure,
-//         hw_params_handle: *mut OpaqueStructure,
-//         format: PcmHwParamFormat,
-//     ) -> c_int;
-
-//     fn snd_pcm_hw_params_set_access(
-//         pcm_handle: *mut OpaqueStructure,
-//         hw_params_handle: *mut OpaqueStructure,
-//         access: PcmHwParamAccess,
-//     ) -> c_int;
-
-//     fn snd_pcm_hw_params_set_period_size_near(
-//         pcm_handle: *mut OpaqueStructure,
-//         hw_params_handle: *mut OpaqueStructure,
-//         period: *mut c_ulong,
-//         direction: *mut PcmHwParamDirection,
-//     ) -> c_int;
-
-//     fn snd_pcm_hw_params_set_channels(
-//         pcm_handle: *mut OpaqueStructure,
-//         hw_params_handle: *mut OpaqueStructure,
-//         channel_count: c_uint,
-//     ) -> c_int;
-
-//     // Sw Parameter Functions
-//     fn snd_pcm_sw_params_malloc(handle_ptr: *mut *mut OpaqueStructure) -> c_int;
-//     fn snd_pcm_sw_params_free(pcm_handle: *mut OpaqueStructure) -> c_int;
-
-//     fn snd_pcm_sw_params_current(
-//         pcm_handle: *mut OpaqueStructure,
-//         sw_params_handle: *mut OpaqueStructure,
-//     ) -> c_int;
-
-// }
-
-// impl Error {
-//     pub(super) fn from_errnum(errnum: i32) -> Self {
-//         unsafe {
-//             let error_str = CStr::from_ptr(snd_strerror(errnum));
-//             match error_str.to_str() {
-//                 Ok(s) => Error::Generic((errnum, s.to_string())),
-//                 Err(_) => Error::StringCreation(errnum),
-//             }
-//         }
-//     }
-// }
-
-// impl Object {
-//     pub(super) fn new_from_default_playback() -> Result<Self, Error> {
-//         let mut handle = ptr::null_mut();
-//         let cname = CString::new("default").unwrap();
-//         let errnum = unsafe { snd_pcm_open(&mut handle, cname.as_ptr(), PcmStream::Playback, 0) };
-//         if errnum != 0 {
-//             return Err(Error::from_errnum(errnum));
-//         }
-//         //println!("Hw Parameters Pointer: {:?}", handle);
-//         Ok(Object {
-//             handle,
-//             is_capture: false,
-//         })
-//     }
-
-//     pub(super) fn new_from_default_capture() -> Result<Self, Error> {
-//         let mut handle = ptr::null_mut();
-//         let cname = CString::new("default").unwrap();
-//         let errnum = unsafe { snd_pcm_open(&mut handle, cname.as_ptr(), PcmStream::Playback, 0) };
-//         if errnum != 0 {
-//             return Err(Error::from_errnum(errnum));
-//         }
-//         Ok(Object {
-//             handle,
-//             is_capture: true,
-//         })
-//     }
-
-//     pub(super) fn new_from_default(stream: PcmStream) -> Result<Self, Error> {
-//         let mut handle = ptr::null_mut();
-//         let cname = CString::new("default").unwrap();
-//         let errnum = unsafe { snd_pcm_open(&mut handle, cname.as_ptr(), PcmStream::Playback, 0) };
-//         if errnum != 0 {
-//             return Err(Error::from_errnum(errnum));
-//         }
-//         let is_capture = match stream {
-//             PcmStream::Playback => false,
-//             PcmStream::Capture => true,
-//         };
-//         Ok(Object { handle, is_capture })
-//     }
-
-//     pub(super) fn get_state(&self) -> PcmState {
-//         let state_value = unsafe { snd_pcm_state(self.handle) };
-//         PcmState::from_u32(state_value)
-//     }
-
-//     pub(super) fn set_hw_params(&self, hw_params: &PcmHwParams) -> Result<(), Error> {
-//         // In Future check if this is even allowed based on the pcm state
-//         let errnum = unsafe { snd_pcm_hw_params(self.handle, hw_params.handle) };
-//         if errnum != 0 {
-//             return Err(Error::from_errnum(errnum));
-//         }
-//         Ok(())
-//     }
-
-//     pub(super) fn start(&self) -> Result<(), Error> {
-//         // In Future check if this is even allowed based on the pcm state
-//         let errnum = unsafe { snd_pcm_start(self.handle) };
-//         if errnum != 0 {
-//             return Err(Error::from_errnum(errnum));
-//         }
-//         Ok(())
-//     }
-
-//     pub(super) fn stop(&self) -> Result<(), Error> {
-//         // In Future check if this is even allowed based on the pcm state
-//         let errnum = unsafe { snd_pcm_drop(self.handle) };
-//         if errnum != 0 {
-//             return Err(Error::from_errnum(errnum));
-//         }
-//         Ok(())
-//     }
-
-//     pub(super) fn wait_until_ready(&self, timeout: i32) -> Result<bool, Error> {
-//         // In Future check if this is even allowed based on the pcm state
-//         let status = unsafe { snd_pcm_wait(self.handle, timeout as c_int) };
-//         if status < 0 {
-//             Err(Error::from_errnum(status))
-//         } else if status == 0 {
-//             Ok(false)
-//         } else {
-//             Ok(true)
-//         }
-//     }
-
-//     pub(super) fn get_available_frames(&self) -> i64 {
-//         unsafe { snd_pcm_avail(self.handle) }
-//     }
-
-//     pub(super) fn write_interleaved_float_frames(
-//         &self,
-//         data: &[f32],
-//         num_frames: u64,
-//     ) -> Result<u64, Error> {
-//         // In Future check if this is even allowed based on the pcm config
-//         let res =
-//             unsafe { snd_pcm_writei(self.handle, data.as_ptr() as *const c_void, num_frames) };
-//         if res < 0 {
-//             return Err(Error::from_errnum(res as i32));
-//         }
-//         Ok(res as u64)
-//     }
-// }
-
-// impl Drop for Object {
-//     fn drop(&mut self) {
-//         unsafe {
-//             // Error Not Currently Handled:
-//             snd_pcm_close(self.handle);
-//         }
-//     }
-// }
-
-// impl<'a> PcmHwParams<'a> {
-//     pub(super) fn any_from_pcm(pcm: &'a Object) -> Result<Self, Error> {
-//         let mut handle = ptr::null_mut();
-//         let errnum = unsafe { snd_pcm_hw_params_malloc(&mut handle) };
-//         if errnum != 0 {
-//             return Err(Error::from_errnum(errnum));
-//         }
-//         //println!("Hw Parameters Pointer: {:?}", handle);
-//         let errnum = unsafe { snd_pcm_hw_params_any(pcm.handle, handle) };
-//         // Can safely...? give an errnum/status of 1
-//         if (errnum != 0) && (errnum != 1) {
-//             return Err(Error::from_errnum(errnum));
-//         }
-//         Ok(PcmHwParams {
-//             handle,
-//             pcm_link: pcm,
-//         })
-//     }
-
-//     pub(super) fn current_from_pcm(pcm: &'a Object) -> Result<Self, Error> {
-//         let mut handle = ptr::null_mut();
-//         let errnum = unsafe { snd_pcm_hw_params_malloc(&mut handle) };
-//         if errnum != 0 {
-//             return Err(Error::from_errnum(errnum));
-//         }
-
-//         let errnum = unsafe { snd_pcm_hw_params_current(pcm.handle, handle) };
-//         if errnum != 0 {
-//             return Err(Error::from_errnum(errnum));
-//         }
-//         Ok(PcmHwParams {
-//             handle,
-//             pcm_link: pcm,
-//         })
-//     }
-
-//     pub(super) fn set_param(&self, param: PcmHwParam) -> Result<(), Error> {
-//         //println!("Hw Parameters Pointer: {:?}", self.handle);
-//         match param {
-//             PcmHwParam::NearestRate(rate) => {
-//                 let errnum = unsafe {
-//                     snd_pcm_hw_params_set_rate(
-//                         self.pcm_link.handle,
-//                         self.handle,
-//                         rate,
-//                         PcmHwParamDirection::Nearest,
-//                     )
-//                 };
-//                 //println!("errnum: {}", errnum);
-//                 if errnum != 0 {
-//                     return Err(Error::from_errnum(errnum));
-//                 }
-//             }
-//             PcmHwParam::FormatFloat => {
-//                 #[cfg(target_endian = "little")]
-//                 let format = PcmHwParamFormat::FloatLE;
-//                 #[cfg(target_endian = "big")]
-//                 let format = PcmHwParamFormat::FloatBE;
-
-//                 let errnum = unsafe {
-//                     snd_pcm_hw_params_set_format(self.pcm_link.handle, self.handle, format)
-//                 };
-//                 if errnum != 0 {
-//                     return Err(Error::from_errnum(errnum));
-//                 }
-//             }
-//             PcmHwParam::BufferInterleaved => {
-//                 let errnum = unsafe {
-//                     snd_pcm_hw_params_set_access(
-//                         self.pcm_link.handle,
-//                         self.handle,
-//                         PcmHwParamAccess::RWInterleaved,
-//                     )
-//                 };
-//                 if errnum != 0 {
-//                     return Err(Error::from_errnum(errnum));
-//                 }
-//             }
-//             PcmHwParam::NearestPeriod(mut period) => {
-//                 let errnum = unsafe {
-//                     snd_pcm_hw_params_set_period_size_near(
-//                         self.pcm_link.handle,
-//                         self.handle,
-//                         &mut period,
-//                         &mut PcmHwParamDirection::Nearest,
-//                     )
-//                 };
-//                 if errnum != 0 {
-//                     return Err(Error::from_errnum(errnum));
-//                 }
-//             }
-//             PcmHwParam::BufferSize(buffer_size) => {
-//                 // Nothing right now
-//             }
-//             PcmHwParam::Channels(channel_count) => {
-//                 let errnum = unsafe {
-//                     snd_pcm_hw_params_set_channels(self.pcm_link.handle, self.handle, channel_count)
-//                 };
-//                 if errnum != 0 {
-//                     return Err(Error::from_errnum(errnum));
-//                 }
-//             }
-//         }
-//         Ok(())
-//     }
-// }
-
-// impl<'a> Drop for PcmHwParams<'a> {
-//     fn drop(&mut self) {
-//         unsafe {
-//             // Error Not Currently Handled:
-//             snd_pcm_hw_params_free(self.handle);
-//         }
-//     }
-// }
-
-// impl<'a> PcmSwParams<'a> {
-//     pub(super) fn current_from_pcm(pcm: &'a Object) -> Result<Self, Error> {
-//         let mut handle = ptr::null_mut();
-//         let errnum = unsafe { snd_pcm_sw_params_malloc(&mut handle) };
-//         if errnum != 0 {
-//             return Err(Error::from_errnum(errnum));
-//         }
-
-//         let errnum = unsafe { snd_pcm_sw_params_current(pcm.handle, handle) };
-//         if errnum != 0 {
-//             return Err(Error::from_errnum(errnum));
-//         }
-//         Ok(PcmSwParams {
-//             handle,
-//             pcm_link: pcm,
-//         })
-//     }
-
-//     pub(super) fn set_param(&self, param: PcmSwParam) -> Result<(), Error> {
-//         match param {
-//             PcmSwParam::NearestRate(rate) => {
-//                 let errnum = unsafe {
-//                     snd_pcm_hw_params_set_rate(
-//                         self.pcm_link.handle,
-//                         self.handle,
-//                         rate,
-//                         PcmHwParamDirection::Nearest,
-//                     )
-//                 };
-//                 if errnum != 0 {
-//                     return Err(Error::from_errnum(errnum));
-//                 }
-//             }
-//             PcmSwParam::FormatFloat => {
-//                 #[cfg(target_endian = "little")]
-//                 let format = PcmHwParamFormat::FloatLE;
-//                 #[cfg(target_endian = "big")]
-//                 let format = PcmHwParamFormat::FloatBE;
-
-//                 let errnum = unsafe {
-//                     snd_pcm_hw_params_set_format(self.pcm_link.handle, self.handle, format)
-//                 };
-//                 if errnum != 0 {
-//                     return Err(Error::from_errnum(errnum));
-//                 }
-//             }
-//             PcmSwParam::BufferInterleaved => {
-//                 let errnum = unsafe {
-//                     snd_pcm_hw_params_set_access(
-//                         self.pcm_link.handle,
-//                         self.handle,
-//                         PcmHwParamAccess::RWInterleaved,
-//                     )
-//                 };
-//                 if errnum != 0 {
-//                     return Err(Error::from_errnum(errnum));
-//                 }
-//             }
-//         }
-//         Ok(())
-//     }
-// }
-
-// impl<'a> Drop for PcmSwParams<'a> {
-//     fn drop(&mut self) {
-//         unsafe {
-//             // Error Not Currently Handled:
-//             snd_pcm_sw_params_free(self.handle);
-//         }
-//     }
-// }
+        Error::Ok as c_int
+    } else {
+        panic!("Callback data was not set properly!");
+    }
+}

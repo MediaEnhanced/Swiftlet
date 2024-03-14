@@ -2,6 +2,8 @@
 setlocal EnableDelayedExpansion
 
 set params=%*
+echo Initial parameters: !params!
+
 set firstChar=!params:~0,1!
 if !firstChar!==@ (
     rem echo Found File: !params!
@@ -41,13 +43,16 @@ set params=!params:-l:libpthread.a=!
 set builtinNum=!params:*libcompiler_builtins-=!
 set builtinNum=%builtinNum:.rlib=&rem.%
 set "builtin=libcompiler_builtins-%builtinNum%.rlib"
-set params=!params:%builtin%=!
+
+set winTest=!params:-lkernel32=!
+if not !winTest!==!params! (
+    set params=!params:%builtin%=!
+)
 
 set "params=!params! -lunwind"
-
 rem set params=!params:-lmingw32=!
 rem set params=!params:-lmingwex=!
 
-rem echo Adjusted parameters: !params!
+echo Adjusted parameters: !params!
 
 zig.exe cc !params!

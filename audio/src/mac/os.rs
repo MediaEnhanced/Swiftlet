@@ -25,7 +25,7 @@
 #![allow(unused_variables)]
 
 mod coreaudio;
-use coreaudio::Object;
+use coreaudio::Device;
 
 fn handle_coreaudio_error(e: coreaudio::Error) {
     println!("Coreaudio Error: {:?}", e);
@@ -36,30 +36,30 @@ pub(super) enum Error {
     Generic,
 }
 
-pub(super) struct AudioDevice {
+pub(super) struct AudioOwner {
     info: u64,
 }
 
-impl AudioDevice {
+impl AudioOwner {
     pub(super) fn new() -> Option<Self> {
-        Some(AudioDevice { info: 0 })
+        Some(AudioOwner { info: 0 })
     }
 }
 
-pub(super) struct AudioOutput {
-    device: Object,
+pub(super) struct AudioOutput<'a> {
+    owner: &'a AudioOwner,
+    device: Device,
     frame_period: u32,
     //buffer_size: i64,
     channels: u32,
     //channel_mask: u32,
-    data_vec: Vec<f32>,
     //volume_control: Audio::ISimpleAudioVolume,
 }
 
-impl AudioOutput {
-    pub(super) fn new(audio_device: &AudioDevice, desired_period: u32) -> Option<Self> {
+impl<'a> AudioOutput<'a> {
+    pub(super) fn new(audio_owner: &'a AudioOwner, desired_period: u32) -> Option<Self> {
         //Open default playback device
-        let _device = match Object::new_from_default_playback() {
+        let device = match Device::new_from_default_playback(48000, desired_period) {
             Ok(o) => o,
             Err(e) => {
                 handle_coreaudio_error(e);
@@ -67,78 +67,47 @@ impl AudioOutput {
             }
         };
 
-        // handle_alsa_state(pcm_device.get_state());
+        let channels = match device.get_num_channels() {
+            Ok(c) => c,
+            Err(e) => {
+                handle_coreaudio_error(e);
+                return None;
+            }
+        };
 
-        // let hw_params = match alsa::PcmHwParams::any_from_pcm(&pcm_device) {
-        //     Ok(p) => p,
-        //     Err(e) => {
-        //         handle_alsa_error(e);
-        //         return None;
-        //     }
-        // };
-
-        // if hw_params
-        //     .set_param(alsa::PcmHwParam::NearestRate(48000))
-        //     .is_err()
-        // {
-        //     return None;
-        // }
-        // if hw_params.set_param(alsa::PcmHwParam::FormatFloat).is_err() {
-        //     return None;
-        // }
-        // if hw_params
-        //     .set_param(alsa::PcmHwParam::BufferInterleaved)
-        //     .is_err()
-        // {
+        // if let Err(e) = device.print_stream_format() {
+        //     handle_coreaudio_error(e);
         //     return None;
         // }
 
-        // if hw_params
-        //     .set_param(alsa::PcmHwParam::NearestPeriod(desired_period as u64))
-        //     .is_err()
-        // {
+        // if let Err(e) = device.print_device_period() {
+        //     handle_coreaudio_error(e);
         //     return None;
         // }
 
-        // if hw_params.set_param(alsa::PcmHwParam::Channels(2)).is_err() {
+        // let mut callback_count = 0;
+        // let mut f = move |samples: &mut [f32]| output_callback(samples, &mut callback_count);
+        // if let Err(e) = device.run_output_callback_loop(&mut f) {
+        //     handle_coreaudio_error(e);
         //     return None;
         // }
-        // if pcm_device.set_hw_params(&hw_params).is_err() {
-        //     return None;
-        // }
-        // drop(hw_params); // Manual Drop Necessary...?
 
-        // handle_alsa_state(pcm_device.get_state());
+        // println!("Got Here!");
 
-        // // let hw_params = match als::PcmHwParams::current_from_pcm(&pcm_device) {
-        // //     Ok(p) => p,
-        // //     Err(e) => {
-        // //         handle_alsa_error(e);
-        // //         return None;
-        // //     }
-        // // };
-
-        // // let sw_params = match als::PcmSwParams::current_from_pcm(&pcm_device) {
-        // //     Ok(p) => p,
-        // //     Err(e) => {
-        // //         handle_alsa_error(e);
-        // //         return None;
-        // //     }
-        // // };
-
-        // let num_floats = (desired_period as usize) * 2;
-
-        // Some(AudioOutput {
-        //     device: pcm_device,
-        //     frame_period: desired_period,
-        //     channels: 2,
-        //     data_vec: vec![0.0; num_floats],
-        // })
-        None
+        Some(AudioOutput {
+            owner: audio_owner,
+            device,
+            frame_period: desired_period,
+            channels,
+        })
     }
 
     pub(super) fn get_channels(&self) -> u32 {
         self.channels
+    }
+
+    pub(super) fn run_callback_loop(&self, callback: &mut crate::OutputCallback) -> bool {
+        self.device.run_output_callback_loop(callback).is_ok()
     }
 
     // Returns true if started
@@ -206,6 +175,26 @@ impl AudioOutput {
 
         false
     }
+}
+
+fn output_callback(samples: &mut [f32], callback_count: &mut u64) -> bool {
+    *callback_count += 1;
+
+    let samples_len = samples.len();
+    println!("{}, Samples: {}", *callback_count, samples_len);
+
+    // if samples_len != 960 {
+    //     println!("{}, Samples: {}", *callback_count, samples_len);
+    //     if samples_len == 0 {
+    //         return true;
+    //     }
+    // }
+
+    if *callback_count >= 20 {
+        return true;
+    }
+
+    false
 }
 
 pub(super) struct AudioInput {

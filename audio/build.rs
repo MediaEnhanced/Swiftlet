@@ -179,7 +179,6 @@ fn build_opus(cross_info_opt: &Option<CrossCompileInfo>) {
     }
 
     let mut builder = create_builder(cross_info_opt);
-    builder.cargo_metadata(false);
     builder.flag("-O3");
     builder.static_flag(true);
     builder.include(opus_include_path);
@@ -198,9 +197,11 @@ fn build_opus(cross_info_opt: &Option<CrossCompileInfo>) {
 
     if cross_info_opt.is_none() {
         builder.compile("opus");
-        println!("cargo:rustc-link-search=native={}", out_dir.as_str());
+        //println!("cargo:rustc-link-search=native={}", out_dir.as_str());
         return;
     }
+
+    builder.cargo_metadata(false);
 
     let compiled_files = builder.compile_intermediates();
 

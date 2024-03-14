@@ -44,37 +44,25 @@ fn main() {
     };
 
     if let Some(stereo_data) = opus_data.get_stereo() {
-        let mut audio_io = match swiftlet_audio::AudioIO::new() {
-            Ok(a) => a,
-            Err(_) => {
-                println!("Could not create Audio IO!");
-                return;
-            }
+        let mut stereo_position = 0;
+        let mut callback_count = 0;
+        let mut f = move |samples: &mut [f32]| {
+            output_callback(
+                samples,
+                &mut stereo_position,
+                &stereo_data,
+                &mut callback_count,
+            )
         };
 
-        match audio_io.create_output(480) {
-            Some(_channels) => {
-                let mut stereo_position = 0;
-                let mut callback_count = 0;
-                let mut f = move |samples: &mut [f32]| {
-                    output_callback(
-                        samples,
-                        &mut stereo_position,
-                        &stereo_data,
-                        &mut callback_count,
-                    )
-                };
-
-                audio_io.run_output_event_loop(&mut f);
-            }
-            None => {
-                println!("Could not create Audio IO Output!");
-                return;
-            }
+        match swiftlet_audio::run_output(480, 2, &mut f) {
+            Ok(true) => println!("Played the whole song!"),
+            Ok(false) => println!("Playback loop ended sooner than expected!"),
+            Err(e) => println!("Playback Error: {:?}", e),
         }
     }
 
-    println!("Playback Ended Successfully!");
+    println!("Playback Example Ended!");
 }
 
 fn output_callback(
