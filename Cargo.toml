@@ -26,6 +26,9 @@ autoexamples = false
 autotests = false
 autobenches = false
 
+[features]
+default = ["client"]
+client = ["dep:swiftlet_audio"]
 
 [dependencies]
 # Argument parsing
@@ -40,7 +43,7 @@ swiftlet_quic = { version = "*", path = "quic" }
 #bincode = { version = "2.0.0-rc.3" }
 
 # Audio Requirements:
-swiftlet_audio = { version = "*", path = "audio", features = ["opus"] }
+swiftlet_audio = { version = "*", path = "audio", features = ["opus"], optional = true }
 #swiftlet_binaural = { version = "*", path = "binaural" }
 
 # Console Requirements:

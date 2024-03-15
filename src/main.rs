@@ -38,22 +38,25 @@ const AUDIO_FILES: [&str; 3] = [
 const TRANSFER_AUDIO: &str = "audio/transfer.opus";
 
 mod communication;
+#[cfg(feature = "client")]
+use communication::{ClientCommand, ConsoleAudioCommands, ConsoleAudioOutputChannels};
 use communication::{
-    ClientCommand, ConsoleAudioCommands, ConsoleAudioOutputChannels, ConsoleThreadChannels,
-    NetworkCommand, NetworkStateConnection, NetworkStateMessage, TryRecvError,
+    ConsoleThreadChannels, NetworkCommand, NetworkStateConnection, NetworkStateMessage,
+    TryRecvError,
 };
 
 mod network;
 use swiftlet_quic::endpoint::SocketAddr;
 
+#[cfg(feature = "client")]
 mod audio;
+#[cfg(feature = "client")]
+use audio::OpusData;
 
 use clap::{ArgAction, Parser};
 use crossterm::ExecutableCommand; // Needed to use .execute on Stdout for crossterm setup
 use ratatui::{prelude::*, widgets::*};
 use std::thread;
-
-use crate::audio::OpusData;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -81,7 +84,7 @@ struct Args {
 }
 
 fn main() -> std::io::Result<()> {
-    println!("Networking Audio Program Started");
+    println!("Swiftlet Program Started");
 
     // Uncomment if this would be useful (only for debug code?)
     //std::env::set_var("RUST_BACKTRACE", "1");
@@ -96,46 +99,51 @@ fn main() -> std::io::Result<()> {
     match args.address {
         // This is a client because we have an address to connect to
         Some(server_address) => {
-            let (audio_out_channels, network_audio_out_channels, console_audio_out_channels) =
-                communication::create_audio_output_channels();
+            #[cfg(feature = "client")]
+            {
+                let (audio_out_channels, network_audio_out_channels, console_audio_out_channels) =
+                    communication::create_audio_output_channels();
 
-            // Load in Audio Files
-            for (ind, f) in AUDIO_FILES.iter().enumerate() {
-                if let Ok(bytes) = std::fs::read(std::path::Path::new(f)) {
-                    if let Some(opus_data) =
-                        OpusData::create_from_ogg_file(&bytes, (ind as u64) + 1)
-                    {
-                        let _ = console_audio_out_channels
-                            .command_send
-                            .send(ConsoleAudioCommands::LoadOpus(opus_data));
+                // Load in Audio Files
+                for (ind, f) in AUDIO_FILES.iter().enumerate() {
+                    if let Ok(bytes) = std::fs::read(std::path::Path::new(f)) {
+                        if let Some(opus_data) =
+                            OpusData::create_from_ogg_file(&bytes, (ind as u64) + 1)
+                        {
+                            let _ = console_audio_out_channels
+                                .command_send
+                                .send(ConsoleAudioCommands::LoadOpus(opus_data));
+                        }
                     }
                 }
+
+                // Start Network Thread
+                let user_name = match args.username {
+                    Some(un) => un,
+                    None => USERNAME_DEFAULT.to_string(),
+                };
+                let network_thread_handler = thread::spawn(move || {
+                    network::client_thread(
+                        server_address,
+                        user_name,
+                        network_channels,
+                        network_audio_out_channels,
+                    )
+                });
+
+                // Start Audio Thread
+                let audio_thread_handler =
+                    thread::spawn(move || audio::audio_thread(audio_out_channels));
+
+                // Start Console
+                let _ = run_console_client(console_channels, console_audio_out_channels);
+
+                // Wait for Network Thread to Finish
+                network_thread_handler.join().unwrap();
+                audio_thread_handler.join().unwrap();
             }
-
-            // Start Network Thread
-            let user_name = match args.username {
-                Some(un) => un,
-                None => USERNAME_DEFAULT.to_string(),
-            };
-            let network_thread_handler = thread::spawn(move || {
-                network::client_thread(
-                    server_address,
-                    user_name,
-                    network_channels,
-                    network_audio_out_channels,
-                )
-            });
-
-            // Start Audio Thread
-            let audio_thread_handler =
-                thread::spawn(move || audio::audio_thread(audio_out_channels));
-
-            // Start Console
-            let _ = run_console_client(console_channels, console_audio_out_channels);
-
-            // Wait for Network Thread to Finish
-            network_thread_handler.join().unwrap();
-            audio_thread_handler.join().unwrap();
+            #[cfg(not(feature = "client"))]
+            println!("Client Not Enabled");
         }
         None => {
             // No server address was provided, so this is a server
@@ -159,7 +167,7 @@ fn main() -> std::io::Result<()> {
         }
     }
 
-    println!("Networking Audio Program Quitting");
+    println!("Swiftlet Quitting");
     Ok(())
 }
 
@@ -169,6 +177,97 @@ struct ConsoleStateCommon {
     debug_lines: u16,
     debug_scroll: u16,
     connections: Vec<NetworkStateConnection>,
+}
+
+fn console_ui(frame: &mut ratatui::Frame, state: &ConsoleStateCommon, my_state: Option<usize>) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(vec![Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(frame.size());
+
+    // Render Connections and their States
+    let mut rows = Vec::new();
+
+    for (conn_ind, conn) in state.connections.iter().enumerate() {
+        let mut row = Vec::new();
+        let username_cell = Cell::from(conn.name.clone());
+
+        if let Some(test_ind) = my_state {
+            if test_ind == conn_ind {
+                let username_cell =
+                    username_cell.style(Style::default().add_modifier(Modifier::BOLD));
+                row.push(username_cell);
+            } else {
+                row.push(username_cell);
+            }
+        } else {
+            row.push(username_cell);
+        }
+
+        let mut state_test = 1;
+        for i in 1..4 {
+            if conn.state & state_test > 0 {
+                row.push(Cell::from("X"));
+            } else {
+                row.push(Cell::from(" "));
+            }
+            state_test <<= 1;
+        }
+
+        rows.push(Row::new(row));
+    }
+
+    let header_row = [
+        String::from("Name"),
+        String::from("T"),
+        String::from("S"),
+        String::from("V"),
+        String::from("L"),
+    ];
+
+    let widths = [
+        Constraint::Min(32),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ];
+
+    let table = Table::new(rows, widths)
+        .header(Row::new(header_row))
+        .column_spacing(1)
+        .block(
+            ratatui::widgets::Block::new()
+                .borders(Borders::ALL)
+                .title(state.title_string.as_str()),
+        );
+
+    frame.render_widget(table, layout[0]);
+
+    // Render Debug Text
+    frame.render_widget(
+        Paragraph::new(state.debug_string.as_str())
+            .scroll((state.debug_scroll, 0))
+            .block(Block::new().borders(Borders::ALL).title(DEBUG_STR)),
+        layout[1],
+    );
+
+    // Add scrolling to debug text
+    let scrollbar = Scrollbar::default()
+        .orientation(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(Some("↑"))
+        .end_symbol(Some("↓"));
+    let mut scrollbar_state =
+        ScrollbarState::new(state.debug_lines as usize).position(state.debug_scroll as usize);
+
+    frame.render_stateful_widget(
+        scrollbar,
+        layout[1].inner(&Margin {
+            vertical: 1,
+            horizontal: 0,
+        }), // using a inner vertical margin of 1 unit makes the scrollbar inside the block
+        &mut scrollbar_state,
+    );
 }
 
 fn run_console_server(servername: String, channels: ConsoleThreadChannels) -> std::io::Result<()> {
@@ -286,6 +385,10 @@ fn run_console_server(servername: String, channels: ConsoleThreadChannels) -> st
     Ok(())
 }
 
+//#[cfg(feature = "client")]
+//fn start_client(network_channels: NetworkThreadChannels, console_channels: ConsoleThreadChannels) {}
+
+#[cfg(feature = "client")]
 fn run_console_client(
     channels: ConsoleThreadChannels,
     audio_out_channels: ConsoleAudioOutputChannels,
@@ -510,95 +613,4 @@ fn run_console_client(
     crossterm::terminal::disable_raw_mode()?;
 
     Ok(())
-}
-
-fn console_ui(frame: &mut ratatui::Frame, state: &ConsoleStateCommon, my_state: Option<usize>) {
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(vec![Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(frame.size());
-
-    // Render Connections and their States
-    let mut rows = Vec::new();
-
-    for (conn_ind, conn) in state.connections.iter().enumerate() {
-        let mut row = Vec::new();
-        let username_cell = Cell::from(conn.name.clone());
-
-        if let Some(test_ind) = my_state {
-            if test_ind == conn_ind {
-                let username_cell =
-                    username_cell.style(Style::default().add_modifier(Modifier::BOLD));
-                row.push(username_cell);
-            } else {
-                row.push(username_cell);
-            }
-        } else {
-            row.push(username_cell);
-        }
-
-        let mut state_test = 1;
-        for i in 1..4 {
-            if conn.state & state_test > 0 {
-                row.push(Cell::from("X"));
-            } else {
-                row.push(Cell::from(" "));
-            }
-            state_test <<= 1;
-        }
-
-        rows.push(Row::new(row));
-    }
-
-    let header_row = [
-        String::from("Name"),
-        String::from("T"),
-        String::from("S"),
-        String::from("V"),
-        String::from("L"),
-    ];
-
-    let widths = [
-        Constraint::Min(32),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ];
-
-    let table = Table::new(rows, widths)
-        .header(Row::new(header_row))
-        .column_spacing(1)
-        .block(
-            ratatui::widgets::Block::new()
-                .borders(Borders::ALL)
-                .title(state.title_string.as_str()),
-        );
-
-    frame.render_widget(table, layout[0]);
-
-    // Render Debug Text
-    frame.render_widget(
-        Paragraph::new(state.debug_string.as_str())
-            .scroll((state.debug_scroll, 0))
-            .block(Block::new().borders(Borders::ALL).title(DEBUG_STR)),
-        layout[1],
-    );
-
-    // Add scrolling to debug text
-    let scrollbar = Scrollbar::default()
-        .orientation(ScrollbarOrientation::VerticalRight)
-        .begin_symbol(Some("↑"))
-        .end_symbol(Some("↓"));
-    let mut scrollbar_state =
-        ScrollbarState::new(state.debug_lines as usize).position(state.debug_scroll as usize);
-
-    frame.render_stateful_widget(
-        scrollbar,
-        layout[1].inner(&Margin {
-            vertical: 1,
-            horizontal: 0,
-        }), // using a inner vertical margin of 1 unit makes the scrollbar inside the block
-        &mut scrollbar_state,
-    );
 }

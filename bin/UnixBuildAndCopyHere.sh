@@ -1,6 +1,11 @@
 #!/bin/sh
 # Builds swiftlet in release mode and copies the executable to the this (bin) directory
-cargo build -r
+
+if [ $# -eq 0 ]; then
+    cargo build -r
+else
+    cargo build -r --no-default-features
+fi
 if [ $? -ne 0 ]; then
     exit $?
 fi

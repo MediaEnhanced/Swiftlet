@@ -23,6 +23,7 @@
 use crossbeam_channel::bounded;
 pub(crate) use crossbeam_channel::{Receiver, Sender, TryRecvError};
 
+#[cfg(feature = "client")]
 use crate::audio::OpusData;
 
 pub(crate) struct NetworkThreadChannels {
@@ -59,10 +60,12 @@ pub(crate) fn create_networking_console_channels() -> (NetworkThreadChannels, Co
 
 pub(crate) enum NetworkCommand {
     Stop(u64),
+    #[cfg(feature = "client")]
     Client(ClientCommand),
     Server(ServerCommand),
 }
 
+#[cfg(feature = "client")]
 pub(crate) enum ClientCommand {
     StateChange(u8),
     ServerConnect(swiftlet_quic::endpoint::SocketAddr),
@@ -85,6 +88,7 @@ pub(crate) struct NetworkStateConnection {
     pub(crate) state: u8,
 }
 
+#[cfg(feature = "client")]
 pub(crate) struct AudioOutputThreadChannels {
     pub(crate) command_recv: Receiver<ConsoleAudioCommands>,
     pub(crate) packet_recv: Receiver<NetworkAudioPackets>,
@@ -92,16 +96,19 @@ pub(crate) struct AudioOutputThreadChannels {
     pub(crate) debug_send: Sender<&'static str>,
 }
 
+#[cfg(feature = "client")]
 pub(crate) struct NetworkAudioOutputChannels {
     pub(crate) packet_send: Sender<NetworkAudioPackets>,
 }
 
+#[cfg(feature = "client")]
 pub(crate) struct ConsoleAudioOutputChannels {
     pub(crate) command_send: Sender<ConsoleAudioCommands>,
     pub(crate) state_recv: Receiver<AudioStateMessage>,
     pub(crate) debug_recv: Receiver<&'static str>,
 }
 
+#[cfg(feature = "client")]
 pub(crate) fn create_audio_output_channels() -> (
     AudioOutputThreadChannels,
     NetworkAudioOutputChannels,
@@ -135,15 +142,18 @@ pub(crate) fn create_audio_output_channels() -> (
     )
 }
 
+#[cfg(feature = "client")]
 pub(crate) enum ConsoleAudioCommands {
     LoadOpus(OpusData),
     PlayOpus(u64),
 }
 
+#[cfg(feature = "client")]
 pub(crate) enum NetworkAudioPackets {
     MusicPacket((u8, Vec<u8>)),
     MusicStop(u8),
     VoiceData(Vec<u8>),
 }
 
+#[cfg(feature = "client")]
 pub(crate) enum AudioStateMessage {}

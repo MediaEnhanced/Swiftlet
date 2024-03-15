@@ -30,13 +30,15 @@ const PKEY_PATH: &str = "security/pkey.pem"; // Location of the private key for 
 
 // IPv6 Addresses and Sockets used when sending the client an initial connection addresss
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+#[cfg(feature = "client")]
 use std::time::Duration;
 
 // Use Inter-Thread Communication Definitions
+#[cfg(feature = "client")]
+use crate::communication::{ClientCommand, NetworkAudioOutputChannels, NetworkAudioPackets};
 use crate::communication::{
-    ClientCommand, NetworkAudioOutputChannels, NetworkAudioPackets, NetworkCommand,
-    NetworkStateConnection, NetworkStateMessage, NetworkThreadChannels, ServerCommand,
-    TryRecvError,
+    NetworkCommand, NetworkStateConnection, NetworkStateMessage, NetworkThreadChannels,
+    ServerCommand, TryRecvError,
 };
 
 // Use quic sub-library for internet communications
@@ -714,6 +716,7 @@ impl EndpointEventCallbacks for ServerState {
                         return true;
                     }
                     Err(_) => return true, // Other recv errors
+                    #[cfg(feature = "client")]
                     Ok(NetworkCommand::Client(_)) => {}
                 }
             }
@@ -844,6 +847,7 @@ impl EndpointEventCallbacks for ServerState {
     }
 }
 
+#[cfg(feature = "client")]
 struct ClientHandler {
     user_name: String,
     channels: NetworkThreadChannels,
@@ -855,6 +859,7 @@ struct ClientHandler {
     audio_channels: NetworkAudioOutputChannels,
 }
 
+#[cfg(feature = "client")]
 impl ClientHandler {
     fn new(
         user_name: String,
@@ -1053,6 +1058,7 @@ impl ClientHandler {
     }
 }
 
+#[cfg(feature = "client")]
 impl EndpointEventCallbacks for ClientHandler {
     fn connection_started(&mut self, endpoint: &mut Endpoint, cid: &ConnectionId) {
         let _ = self
@@ -1274,6 +1280,7 @@ pub(crate) fn server_thread(
     server_state.send_debug_text("Server Network Thread Exiting\n");
 }
 
+#[cfg(feature = "client")]
 pub(crate) fn client_thread(
     server_address: SocketAddr,
     user_name: String,
