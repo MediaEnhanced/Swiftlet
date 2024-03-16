@@ -53,8 +53,6 @@ use crossterm::ExecutableCommand; // Needed to use .execute on Stdout for crosst
 use ratatui::{prelude::*, widgets::*};
 use std::thread;
 
-use crate::client::Client;
-
 #[derive(bpaf::Bpaf, Debug)]
 #[bpaf(options, version)]
 struct Arguments {
@@ -109,7 +107,7 @@ fn main() -> std::io::Result<()> {
                 let (audio_out_channels, network_audio_out_channels, console_audio_out_channels) =
                     communication::create_audio_output_channels();
 
-                let mut client = Client::new(server_address, console_audio_out_channels);
+                let mut client = client::Client::new(server_address, console_audio_out_channels);
 
                 // Start Network Thread
                 let network_thread_handler = thread::spawn(move || {
