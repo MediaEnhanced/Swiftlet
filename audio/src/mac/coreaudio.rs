@@ -818,7 +818,7 @@ impl Device {
 
     pub(super) fn run_output_callback_loop(
         &self,
-        mut callback: &mut crate::OutputCallback,
+        mut callback: impl crate::OutputCallback,
     ) -> Result<(), Error> {
         // Double check the canonical default
         let stream_data = self.get_stream_description()?;
@@ -981,7 +981,7 @@ extern "C" fn render_callback(
 
         if !cb_data.is_capture {
             if let Some(cb_fn) = unsafe { cb_data.closure_ptr.as_mut() } {
-                let closure: &mut &mut crate::OutputCallback =
+                let mut closure: &mut impl crate::OutputCallback =
                     unsafe { std::mem::transmute(cb_fn) };
 
                 if let Some(buffer_list) = unsafe { buffer_list.as_mut() } {
@@ -1006,7 +1006,7 @@ extern "C" fn render_callback(
                             )
                         };
 
-                        if closure(float_data) {
+                        if closure.output_callback(float_data) {
                             sync_send(cb_data.sync_tx_ptr, CallbackStop::Normal);
                         }
                     } else {

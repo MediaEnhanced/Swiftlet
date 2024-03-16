@@ -689,11 +689,15 @@ impl Connection {
             }
             //let rt_period = stream_id_difference >> 2;
             for i in (0..stream_id_difference).step_by(4) {
-                self.connection.stream_shutdown(
+                match self.connection.stream_shutdown(
                     self.rt_recv.id + i,
                     quiche::Shutdown::Read,
                     self.rt_recv.id + i,
-                )?;
+                ) {
+                    Ok(_) => {}
+                    Err(Error::Done) => {}
+                    Err(e) => return Err(e),
+                }
             }
             self.rt_recv.id = next_readable_stream;
             self.rt_recv.captured = 0;

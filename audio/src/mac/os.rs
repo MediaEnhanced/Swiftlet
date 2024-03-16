@@ -106,7 +106,7 @@ impl<'a> AudioOutput<'a> {
         self.channels
     }
 
-    pub(super) fn run_callback_loop(&self, callback: &mut crate::OutputCallback) -> bool {
+    pub(super) fn run_callback_loop(&self, callback: impl crate::OutputCallback) -> bool {
         self.device.run_output_callback_loop(callback).is_ok()
     }
 

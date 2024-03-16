@@ -22,13 +22,19 @@
 
 #![allow(dead_code)] // Temporary
 
-pub type OutputCallback = dyn FnMut(&mut [f32]) -> bool;
+pub trait OutputCallback {
+    fn output_callback(&mut self, samples: &mut [f32]) -> bool;
+}
+
+pub trait InputCallback {
+    fn input_callback(&mut self, samples: &[f32]) -> bool;
+}
 
 #[cfg_attr(target_os = "windows", path = "windows/os.rs")]
 #[cfg_attr(target_os = "linux", path = "linux/os.rs")]
 #[cfg_attr(target_os = "macos", path = "mac/os.rs")]
 mod os;
-use os::{AudioOutput, AudioOwner};
+use os::{AudioInput, AudioOutput, AudioOwner};
 
 pub mod raw;
 
@@ -53,7 +59,7 @@ pub enum Error {
 pub fn run_output(
     desired_period: u32,
     expected_channels: u32,
-    callback: &mut OutputCallback,
+    callback: impl OutputCallback,
 ) -> Result<bool, Error> {
     let owner = match AudioOwner::new() {
         Some(d) => d,
@@ -70,4 +76,43 @@ pub fn run_output(
     }
 
     Ok(output.run_callback_loop(callback))
+}
+
+pub fn run_input_output(
+    desired_period: u32,
+    output_expected_channels: u32,
+    input_expected_channels: u32,
+    _output_callback: impl OutputCallback + Send,
+    _input_callback: impl InputCallback + Send,
+) -> Result<bool, Error> {
+    let owner = match AudioOwner::new() {
+        Some(d) => d,
+        None => return Err(Error::OwnerCreation),
+    };
+
+    let output = match AudioOutput::new(&owner, desired_period) {
+        Some(o) => o,
+        None => return Err(Error::OutputCreation),
+    };
+
+    if output.get_channels() != output_expected_channels {
+        return Err(Error::ChannelMismatch);
+    }
+
+    let input = match AudioInput::new(&owner, desired_period) {
+        Some(i) => i,
+        None => return Err(Error::InputCreation),
+    };
+
+    if input.get_channels() != input_expected_channels {
+        return Err(Error::ChannelMismatch);
+    }
+
+    // std::thread::scope(|s| {
+    //     s.spawn(|| output.run_callback_loop(output_callback));
+    //     s.spawn(|| input.run_callback_loop(input_callback));
+    //     println!("hello from the main thread");
+    // });
+
+    Ok(true)
 }

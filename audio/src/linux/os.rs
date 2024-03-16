@@ -171,7 +171,7 @@ impl<'a> AudioOutput<'a> {
         self.device.stop().is_ok()
     }
 
-    pub(super) fn run_callback_loop(&self, callback: &mut crate::OutputCallback) -> bool {
+    pub(super) fn run_callback_loop(&self, mut callback: impl crate::OutputCallback) -> bool {
         let buffer_len = (self.frame_period * self.channels) as usize;
         let mut data_vec = vec![0.0 as f32; buffer_len];
         let float_p = data_vec.as_mut_ptr() as *mut f32;
@@ -187,7 +187,7 @@ impl<'a> AudioOutput<'a> {
                     let available_frames = self.device.get_available_frames();
                     //println!("Frames Available: {}", available_frames);
                     if available_frames >= (self.frame_period as i64) {
-                        let callback_quit = callback(buffer);
+                        let callback_quit = callback.output_callback(buffer);
                         match self
                             .device
                             .write_interleaved_float_frames(&data_vec, self.frame_period as u64)

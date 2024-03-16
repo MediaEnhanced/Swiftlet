@@ -209,7 +209,7 @@ fn console_ui(frame: &mut ratatui::Frame, state: &ConsoleStateCommon, my_state: 
     ];
 
     let widths = [
-        Constraint::Min(32),
+        Constraint::Length(33),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),

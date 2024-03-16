@@ -62,15 +62,38 @@ impl<'a> AudioOutput<'a> {
         self.device.get_channels()
     }
 
-    pub(super) fn run_callback_loop(&self, callback: &mut crate::OutputCallback) -> bool {
+    pub(super) fn run_callback_loop(&self, callback: impl crate::OutputCallback) -> bool {
         self.device.run_output_event_loop(callback)
     }
 }
 
-pub(super) struct AudioInput {
-    //device: Audio::IMMDevice,
+pub(super) struct AudioInput<'a> {
+    owner: &'a AudioOwner,
+    device: wasapi::Device,
 }
 
-impl AudioInput {
-    //pub(super) fn new() -> Self {}
+impl<'a> AudioInput<'a> {
+    pub(super) fn new(audio_owner: &'a AudioOwner, desired_period: u32) -> Option<Self> {
+        let device =
+            match wasapi::Device::new_from_default_capture(&audio_owner.enumerator, desired_period)
+            {
+                Some(d) => d,
+                None => return None,
+            };
+
+        let audio_input = AudioInput {
+            owner: audio_owner,
+            device,
+        };
+
+        Some(audio_input)
+    }
+
+    pub(super) fn get_channels(&self) -> u32 {
+        self.device.get_channels()
+    }
+
+    pub(super) fn run_callback_loop(&self, callback: impl crate::InputCallback) -> bool {
+        self.device.run_input_event_loop(callback)
+    }
 }

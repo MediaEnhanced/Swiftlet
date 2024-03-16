@@ -47,165 +47,10 @@ use swiftlet_quic::{
     EndpointEventCallbacks, EndpointHandler,
 };
 
-const MESSAGE_HEADER_SIZE: usize = 3;
-const MAX_MESSAGE_SIZE: usize = 65535;
 const BUFFER_SIZE_PER_CONNECTION: usize = 4_194_304; // 4 MiB
 
-// All stream message data (application protocol information) is always in little endian form
-#[repr(u8)]
-enum StreamMsgType {
-    InvalidType = 0, // Enforce that it is zero
-
-    // Server Messages:
-    ServerStateRefresh, // NumClientsConnected, ClientIndex, ServerNameLen, ServerName, {ClientXNameLen, ClientXName, ClientXState}... 0
-    NewClient,          // ClientNameLen, ClientName, ClientState
-    RemoveClient,       // ClientIndex,
-    ClientNewState,     // ClientIndex, ClientState
-    MusicIdReady,       // MusicID (1 byte)
-    NextMusicPacket,    // Stereo, Music Packet
-
-    // General Messages:
-    TransferRequest,  // Data_Len_Size (3), TransferIntention (1)
-    TransferResponse, // Transfer ID (2)
-    TransferData,     // Header (Includes Transfer ID instead of Size) TransferData
-
-    // Client Messages:
-    NewClientAnnounce, // ClientNameLen, ClientName
-    NewStateRequest,   // RequestedState
-    MusicRequest,      // MusicID (1 byte)
-}
-
-impl StreamMsgType {
-    #[inline] // Verbose but compiles down to minimal instructions
-    fn from_u8(byte: u8) -> Self {
-        match byte {
-            x if x == Self::ServerStateRefresh as u8 => Self::ServerStateRefresh,
-            x if x == Self::NewClient as u8 => Self::NewClient,
-            x if x == Self::RemoveClient as u8 => Self::RemoveClient,
-            x if x == Self::ClientNewState as u8 => Self::ClientNewState,
-            x if x == Self::MusicIdReady as u8 => Self::MusicIdReady,
-            x if x == Self::NextMusicPacket as u8 => Self::NextMusicPacket,
-
-            x if x == Self::TransferRequest as u8 => Self::TransferRequest,
-            x if x == Self::TransferResponse as u8 => Self::TransferResponse,
-            x if x == Self::TransferData as u8 => Self::TransferData,
-
-            x if x == Self::NewClientAnnounce as u8 => Self::NewClientAnnounce,
-            x if x == Self::NewStateRequest as u8 => Self::NewStateRequest,
-            x if x == Self::MusicRequest as u8 => Self::MusicRequest,
-
-            _ => Self::InvalidType,
-        }
-    }
-
-    #[inline]
-    fn from_header(header: &[u8]) -> Option<(Self, u16)> {
-        if header.len() == MESSAGE_HEADER_SIZE {
-            Some((
-                Self::from_u8(header[0]),
-                u16::from_le_bytes([header[1], header[2]]),
-            ))
-        } else {
-            None
-        }
-    }
-
-    #[inline]
-    fn to_u8(&self) -> u8 {
-        match self {
-            Self::ServerStateRefresh => Self::ServerStateRefresh as u8,
-            Self::NewClient => Self::NewClient as u8,
-            Self::RemoveClient => Self::RemoveClient as u8,
-            Self::ClientNewState => Self::ClientNewState as u8,
-            Self::MusicIdReady => Self::MusicIdReady as u8,
-            Self::NextMusicPacket => Self::NextMusicPacket as u8,
-
-            Self::TransferRequest => Self::TransferRequest as u8,
-            Self::TransferResponse => Self::TransferResponse as u8,
-            Self::TransferData => Self::TransferData as u8,
-
-            Self::NewClientAnnounce => Self::NewClientAnnounce as u8,
-            Self::NewStateRequest => Self::NewStateRequest as u8,
-            Self::MusicRequest => Self::MusicRequest as u8,
-
-            _ => Self::InvalidType as u8,
-        }
-    }
-
-    #[inline]
-    fn intended_for_client(&self) -> bool {
-        matches!(
-            self,
-            Self::ServerStateRefresh
-                | Self::NewClient
-                | Self::RemoveClient
-                | Self::ClientNewState
-                | Self::MusicIdReady
-                | Self::NextMusicPacket
-                | Self::TransferRequest
-                | Self::TransferResponse
-                | Self::TransferData
-        )
-    }
-
-    #[inline]
-    fn intended_for_server(&self) -> bool {
-        matches!(
-            self,
-            Self::TransferRequest
-                | Self::TransferResponse
-                | Self::TransferData
-                | Self::NewClientAnnounce
-                | Self::NewStateRequest
-                | Self::MusicRequest
-        )
-    }
-
-    // Optimized enough for compiler...?
-    #[inline]
-    fn get_send_data_vec(&self, body_capacity: Option<usize>) -> Vec<u8> {
-        if let Some(body_size) = body_capacity {
-            let mut send_data = Vec::with_capacity(body_size + MESSAGE_HEADER_SIZE);
-            send_data.push(self.to_u8());
-            send_data.push(0);
-            send_data.push(0);
-            send_data
-        } else {
-            Vec::from([self.to_u8(), 0, 0])
-        }
-    }
-}
-
-#[repr(u8)]
-enum TransferIntention {
-    Deletion = 0,
-    Music,
-}
-
-impl TransferIntention {
-    #[inline]
-    fn from_u8(byte: u8) -> Self {
-        match byte {
-            x if x == TransferIntention::Music as u8 => TransferIntention::Music,
-            _ => TransferIntention::Deletion,
-        }
-    }
-
-    #[inline]
-    fn to_u8(&self) -> u8 {
-        match self {
-            TransferIntention::Music => TransferIntention::Music as u8,
-            _ => TransferIntention::Deletion as u8,
-        }
-    }
-}
-
-#[inline]
-fn set_stream_msg_size(vec_data: &mut [u8]) {
-    let num_bytes = usize::to_le_bytes(vec_data.len() - MESSAGE_HEADER_SIZE);
-    vec_data[1] = num_bytes[0];
-    vec_data[2] = num_bytes[1];
-}
+mod protocol;
+use protocol::{set_stream_msg_size, StreamMsgType, TransferIntention};
 
 fn u8_to_str(data: &[u8]) -> String {
     let str_local = match std::str::from_utf8(data) {
@@ -735,7 +580,7 @@ impl EndpointEventCallbacks for ServerState {
         if let Some(vi) = self.find_connection_index_from_cid(cid) {
             if let Some(msg_type) = self.client_states[vi].main_recv_type.take() {
                 if self.handle_stream_msg(endpoint, vi, msg_type, read_data) {
-                    Some(MESSAGE_HEADER_SIZE)
+                    Some(protocol::MESSAGE_HEADER_SIZE)
                 } else {
                     None // Close Connection
                 }
@@ -780,7 +625,7 @@ impl EndpointEventCallbacks for ServerState {
         {
             self.potential_clients.remove(pot_ind);
             if self.add_new_verified_connection(endpoint, cid, read_data) {
-                Some(MESSAGE_HEADER_SIZE)
+                Some(protocol::MESSAGE_HEADER_SIZE)
             } else {
                 None // Close Connection
             }
@@ -803,7 +648,7 @@ impl EndpointEventCallbacks for ServerState {
         if let Some(vi) = self.find_connection_index_from_cid(cid) {
             if let Some(msg_type) = self.client_states[vi].bkgd_recv_type.take() {
                 if self.handle_stream_msg(endpoint, vi, msg_type, read_data) {
-                    Some(MESSAGE_HEADER_SIZE)
+                    Some(protocol::MESSAGE_HEADER_SIZE)
                 } else {
                     None // Close Connection
                 }
@@ -902,7 +747,7 @@ impl ClientHandler {
                         let mut transfer_data = StreamMsgType::TransferData.get_send_data_vec(None);
                         od.add_to_vec(&mut transfer_data);
                         let size_in_bytes =
-                            (transfer_data.len() - MESSAGE_HEADER_SIZE).to_ne_bytes();
+                            (transfer_data.len() - protocol::MESSAGE_HEADER_SIZE).to_ne_bytes();
 
                         let mut send_data = StreamMsgType::TransferRequest.get_send_data_vec(None);
                         send_data.push(size_in_bytes[0]);
@@ -1143,7 +988,7 @@ impl EndpointEventCallbacks for ClientHandler {
             if *my_cid == *cid {
                 if let Some(msg_type) = self.main_recv_type.take() {
                     if self.handle_stream_msg(endpoint, cid, msg_type, read_data) {
-                        Some(MESSAGE_HEADER_SIZE)
+                        Some(protocol::MESSAGE_HEADER_SIZE)
                     } else {
                         None // Close Connection
                     }
@@ -1201,7 +1046,7 @@ impl EndpointEventCallbacks for ClientHandler {
             if *my_cid == *cid {
                 if let Some(msg_type) = self.background_recv_type.take() {
                     if self.handle_stream_msg(endpoint, cid, msg_type, read_data) {
-                        Some(MESSAGE_HEADER_SIZE)
+                        Some(protocol::MESSAGE_HEADER_SIZE)
                     } else {
                         None // Close Connection
                     }
@@ -1241,11 +1086,11 @@ pub(crate) fn server_thread(
         unreliable_stream_buffer: 65536,
         keep_alive_timeout: None,
         initial_main_recv_size: BUFFER_SIZE_PER_CONNECTION,
-        main_recv_first_bytes: MESSAGE_HEADER_SIZE,
+        main_recv_first_bytes: protocol::MESSAGE_HEADER_SIZE,
         initial_rt_recv_size: 65536,
         rt_recv_first_bytes: 0,
         initial_background_recv_size: 65536,
-        background_recv_first_bytes: MESSAGE_HEADER_SIZE,
+        background_recv_first_bytes: protocol::MESSAGE_HEADER_SIZE,
     };
 
     let mut server_endpoint =
@@ -1295,11 +1140,11 @@ pub(crate) fn client_thread(
         unreliable_stream_buffer: 65536,
         keep_alive_timeout: Some(Duration::from_millis(2000)),
         initial_main_recv_size: BUFFER_SIZE_PER_CONNECTION,
-        main_recv_first_bytes: MESSAGE_HEADER_SIZE,
+        main_recv_first_bytes: protocol::MESSAGE_HEADER_SIZE,
         initial_rt_recv_size: 65536,
         rt_recv_first_bytes: 0,
         initial_background_recv_size: 65536,
-        background_recv_first_bytes: MESSAGE_HEADER_SIZE,
+        background_recv_first_bytes: protocol::MESSAGE_HEADER_SIZE,
     };
     let mut client_endpoint = match Endpoint::new_client_with_first_connection(
         bind_address,

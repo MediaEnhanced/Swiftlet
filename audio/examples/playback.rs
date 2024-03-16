@@ -44,18 +44,13 @@ fn main() {
     };
 
     if let Some(stereo_data) = opus_data.get_stereo() {
-        let mut stereo_position = 0;
-        let mut callback_count = 0;
-        let mut f = move |samples: &mut [f32]| {
-            output_callback(
-                samples,
-                &mut stereo_position,
-                &stereo_data,
-                &mut callback_count,
-            )
+        let playback = Playback {
+            stereo_position: 0,
+            callback_count: 0,
+            stereo_data,
         };
 
-        match swiftlet_audio::run_output(480, 2, &mut f) {
+        match swiftlet_audio::run_output(480, 2, playback) {
             Ok(true) => println!("Played the whole song!"),
             Ok(false) => println!("Playback loop ended sooner than expected!"),
             Err(e) => println!("Playback Error: {:?}", e),
@@ -65,34 +60,37 @@ fn main() {
     println!("Playback Example Ended!");
 }
 
-fn output_callback(
-    samples: &mut [f32],
-    stereo_position: &mut usize,
-    stereo_data: &[f32],
-    callback_count: &mut u64,
-) -> bool {
-    *callback_count += 1;
+struct Playback {
+    stereo_position: usize,
+    callback_count: u64,
+    stereo_data: Vec<f32>,
+}
 
-    let samples_len = samples.len();
-    if samples_len != 960 {
-        println!("{}, Samples: {}", *callback_count, samples_len);
-        if samples_len == 0 {
+impl swiftlet_audio::OutputCallback for Playback {
+    fn output_callback(&mut self, samples: &mut [f32]) -> bool {
+        self.callback_count += 1;
+
+        let samples_len = samples.len();
+        if samples_len != 960 {
+            println!("{}, Samples: {}", self.callback_count, samples_len);
+            if samples_len == 0 {
+                return true;
+            }
+        }
+
+        let remaining_samples = self.stereo_data.len() - self.stereo_position;
+        let copy_len = usize::min(remaining_samples, samples_len);
+        let end_position = self.stereo_position + copy_len;
+        samples[..copy_len].copy_from_slice(&self.stereo_data[self.stereo_position..end_position]);
+        self.stereo_position = end_position;
+        if self.stereo_position == self.stereo_data.len() {
+            for s in &mut samples[copy_len..] {
+                *s = 0.0;
+            }
+            self.stereo_position = 0;
             return true;
         }
-    }
 
-    let remaining_samples = stereo_data.len() - *stereo_position;
-    let copy_len = usize::min(remaining_samples, samples_len);
-    let end_position = *stereo_position + copy_len;
-    samples[..copy_len].copy_from_slice(&stereo_data[*stereo_position..end_position]);
-    *stereo_position = end_position;
-    if *stereo_position == stereo_data.len() {
-        for s in &mut samples[copy_len..] {
-            *s = 0.0;
-        }
-        *stereo_position = 0;
-        return true;
+        false
     }
-
-    false
 }
