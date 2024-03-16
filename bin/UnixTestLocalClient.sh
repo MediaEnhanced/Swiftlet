@@ -3,9 +3,9 @@
 clear
 
 if [ $# -eq 0 ]; then
-    ../target/debug/swiftlet -u Client -a [::1]:9001
+    ../target/debug/swiftlet -n Client -a [::1]:0
 else
-    ../target/release/swiftlet -u Client -a [::1]:9001
+    ../target/release/swiftlet -n Client -a [::1]:0
 fi
 
 exit 0

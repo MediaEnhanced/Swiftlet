@@ -1,4 +1,5 @@
 #!/bin/sh
+# Run a Swiftlet server
 clear
-./swiftlet --sname Server --ipv6
+./swiftlet -n ServerName
 exit 0

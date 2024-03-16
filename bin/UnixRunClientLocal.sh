@@ -1,4 +1,5 @@
 #!/bin/sh
+# Connect to a local Swiftlet server
 clear
-./swiftlet -u ClientLocal -a [::1]:9001
+./swiftlet -n ClientLocal -a [::1]:0
 exit 0

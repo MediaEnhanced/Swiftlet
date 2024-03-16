@@ -24,7 +24,7 @@ use crossbeam_channel::bounded;
 pub(crate) use crossbeam_channel::{Receiver, Sender, TryRecvError};
 
 #[cfg(feature = "client")]
-use crate::audio::OpusData;
+use crate::client::audio::OpusData;
 
 pub(crate) struct NetworkThreadChannels {
     pub(crate) command_recv: Receiver<NetworkCommand>,

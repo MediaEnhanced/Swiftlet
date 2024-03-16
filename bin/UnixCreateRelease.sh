@@ -5,6 +5,6 @@ if [ $? -ne 0 ]; then
     exit $?
 fi
 mkdir ./releases
-zip -r ./releases/SwiftletUnix.zip ./swiftlet ./audio/ ./security/
+zip -r ./releases/SwiftletUnix.zip ./swiftlet ./audio/ ./security/ ./UnixRunServer.sh ./UnixRunClientLocal.sh ./UnixRunClientRemote.sh
 
 exit 0

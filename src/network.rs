@@ -1225,17 +1225,14 @@ impl EndpointEventCallbacks for ClientHandler {
 }
 
 pub(crate) fn server_thread(
-    use_ipv6: Option<bool>,
+    use_ipv4: bool,
     port: u16,
     server_name: String,
     channels: NetworkThreadChannels,
 ) {
-    let bind_address = match use_ipv6 {
-        Some(ipv6) => match ipv6 {
-            true => SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0)),
-            false => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)),
-        },
-        None => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)),
+    let bind_address = match use_ipv4 {
+        false => SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0)),
+        true => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)),
     };
 
     let config = Config {

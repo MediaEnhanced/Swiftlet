@@ -8,14 +8,14 @@ if [ $# -eq 0 ]; then
         exit $?
     fi
 
-    ../target/debug/swiftlet --sname Server --ipv6
+    ../target/debug/swiftlet -n Server
 else
     cargo build -r
     if [ $? -ne 0 ]; then
         exit $?
     fi
 
-    ../target/release/swiftlet --sname Server --ipv6
+    ../target/release/swiftlet -n Server
 fi
 
 exit 0
