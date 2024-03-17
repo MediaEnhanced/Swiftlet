@@ -703,6 +703,7 @@ impl Connection {
             self.rt_recv.captured = 0;
             self.rt_recv.count += stream_id_difference >> 2;
         } else if next_readable_stream != self.rt_recv.id {
+            self.rt_recv.data = Some(recv_data);
             return Ok(StreamResult::Nothing);
             //return Err(Error::InvalidStreamState(16));
         }
