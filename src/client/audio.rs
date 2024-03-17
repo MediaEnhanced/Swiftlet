@@ -185,11 +185,10 @@ impl swiftlet_audio::OutputCallback for Output {
                             read_offset: 0,
                         };
 
-                        match realtime.decoder.decode_float(
-                            &music_data[1..],
-                            &mut output_data.data,
-                            false,
-                        ) {
+                        match realtime
+                            .decoder
+                            .decode_float(&music_data[1..], &mut output_data.data)
+                        {
                             Ok(decode_len) => {
                                 output_data.data_len = decode_len;
                                 if realtime.is_stereo {
@@ -219,7 +218,7 @@ impl swiftlet_audio::OutputCallback for Output {
                             data_len: 0,
                             read_offset: 0,
                         };
-                        match decoder.decode_float(&music_data[1..], &mut output_data.data, false) {
+                        match decoder.decode_float(&music_data[1..], &mut output_data.data) {
                             Ok(decode_len) => {
                                 output_data.data_len = decode_len;
                                 if is_stereo {
@@ -301,11 +300,10 @@ impl swiftlet_audio::OutputCallback for Output {
                         ) {
                             playback.opus_data_next_packet += 1;
                             playback.opus_data_next_data += input_data.len();
-                            match playback.decoder.decode_float(
-                                input_data,
-                                &mut playback.data.data,
-                                false,
-                            ) {
+                            match playback
+                                .decoder
+                                .decode_float(input_data, &mut playback.data.data)
+                            {
                                 Ok(decode_len) => {
                                     playback.data.data_len = decode_len * 2;
                                     playback.data.read_offset = 0;

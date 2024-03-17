@@ -150,11 +150,9 @@ fn create_builder(cross_info_opt: &Option<CrossCompileInfo>) -> cc::Build {
 // Build Opus for a Cross Compile Target
 fn build_opus(cross_info_opt: &Option<CrossCompileInfo>) {
     let opus_include_path = Path::new("./src/opus/include");
-    let opus_celt_path = Path::new("./src/opus/celt");
-    let opus_silk_path = Path::new("./src/opus/silk");
-
     let mut include_paths = Vec::new();
 
+    let opus_celt_path = Path::new("./src/opus/celt");
     let mut celt_files = Vec::new();
     for element in opus_celt_path.read_dir().unwrap() {
         let path = element.unwrap().path();
@@ -167,6 +165,7 @@ fn build_opus(cross_info_opt: &Option<CrossCompileInfo>) {
         }
     }
 
+    let opus_silk_path = Path::new("./src/opus/silk");
     let mut silk_files = Vec::new();
     for element in opus_silk_path.read_dir().unwrap() {
         let path = element.unwrap().path();
@@ -175,6 +174,19 @@ fn build_opus(cross_info_opt: &Option<CrossCompileInfo>) {
         } else if let Some(extension) = path.extension() {
             if extension == "c" {
                 silk_files.push(path);
+            }
+        }
+    }
+
+    let opus_silk_float_path = Path::new("./src/opus/silk/float");
+    let mut silk_float_files = Vec::new();
+    for element in opus_silk_float_path.read_dir().unwrap() {
+        let path = element.unwrap().path();
+        if path.is_dir() {
+            include_paths.push(path);
+        } else if let Some(extension) = path.extension() {
+            if extension == "c" {
+                silk_float_files.push(path);
             }
         }
     }
@@ -190,9 +202,15 @@ fn build_opus(cross_info_opt: &Option<CrossCompileInfo>) {
     builder.define("USE_ALLOCA", None);
     builder.file("./src/opus/src/opus.c");
     builder.file("./src/opus/src/opus_decoder.c");
+    builder.file("./src/opus/src/opus_encoder.c");
+    builder.file("./src/opus/src/repacketizer.c");
+    builder.file("./src/opus/src/mlp.c");
+    builder.file("./src/opus/src/mlp_data.c");
+    builder.file("./src/opus/src/extensions.c");
     builder.file("./src/opus/src/analysis.c");
     builder.files(celt_files);
     builder.files(silk_files);
+    builder.files(silk_float_files);
 
     let out_dir = std::env::var("OUT_DIR").unwrap();
 

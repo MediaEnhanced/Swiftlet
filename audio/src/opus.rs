@@ -29,6 +29,13 @@ enum Channels {
     Stereo = 2,
 }
 
+#[repr(C)]
+enum EncodingApplication {
+    Voip = 2048,
+    Audio = 2049,
+    LowDelay = 2051,
+}
+
 #[link(name = "opus", kind = "static")]
 extern "C" {
     fn opus_decoder_get_size(channels: Channels) -> c_int;
@@ -44,11 +51,27 @@ extern "C" {
         decode_fec: c_int,
     ) -> c_int;
 
-    //fn opus_encoder_get_size(channels: c_int) -> c_int;
+    fn opus_encoder_get_size(channels: Channels) -> c_int;
+
+    fn opus_encoder_init(
+        encoder: *mut u8,
+        sample_rate: c_int,
+        channels: Channels,
+        mode: EncodingApplication,
+    ) -> c_int;
+
+    fn opus_encode_float(
+        encoder: *mut u8,
+        samples: *const f32,
+        samples_len: c_int,
+        data: *mut c_uchar,
+        data_len: c_int,
+    ) -> c_int;
 }
 
 #[derive(Debug)]
 pub enum Error {
+    InputSize = 2,
     SliceTooLong = 1,
     Ok = 0,
     BadArg = -1,
@@ -98,12 +121,7 @@ impl Decoder {
         Ok(Decoder { decoder, is_stereo })
     }
 
-    pub fn decode_float(
-        &mut self,
-        input: &[u8],
-        output: &mut [f32],
-        fec: bool,
-    ) -> Result<usize, Error> {
+    pub fn decode_float(&mut self, input: &[u8], output: &mut [f32]) -> Result<usize, Error> {
         // Packet loss when input.len() is zero
         let ptr = match input.len() {
             0 => std::ptr::null(),
@@ -132,7 +150,56 @@ impl Decoder {
                 data_len,
                 output.as_mut_ptr(),
                 samples_len,
-                fec as c_int,
+                0,
+            )
+        };
+
+        if status < 0 {
+            return Err(Error::from_i32(status));
+        }
+        Ok(status as usize)
+    }
+}
+
+pub struct Encoder {
+    encoder: Vec<u8>,
+    is_stereo: bool,
+}
+
+impl Encoder {
+    pub fn new(is_stereo: bool, is_voip: bool) -> Result<Self, Error> {
+        let channels = match is_stereo {
+            true => Channels::Stereo,
+            false => Channels::Mono,
+        };
+        let encoder_size = unsafe { opus_encoder_get_size(channels) };
+        let mut encoder = vec![0; encoder_size as usize];
+
+        let mode = match is_voip {
+            true => EncodingApplication::Voip,
+            false => EncodingApplication::Audio,
+        };
+
+        let status = unsafe { opus_encoder_init(encoder.as_mut_ptr(), 48000, channels, mode) };
+        if status != Error::Ok as i32 {
+            return Err(Error::from_i32(status));
+        }
+        Ok(Encoder { encoder, is_stereo })
+    }
+
+    pub fn encode_float(&mut self, input: &[f32], output: &mut [u8]) -> Result<usize, Error> {
+        if (input.len() != 480) && (input.len() != 960) {
+            return Err(Error::InputSize);
+        }
+        let samples = input.as_ptr();
+
+        let status = unsafe {
+            opus_encode_float(
+                self.encoder.as_mut_ptr(),
+                samples,
+                input.len() as c_int,
+                output.as_mut_ptr(),
+                output.len() as c_int,
             )
         };
 
@@ -482,7 +549,6 @@ impl OpusData {
                 match decoder.decode_float(
                     &self.packet_data[packet_data_postion..next_packet_data_position],
                     &mut stereo_data,
-                    false,
                 ) {
                     Ok(frames_decoded) => {
                         stereo.extend_from_slice(&stereo_data[..frames_decoded * 2]);
