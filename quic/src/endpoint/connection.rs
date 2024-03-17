@@ -633,13 +633,13 @@ impl Connection {
                             self.main_recv.data = Some(recv_data);
                             Ok(StreamResult::Nothing)
                         } else {
-                            Err(Error::InvalidState)
+                            Err(Error::InvalidStreamState(10))
                         }
                     } else {
                         Ok(StreamResult::MainStreamFinished)
                     }
                 } else {
-                    Err(Error::InvalidState)
+                    Err(Error::InvalidStreamState(11))
                 }
             } else if next_readable_stream == BACKGROUND_STREAM_ID {
                 if let Some(mut recv_data) = self.bkgd_recv.data.take() {
@@ -659,18 +659,18 @@ impl Connection {
                             self.bkgd_recv.data = Some(recv_data);
                             Ok(StreamResult::Nothing)
                         } else {
-                            Err(Error::InvalidState)
+                            Err(Error::InvalidStreamState(12))
                         }
                     } else {
                         Ok(StreamResult::BkgdStreamFinished)
                     }
                 } else {
-                    Err(Error::InvalidState)
+                    Err(Error::InvalidStreamState(13))
                 }
             } else if let Some(recv_data) = self.rt_recv.data.take() {
                 self.stream_process_realtime(next_readable_stream, recv_data)
             } else {
-                Err(Error::InvalidState)
+                Err(Error::InvalidStreamState(14))
             }
         } else {
             Ok(StreamResult::Nothing)
@@ -685,7 +685,7 @@ impl Connection {
         if next_readable_stream > self.rt_recv.id {
             let stream_id_difference = next_readable_stream - self.rt_recv.id;
             if (stream_id_difference & 0x3) > 0 {
-                return Err(Error::InvalidState);
+                return Err(Error::InvalidStreamState(15));
             }
             //let rt_period = stream_id_difference >> 2;
             for i in (0..stream_id_difference).step_by(4) {
@@ -703,7 +703,7 @@ impl Connection {
             self.rt_recv.captured = 0;
             self.rt_recv.count += stream_id_difference >> 2;
         } else if next_readable_stream != self.rt_recv.id {
-            return Err(Error::InvalidState);
+            return Err(Error::InvalidStreamState(16));
         }
 
         if self.rt_recv.target == 0 {
@@ -727,7 +727,7 @@ impl Connection {
                         } else if self.rt_recv.captured == recv_data.len() {
                             recv_data.resize(self.rt_recv.captured + 65536, 0);
                         } else {
-                            return Err(Error::InvalidState);
+                            return Err(Error::InvalidStreamState(17));
                         }
                     }
                     Err(Error::Done) => {
@@ -755,7 +755,7 @@ impl Connection {
                     self.rt_recv.data = Some(recv_data);
                     Ok(StreamResult::Nothing)
                 } else {
-                    Err(Error::InvalidState)
+                    Err(Error::InvalidStreamState(18))
                 }
             } else if self.rt_recv.captured == self.rt_recv.target {
                 self.rt_recv.target = 0;
@@ -771,7 +771,7 @@ impl Connection {
                 self.rt_recv.count += 1;
                 Err(Error::Done)
             } else {
-                Err(Error::InvalidState)
+                Err(Error::InvalidStreamState(19))
             }
         }
     }
