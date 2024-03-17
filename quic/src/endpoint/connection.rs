@@ -186,7 +186,7 @@ impl Connection {
             config.set_initial_max_streams_bidi(0);
         }
 
-        config.set_initial_max_streams_uni(100); // Based on 1 second of 10ms Real-time Streams
+        config.set_initial_max_streams_uni(500); // Based on 1 second of 10ms Real-time Streams
 
         config.set_max_idle_timeout(idle_timeout_in_ms);
 
