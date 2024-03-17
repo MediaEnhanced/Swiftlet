@@ -139,6 +139,7 @@ struct RenderCallbackData {
     closure_ptr: *mut c_void,
     is_capture: bool,
     sync_tx_ptr: *const c_void,
+    audio_unit: *const OpaqueStructure,
 }
 
 #[repr(u32)]
@@ -246,8 +247,17 @@ extern "C" {
     fn AudioOutputUnitStart(audio_unit: *const OpaqueStructure) -> c_int;
     fn AudioOutputUnitStop(audio_unit: *const OpaqueStructure) -> c_int;
 
+    fn AudioUnitRender(
+        audio_unit: *const OpaqueStructure,
+        io_action_flags: *mut u32,
+        in_time_stamp: *const AudioTimeStamp,
+        in_output_bus_number: u32,
+        in_number_frames: u32,
+        io_data: *mut AudioBufferList,
+    ) -> c_int;
+
     // fn AudioUnitGetPropertyInfo() -> c_int;
-    // fn AudioUnitRender() -> c_int;
+    //
 }
 
 /// CoreAudio Error
@@ -860,6 +870,7 @@ impl Device {
             closure_ptr: ptr::addr_of_mut!(closure) as *mut c_void,
             is_capture: self.is_capture,
             sync_tx_ptr: ptr::addr_of!(sync_tx) as *const c_void,
+            audio_unit: ptr::null(),
         };
 
         // let errnum = unsafe {
@@ -931,6 +942,176 @@ impl Device {
                 println!("Last Render Error: {}", data);
                 Err(Error::Test)
             }
+            CallbackStop::Errnum(num) => {
+                println!("Errornum: {}", num);
+                Err(Error::Test)
+            }
+        }
+    }
+
+    pub(super) fn run_input_callback_loop(
+        &self,
+        channels: u32,
+        mut closure: &mut InputClosure,
+    ) -> Result<(), Error> {
+        // let mut data_size = size_of::<AudioStreamBasicDescription>() as u32;
+        // let stream_data_result = AudioStreamBasicDescription::new_blank();
+
+        // let errnum = unsafe {
+        //     AudioUnitGetProperty(
+        //         self.audio_unit,
+        //         AudioUnitPropertyId::StreamFormat as u32,
+        //         AudioUnitScope::Output as u32,
+        //         1,
+        //         ptr::addr_of!(stream_data_result) as *mut i8,
+        //         &mut data_size,
+        //     )
+        // };
+        // if errnum != 0 {
+        //     return Err(Error::from_i32(errnum));
+        // }
+
+        // println!(
+        //     "Set Channel Count: {}",
+        //     stream_data_result.channels_per_frame
+        // );
+
+        let mut stream_data = self.get_stream_description()?;
+        if stream_data.format_id != AudioFormatId::LinearPcm.get_u32() {
+            return Err(Error::Test);
+        }
+        if !check_format_flag(stream_data.format_flags, AudioFormatFlags::IsFloat) {
+            return Err(Error::Test);
+        }
+        if !check_format_flag(stream_data.format_flags, AudioFormatFlags::IsPacked) {
+            return Err(Error::Test);
+        }
+        if check_format_flag(stream_data.format_flags, AudioFormatFlags::IsNonInterleaved) {
+            return Err(Error::Test);
+        }
+
+        if stream_data.channels_per_frame != channels {
+            println!("Original Channel Count: {}", stream_data.channels_per_frame);
+            stream_data.channels_per_frame = channels;
+            stream_data.bytes_per_frame = channels * 4; //stream_data.bits_per_channel * 8;
+            stream_data.bytes_per_packet =
+                stream_data.frames_per_packet * stream_data.bytes_per_frame;
+        }
+
+        let errnum = unsafe {
+            AudioUnitSetProperty(
+                self.audio_unit,
+                AudioUnitPropertyId::StreamFormat as u32,
+                AudioUnitScope::Output as u32,
+                1,
+                ptr::addr_of!(stream_data) as *const i8,
+                size_of::<AudioStreamBasicDescription>() as u32,
+            )
+        };
+        if errnum != 0 {
+            return Err(Error::from_i32(errnum));
+        }
+
+        let mut data_size = size_of::<AudioStreamBasicDescription>() as u32;
+        let stream_data_result = AudioStreamBasicDescription::new_blank();
+
+        let errnum = unsafe {
+            AudioUnitGetProperty(
+                self.audio_unit,
+                AudioUnitPropertyId::StreamFormat as u32,
+                AudioUnitScope::Output as u32,
+                1,
+                ptr::addr_of!(stream_data_result) as *mut i8,
+                &mut data_size,
+            )
+        };
+        if errnum != 0 {
+            return Err(Error::from_i32(errnum));
+        }
+
+        println!(
+            "Set Channel Count: {}",
+            stream_data_result.channels_per_frame
+        );
+
+        let (sync_tx, sync_rx) = std::sync::mpsc::sync_channel::<CallbackStop>(1);
+
+        let mut callback_data = RenderCallbackData {
+            closure_ptr: ptr::addr_of_mut!(closure) as *mut c_void,
+            is_capture: self.is_capture,
+            sync_tx_ptr: ptr::addr_of!(sync_tx) as *const c_void,
+            audio_unit: self.audio_unit,
+        };
+
+        let callback_info = AudioUnitRenderCallback {
+            function: capture_callback,
+            data: &mut callback_data,
+        };
+
+        let errnum = unsafe {
+            AudioUnitSetProperty(
+                self.audio_unit,
+                AudioUnitPropertyId::SetInputCallback as u32,
+                AudioUnitScope::Global as u32,
+                0,
+                ptr::addr_of!(callback_info) as *const i8,
+                size_of::<AudioUnitRenderCallback>() as u32,
+            )
+        };
+        if errnum != 0 {
+            return Err(Error::from_i32(errnum));
+        }
+
+        let errnum = unsafe { AudioUnitInitialize(self.audio_unit) };
+        if errnum != 0 {
+            return Err(Error::from_i32(errnum));
+        }
+
+        let errnum = unsafe { AudioOutputUnitStart(self.audio_unit) };
+        if errnum != 0 {
+            return Err(Error::from_i32(errnum));
+        }
+
+        let callback_stop = match sync_rx.recv() {
+            Ok(cs) => cs,
+            Err(_) => return Err(Error::Test),
+        };
+
+        let errnum = unsafe { AudioOutputUnitStop(self.audio_unit) };
+        if errnum != 0 {
+            return Err(Error::from_i32(errnum));
+        }
+
+        match callback_stop {
+            CallbackStop::Normal => Ok(()),
+            CallbackStop::UnexpectedBufferListNum(num) => {
+                println!("Unexpected Buffer: {}", num);
+                Err(Error::Test)
+            }
+            CallbackStop::LastRenderError => {
+                let mut data_size = size_of::<i32>() as u32;
+                let data = Error::Ok as i32;
+                let errnum = unsafe {
+                    AudioUnitGetProperty(
+                        self.audio_unit,
+                        AudioUnitPropertyId::LastRenderError as u32,
+                        AudioUnitScope::Global as u32,
+                        0,
+                        ptr::addr_of!(data) as *mut i8,
+                        &mut data_size,
+                    )
+                };
+                if errnum != 0 {
+                    return Err(Error::from_i32(errnum));
+                }
+
+                println!("Last Render Error: {}", data);
+                Err(Error::Test)
+            }
+            CallbackStop::Errnum(num) => {
+                println!("Errornum: {}", num);
+                Err(Error::Test)
+            }
         }
     }
 }
@@ -948,6 +1129,7 @@ enum CallbackStop {
     Normal,
     UnexpectedBufferListNum(u32),
     LastRenderError,
+    Errnum(i32),
 }
 
 fn sync_send(sync_tx_ptr: *const c_void, callback_stop: CallbackStop) {
@@ -961,6 +1143,7 @@ fn sync_send(sync_tx_ptr: *const c_void, callback_stop: CallbackStop) {
 }
 
 type OutputClosure = dyn FnMut(&mut [f32]) -> bool;
+type InputClosure = dyn FnMut(&[f32]) -> bool;
 
 extern "C" fn render_callback(
     callback_data: *mut RenderCallbackData,
@@ -1021,6 +1204,91 @@ extern "C" fn render_callback(
                             CallbackStop::UnexpectedBufferListNum(buffer_list.num_buffers),
                         );
                     }
+                }
+            }
+        } else {
+            //println!("Got to Else!");
+        }
+
+        Error::Ok as c_int
+    } else {
+        panic!("Callback data was not set properly!");
+    }
+}
+
+extern "C" fn capture_callback(
+    callback_data: *mut RenderCallbackData,
+    action_flags_ptr: *mut u32,
+    time_stamp: *const AudioTimeStamp,
+    bus_number: u32,
+    frame_count: u32,
+    buffer_list: *mut AudioBufferList,
+) -> c_int {
+    //println!("Render Callback Frames: {}", frame_count);
+
+    if let Some(cb_data) = unsafe { callback_data.as_mut() } {
+        // if let Some(action_flags) = unsafe { action_flags_ptr.as_mut() } {
+        //     println!("Action Flags: {}", action_flags);
+        //     if check_action_flag(*action_flags, AudioUnitActionFlags::OutputIsSilence) {
+        //         return Error::Ok as c_int;
+        //         //*action_flags = 0;
+        //     } else if check_action_flag(*action_flags, AudioUnitActionFlags::PostRenderError) {
+        //         sync_send(cb_data.sync_tx_ptr, CallbackStop::LastRenderError);
+        //         return Error::Ok as c_int;
+        //     }
+        // } else {
+        //     panic!("Callback not working as expected")
+        // }
+
+        if cb_data.is_capture {
+            if let Some(cb_fn) = unsafe { cb_data.closure_ptr.as_mut() } {
+                let closure: &mut &mut InputClosure = unsafe { std::mem::transmute(cb_fn) };
+                //println!("Action Flags: {}, Frame_count: {}", 0, frame_count);
+
+                let mut buffer_vec = vec![0; 480 * 4];
+                let buffer_vec_ptr = buffer_vec.as_mut_ptr();
+                //Recreate Audio Buffer List each time for now:
+                let mut local_buffer_list = AudioBufferList {
+                    num_buffers: 1,
+                    buffers: [AudioBuffer {
+                        num_channels: 1,
+                        data_byte_size: 480 * 4,
+                        data: buffer_vec_ptr,
+                    }],
+                };
+
+                let errnum = unsafe {
+                    AudioUnitRender(
+                        cb_data.audio_unit,
+                        action_flags_ptr,
+                        time_stamp,
+                        bus_number,
+                        frame_count,
+                        &mut local_buffer_list,
+                    )
+                };
+
+                if errnum == 0 {
+                    // println!(
+                    //     "Channels: {}, Byte Size: {}",
+                    //     local_buffer_list.buffers[0].num_channels,
+                    //     local_buffer_list.buffers[0].data_byte_size
+                    // );
+                    //println!("Buffers: {}", local_buffer_list.num_buffers);
+                    let local_buffer_list_data_ptr = local_buffer_list.buffers[0].data;
+                    if buffer_vec_ptr != local_buffer_list_data_ptr {
+                        println!("Don't need a vector!");
+                    }
+
+                    let float_data = unsafe {
+                        std::slice::from_raw_parts(local_buffer_list_data_ptr as *const f32, 480)
+                    };
+
+                    if closure(float_data) {
+                        sync_send(cb_data.sync_tx_ptr, CallbackStop::Normal);
+                    }
+                } else {
+                    sync_send(cb_data.sync_tx_ptr, CallbackStop::Errnum(errnum));
                 }
             }
         } else {

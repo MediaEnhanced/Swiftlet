@@ -22,6 +22,8 @@
 
 use std::sync::mpsc::{Receiver, SyncSender, TryRecvError};
 
+const CALLBACK_MAX_COUNT: u64 = 500; // 500 10ms sections (480 frames @ 48kHz) = 5 seconds of callback runtime
+
 fn main() -> std::io::Result<()> {
     println!("Audio Loopback Starting!");
     let (sync_tx, sync_rx) = std::sync::mpsc::sync_channel(4);
@@ -30,9 +32,8 @@ fn main() -> std::io::Result<()> {
     let input = Input::new(sync_tx);
 
     match swiftlet_audio::run_input_output(480, 2, 1, output, input) {
-        Ok(true) => println!("Played the whole song!"),
-        Ok(false) => println!("Playback loop ended sooner than expected!"),
-        Err(e) => println!("Playback Error: {:?}", e),
+        Ok(_) => println!("Finished Loopback!"),
+        Err(e) => println!("Audio Error: {:?}", e),
     }
 
     Ok(())
@@ -75,7 +76,7 @@ impl swiftlet_audio::OutputCallback for Output {
             }
         }
 
-        self.callback_count >= 500
+        self.callback_count >= CALLBACK_MAX_COUNT
     }
 }
 
@@ -115,6 +116,6 @@ impl swiftlet_audio::InputCallback for Input {
             }
         }
 
-        self.callback_count >= 500
+        self.callback_count >= CALLBACK_MAX_COUNT
     }
 }

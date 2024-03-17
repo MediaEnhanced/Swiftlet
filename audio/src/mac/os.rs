@@ -126,7 +126,11 @@ pub(super) struct AudioInput<'a> {
 }
 
 impl<'a> AudioInput<'a> {
-    pub(super) fn new(audio_owner: &'a AudioOwner, desired_period: u32) -> Option<Self> {
+    pub(super) fn new(
+        audio_owner: &'a AudioOwner,
+        desired_period: u32,
+        channels: u32,
+    ) -> Option<Self> {
         //Open default playback device
         let device = match Device::new_from_default_capture(48000, desired_period) {
             Ok(o) => o,
@@ -135,33 +139,6 @@ impl<'a> AudioInput<'a> {
                 return None;
             }
         };
-
-        let channels = match device.get_num_channels() {
-            Ok(c) => c,
-            Err(e) => {
-                handle_coreaudio_error(e);
-                return None;
-            }
-        };
-
-        // if let Err(e) = device.print_stream_format() {
-        //     handle_coreaudio_error(e);
-        //     return None;
-        // }
-
-        // if let Err(e) = device.print_device_period() {
-        //     handle_coreaudio_error(e);
-        //     return None;
-        // }
-
-        // let mut callback_count = 0;
-        // let mut f = move |samples: &mut [f32]| output_callback(samples, &mut callback_count);
-        // if let Err(e) = device.run_output_callback_loop(&mut f) {
-        //     handle_coreaudio_error(e);
-        //     return None;
-        // }
-
-        // println!("Got Here!");
 
         Some(AudioInput {
             owner: audio_owner,
@@ -175,8 +152,13 @@ impl<'a> AudioInput<'a> {
         self.channels
     }
 
-    pub(super) fn run_callback_loop(&self, callback: impl crate::InputCallback) -> bool {
-        //self.device.run_input_callback_loop(callback).is_ok()
-        true
+    pub(super) fn run_callback_loop(
+        &self,
+        mut callback: impl crate::InputCallback + 'static,
+    ) -> bool {
+        let mut closure = move |samples: &[f32]| callback.input_callback(samples);
+        self.device
+            .run_input_callback_loop(self.channels, &mut closure)
+            .is_ok()
     }
 }

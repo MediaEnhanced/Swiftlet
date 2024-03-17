@@ -75,7 +75,7 @@ pub fn run_input_output(
     input_expected_channels: u32,
     output_callback: impl OutputCallback + Send + 'static,
     input_callback: impl InputCallback + Send + 'static,
-) -> Result<bool, Error> {
+) -> Result<(), Error> {
     let owner = match AudioOwner::new() {
         Some(d) => d,
         None => return Err(Error::OwnerCreation),
@@ -100,7 +100,7 @@ pub fn run_input_output(
         });
     });
 
-    Ok(true)
+    Ok(())
 }
 
 fn output_thread(
