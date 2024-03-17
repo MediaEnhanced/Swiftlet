@@ -23,13 +23,13 @@
 mod wasapi;
 
 pub(super) struct AudioOwner {
-    enumerator: wasapi::Enumerator,
+    owner: wasapi::ComOwner,
 }
 
 impl AudioOwner {
     pub(super) fn new() -> Option<Self> {
-        match wasapi::Enumerator::new() {
-            Ok(enumerator) => Some(AudioOwner { enumerator }),
+        match wasapi::ComOwner::new() {
+            Ok(owner) => Some(AudioOwner { owner }),
             Err(_e) => None,
         }
     }
@@ -37,15 +37,12 @@ impl AudioOwner {
 
 pub(super) struct AudioOutput<'a> {
     owner: &'a AudioOwner,
-    device: wasapi::Device,
+    device: wasapi::OutputDevice,
 }
 
 impl<'a> AudioOutput<'a> {
     pub(super) fn new(audio_owner: &'a AudioOwner, desired_period: u32) -> Option<Self> {
-        let device = match wasapi::Device::new_from_default_playback(
-            &audio_owner.enumerator,
-            desired_period,
-        ) {
+        let device = match wasapi::OutputDevice::new(desired_period) {
             Some(d) => d,
             None => return None,
         };
@@ -69,17 +66,19 @@ impl<'a> AudioOutput<'a> {
 
 pub(super) struct AudioInput<'a> {
     owner: &'a AudioOwner,
-    device: wasapi::Device,
+    device: wasapi::InputDevice,
 }
 
 impl<'a> AudioInput<'a> {
-    pub(super) fn new(audio_owner: &'a AudioOwner, desired_period: u32) -> Option<Self> {
-        let device =
-            match wasapi::Device::new_from_default_capture(&audio_owner.enumerator, desired_period)
-            {
-                Some(d) => d,
-                None => return None,
-            };
+    pub(super) fn new(
+        audio_owner: &'a AudioOwner,
+        desired_period: u32,
+        channels: u32,
+    ) -> Option<Self> {
+        let device = match wasapi::InputDevice::new(desired_period, channels) {
+            Some(d) => d,
+            None => return None,
+        };
 
         let audio_input = AudioInput {
             owner: audio_owner,

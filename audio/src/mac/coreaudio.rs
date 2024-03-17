@@ -818,7 +818,7 @@ impl Device {
 
     pub(super) fn run_output_callback_loop(
         &self,
-        mut callback: impl crate::OutputCallback,
+        mut closure: &mut OutputClosure,
     ) -> Result<(), Error> {
         // Double check the canonical default
         let stream_data = self.get_stream_description()?;
@@ -851,8 +851,13 @@ impl Device {
 
         let (sync_tx, sync_rx) = std::sync::mpsc::sync_channel::<CallbackStop>(1);
 
+        //println!("Got Here!");
+        //let mut closure = move |samples: &mut [f32]| callback.output_callback(samples);
+        //let mut cp = (&mut closure) as &mut OutputClosure;
+        //let s = ptr::addr_of_mut!(&mut dyn callback);
+
         let mut callback_data = RenderCallbackData {
-            closure_ptr: ptr::addr_of_mut!(callback) as *mut c_void,
+            closure_ptr: ptr::addr_of_mut!(closure) as *mut c_void,
             is_capture: self.is_capture,
             sync_tx_ptr: ptr::addr_of!(sync_tx) as *const c_void,
         };
@@ -955,6 +960,8 @@ fn sync_send(sync_tx_ptr: *const c_void, callback_stop: CallbackStop) {
     }
 }
 
+type OutputClosure = dyn FnMut(&mut [f32]) -> bool;
+
 extern "C" fn render_callback(
     callback_data: *mut RenderCallbackData,
     action_flags_ptr: *mut u32,
@@ -981,8 +988,7 @@ extern "C" fn render_callback(
 
         if !cb_data.is_capture {
             if let Some(cb_fn) = unsafe { cb_data.closure_ptr.as_mut() } {
-                let mut closure: &mut impl crate::OutputCallback =
-                    unsafe { std::mem::transmute(cb_fn) };
+                let closure: &mut &mut OutputClosure = unsafe { std::mem::transmute(cb_fn) };
 
                 if let Some(buffer_list) = unsafe { buffer_list.as_mut() } {
                     // println!("Buffers Address: {:?}", buffer_list.buffers);
@@ -1006,7 +1012,7 @@ extern "C" fn render_callback(
                             )
                         };
 
-                        if closure.output_callback(float_data) {
+                        if closure(float_data) {
                             sync_send(cb_data.sync_tx_ptr, CallbackStop::Normal);
                         }
                     } else {

@@ -59,14 +59,57 @@ pub enum Error {
 pub fn run_output(
     desired_period: u32,
     expected_channels: u32,
-    callback: impl OutputCallback,
+    callback: impl OutputCallback + 'static,
 ) -> Result<bool, Error> {
     let owner = match AudioOwner::new() {
         Some(d) => d,
         None => return Err(Error::OwnerCreation),
     };
 
-    let output = match AudioOutput::new(&owner, desired_period) {
+    output_thread(&owner, desired_period, expected_channels, callback)
+}
+
+pub fn run_input_output(
+    desired_period: u32,
+    output_expected_channels: u32,
+    input_expected_channels: u32,
+    output_callback: impl OutputCallback + Send + 'static,
+    input_callback: impl InputCallback + Send + 'static,
+) -> Result<bool, Error> {
+    let owner = match AudioOwner::new() {
+        Some(d) => d,
+        None => return Err(Error::OwnerCreation),
+    };
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            output_thread(
+                &owner,
+                desired_period,
+                output_expected_channels,
+                output_callback,
+            )
+        });
+        scope.spawn(|| {
+            input_thread(
+                &owner,
+                desired_period,
+                input_expected_channels,
+                input_callback,
+            )
+        });
+    });
+
+    Ok(true)
+}
+
+fn output_thread(
+    owner: &AudioOwner,
+    desired_period: u32,
+    expected_channels: u32,
+    callback: impl OutputCallback + 'static,
+) -> Result<bool, Error> {
+    let output = match AudioOutput::new(owner, desired_period) {
         Some(d) => d,
         None => return Err(Error::OutputCreation),
     };
@@ -78,41 +121,20 @@ pub fn run_output(
     Ok(output.run_callback_loop(callback))
 }
 
-pub fn run_input_output(
+fn input_thread(
+    owner: &AudioOwner,
     desired_period: u32,
-    output_expected_channels: u32,
-    input_expected_channels: u32,
-    _output_callback: impl OutputCallback + Send,
-    _input_callback: impl InputCallback + Send,
+    expected_channels: u32,
+    callback: impl InputCallback + 'static,
 ) -> Result<bool, Error> {
-    let owner = match AudioOwner::new() {
-        Some(d) => d,
-        None => return Err(Error::OwnerCreation),
-    };
-
-    let output = match AudioOutput::new(&owner, desired_period) {
-        Some(o) => o,
-        None => return Err(Error::OutputCreation),
-    };
-
-    if output.get_channels() != output_expected_channels {
-        return Err(Error::ChannelMismatch);
-    }
-
-    let input = match AudioInput::new(&owner, desired_period) {
+    let input = match AudioInput::new(owner, desired_period, expected_channels) {
         Some(i) => i,
         None => return Err(Error::InputCreation),
     };
 
-    if input.get_channels() != input_expected_channels {
+    if input.get_channels() != expected_channels {
         return Err(Error::ChannelMismatch);
     }
 
-    // std::thread::scope(|s| {
-    //     s.spawn(|| output.run_callback_loop(output_callback));
-    //     s.spawn(|| input.run_callback_loop(input_callback));
-    //     println!("hello from the main thread");
-    // });
-
-    Ok(true)
+    Ok(input.run_callback_loop(callback))
 }

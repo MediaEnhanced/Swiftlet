@@ -75,8 +75,8 @@ bench = false
 required-features = ["opus"]
 
 [[example]]
-name = "sine"
-path = "examples/sine.rs"
+name = "loopback"
+path = "examples/loopback.rs"
 crate-type = ["bin"]
 doc = false
 test = false

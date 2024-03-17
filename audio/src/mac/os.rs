@@ -106,101 +106,77 @@ impl<'a> AudioOutput<'a> {
         self.channels
     }
 
-    pub(super) fn run_callback_loop(&self, callback: impl crate::OutputCallback) -> bool {
-        self.device.run_output_callback_loop(callback).is_ok()
+    pub(super) fn run_callback_loop(
+        &self,
+        mut callback: impl crate::OutputCallback + 'static,
+    ) -> bool {
+        let mut closure = move |samples: &mut [f32]| callback.output_callback(samples);
+        self.device.run_output_callback_loop(&mut closure).is_ok()
     }
+}
 
-    // Returns true if started
-    pub(super) fn start(&self) -> bool {
-        // Need to do an initial read to clear stuff based on documentation
-        //self.device.start().is_ok()
-        false
-    }
+pub(super) struct AudioInput<'a> {
+    owner: &'a AudioOwner,
+    device: Device,
+    frame_period: u32,
+    //buffer_size: i64,
+    channels: u32,
+    //channel_mask: u32,
+    //volume_control: Audio::ISimpleAudioVolume,
+}
 
-    pub(super) fn stop(&self) -> bool {
-        //self.device.stop().is_ok()
-        false
-    }
+impl<'a> AudioInput<'a> {
+    pub(super) fn new(audio_owner: &'a AudioOwner, desired_period: u32) -> Option<Self> {
+        //Open default playback device
+        let device = match Device::new_from_default_capture(48000, desired_period) {
+            Ok(o) => o,
+            Err(e) => {
+                handle_coreaudio_error(e);
+                return None;
+            }
+        };
 
-    pub(super) fn wait_for_next_output(
-        &mut self,
-        millisecond_timeout: u32,
-    ) -> Result<Option<&mut [f32]>, Error> {
-        // match self.device.wait_until_ready(millisecond_timeout as i32) {
-        //     Ok(true) => {
-        //         // Process Frames
-        //         let available_frames = self.device.get_available_frames();
+        let channels = match device.get_num_channels() {
+            Ok(c) => c,
+            Err(e) => {
+                handle_coreaudio_error(e);
+                return None;
+            }
+        };
 
-        //         //println!("Frames Available: {}", available_frames);
-        //         if available_frames >= (self.frame_period as i64) {
-        //             let float_p = self.data_vec.as_mut_ptr() as *mut f32;
-        //             let buffer_len = (self.frame_period * self.channels) as usize;
-        //             let buffer = unsafe { std::slice::from_raw_parts_mut(float_p, buffer_len) };
-        //             Ok(Some(buffer))
-        //         } else {
-        //             Ok(None)
-        //         }
-        //     }
-        //     Ok(false) => {
-        //         // Timeout
-        //         Ok(None)
-        //     }
-        //     Err(e) => {
-        //         //handle_alsa_error(e);
-        //         Err(Error::Generic)
-        //     }
+        // if let Err(e) = device.print_stream_format() {
+        //     handle_coreaudio_error(e);
+        //     return None;
         // }
 
-        Ok(None)
-    }
-
-    pub(super) fn release_output(&self) -> bool {
-        // match self
-        //     .device
-        //     .write_interleaved_float_frames(&self.data_vec, self.frame_period as u64)
-        // {
-        //     Ok(frames) => {
-        //         //println!("Frames Written: {}", frames);
-        //         if frames == self.frame_period as u64 {
-        //             true
-        //         } else {
-        //             false
-        //         }
-        //     }
-        //     Err(e) => {
-        //         //handle_alsa_error(e);
-        //         false
-        //     }
+        // if let Err(e) = device.print_device_period() {
+        //     handle_coreaudio_error(e);
+        //     return None;
         // }
 
-        false
-    }
-}
+        // let mut callback_count = 0;
+        // let mut f = move |samples: &mut [f32]| output_callback(samples, &mut callback_count);
+        // if let Err(e) = device.run_output_callback_loop(&mut f) {
+        //     handle_coreaudio_error(e);
+        //     return None;
+        // }
 
-fn output_callback(samples: &mut [f32], callback_count: &mut u64) -> bool {
-    *callback_count += 1;
+        // println!("Got Here!");
 
-    let samples_len = samples.len();
-    println!("{}, Samples: {}", *callback_count, samples_len);
-
-    // if samples_len != 960 {
-    //     println!("{}, Samples: {}", *callback_count, samples_len);
-    //     if samples_len == 0 {
-    //         return true;
-    //     }
-    // }
-
-    if *callback_count >= 20 {
-        return true;
+        Some(AudioInput {
+            owner: audio_owner,
+            device,
+            frame_period: desired_period,
+            channels,
+        })
     }
 
-    false
-}
+    pub(super) fn get_channels(&self) -> u32 {
+        self.channels
+    }
 
-pub(super) struct AudioInput {
-    //device: PCM,
-}
-
-impl AudioInput {
-    //pub(super) fn new() -> Self {}
+    pub(super) fn run_callback_loop(&self, callback: impl crate::InputCallback) -> bool {
+        //self.device.run_input_callback_loop(callback).is_ok()
+        true
+    }
 }
