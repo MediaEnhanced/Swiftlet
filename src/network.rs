@@ -35,10 +35,12 @@ use std::time::Duration;
 
 // Use Inter-Thread Communication Definitions
 #[cfg(feature = "client")]
-use crate::communication::{ClientCommand, NetworkAudioOutPackets, NetworkAudioThreadChannels};
 use crate::communication::{
-    NetworkAudioInPackets, NetworkCommand, NetworkStateConnection, NetworkStateMessage,
-    NetworkTerminalThreadChannels, ServerCommand, TryRecvError,
+    ClientCommand, NetworkAudioInPackets, NetworkAudioOutPackets, NetworkAudioThreadChannels,
+};
+use crate::communication::{
+    NetworkCommand, NetworkStateConnection, NetworkStateMessage, NetworkTerminalThreadChannels,
+    ServerCommand, TryRecvError,
 };
 
 // Use quic sub-library for internet communications
