@@ -135,7 +135,7 @@ pub enum Error {
     // Error receiving too much data
     //RecvTooMuchData,
     /// Error having a connection process the received data
-    ConnectionRecv,
+    ConnectionRecv(connection::Error),
     /// Cannot find connection from Connection ID
     ConnectionNotFound,
     /// Error finishing the connection establishment process and stream creation
@@ -528,6 +528,14 @@ impl Endpoint {
                 return Err(Error::Randomness);
             }
 
+            let writer_opt = match self.connections.len() {
+                0 => match std::fs::File::create("clientKey.log") {
+                    Ok(file) => Some(Box::new(file)),
+                    Err(_) => None,
+                },
+                _ => None,
+            };
+
             match Connection::new(
                 self.next_connection_id,
                 peer_addr,
@@ -535,7 +543,7 @@ impl Endpoint {
                 self.local_addr,
                 &scid_data,
                 &mut self.connection_config,
-                None,
+                writer_opt,
             ) {
                 Ok(conn_mgr) => {
                     self.next_connection_id += 1;
@@ -818,7 +826,10 @@ impl Endpoint {
     pub(super) fn recv(&mut self) -> Result<RecvEvent, Error> {
         // Gotta Process Coallesced Stream Packets Here!
         if let Some((connection_id, verified_index)) = self.stream_process_index {
-            return self.stream_process(connection_id, verified_index);
+            let evt = self.stream_process(connection_id, verified_index)?;
+            if self.stream_process_index.is_some() {
+                return Ok(evt);
+            }
         }
 
         match self.udp.get_next_recv_data() {
@@ -887,8 +898,8 @@ impl Endpoint {
                                     }
                                     res
                                 }
-                                Err(_) => {
-                                    return Err(Error::ConnectionRecv);
+                                Err(e) => {
+                                    return Err(Error::ConnectionRecv(e));
                                 }
                             };
                             match recv_res {

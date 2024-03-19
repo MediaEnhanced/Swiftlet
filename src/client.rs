@@ -31,9 +31,9 @@ pub(crate) mod audio;
 use swiftlet_audio::opus::OpusData;
 
 use crate::communication::{
-    ClientCommand, NetworkCommand, NetworkStateConnection, NetworkStateMessage,
+    ClientCommand, NetworkCommand, NetworkStateConnection, NetworkStateMessage, PopError,
     TerminalAudioInCommands, TerminalAudioOutCommands, TerminalAudioThreadChannels,
-    TerminalNetworkThreadChannels, TryRecvError,
+    TerminalNetworkThreadChannels,
 };
 
 use crossterm::event::{Event, KeyCode, KeyEventKind};
@@ -281,7 +281,7 @@ impl ClientTerminal {
     pub(crate) fn new(
         server_address: SocketAddr,
         network_channels: TerminalNetworkThreadChannels,
-        audio_channels: TerminalAudioThreadChannels,
+        mut audio_channels: TerminalAudioThreadChannels,
     ) -> std::io::Result<Self> {
         // Load in Audio Files
         for (ind, f) in AUDIO_FILES.iter().enumerate() {
@@ -289,7 +289,7 @@ impl ClientTerminal {
                 if let Some(opus_data) = OpusData::create_from_ogg_file(&bytes, (ind as u64) + 1) {
                     let _ = audio_channels
                         .output_cmd_send
-                        .send(TerminalAudioOutCommands::LoadOpus(opus_data));
+                        .push(TerminalAudioOutCommands::LoadOpus(opus_data));
                 }
             }
         }
@@ -311,12 +311,12 @@ impl ClientTerminal {
                 let _ = self
                     .audio_channels
                     .output_cmd_send
-                    .send(TerminalAudioOutCommands::PlayOpus(1));
+                    .push(TerminalAudioOutCommands::PlayOpus(1));
 
                 let _ = self
                     .audio_channels
                     .input_cmd_send
-                    .send(TerminalAudioInCommands::Start);
+                    .push(TerminalAudioInCommands::Start);
             }
         } else if self.is_in_vc {
             self.is_in_vc = false;
@@ -324,12 +324,12 @@ impl ClientTerminal {
             let _ = self
                 .audio_channels
                 .input_cmd_send
-                .send(TerminalAudioInCommands::Pause);
+                .push(TerminalAudioInCommands::Pause);
 
             let _ = self
                 .audio_channels
                 .output_cmd_send
-                .send(TerminalAudioOutCommands::PlayOpus(2));
+                .push(TerminalAudioOutCommands::PlayOpus(2));
         }
     }
 
@@ -365,11 +365,11 @@ impl ClientTerminal {
                                     let _ = self
                                         .audio_channels
                                         .output_cmd_send
-                                        .send(TerminalAudioOutCommands::PlayOpus(3));
+                                        .push(TerminalAudioOutCommands::PlayOpus(3));
                                 } else if uc == 'V' {
                                     if let Some(ind) = self.client.my_conn_ind {
                                         let state_change = self.client.connections[ind].state ^ 4;
-                                        let _ = self.network_channels.command_send.send(
+                                        let _ = self.network_channels.command_send.push(
                                             NetworkCommand::Client(ClientCommand::StateChange(
                                                 state_change,
                                             )),
@@ -378,7 +378,7 @@ impl ClientTerminal {
                                 } else if uc == 'L' {
                                     if let Some(ind) = self.client.my_conn_ind {
                                         let state_change = self.client.connections[ind].state ^ 8;
-                                        let _ = self.network_channels.command_send.send(
+                                        let _ = self.network_channels.command_send.push(
                                             NetworkCommand::Client(ClientCommand::StateChange(
                                                 state_change,
                                             )),
@@ -391,7 +391,7 @@ impl ClientTerminal {
                                         if let Some(opus_data) =
                                             OpusData::create_from_ogg_file(&bytes, 45)
                                         {
-                                            let _ = self.network_channels.command_send.send(
+                                            let _ = self.network_channels.command_send.push(
                                                 NetworkCommand::Client(
                                                     ClientCommand::MusicTransfer(opus_data),
                                                 ),
@@ -402,7 +402,7 @@ impl ClientTerminal {
                                 } else if uc == 'S' {
                                     if let Some(ind) = self.client.my_conn_ind {
                                         let state_change = self.client.connections[ind].state ^ 2;
-                                        let _ = self.network_channels.command_send.send(
+                                        let _ = self.network_channels.command_send.push(
                                             NetworkCommand::Client(ClientCommand::StateChange(
                                                 state_change,
                                             )),
@@ -419,8 +419,8 @@ impl ClientTerminal {
             }
 
             loop {
-                match self.network_channels.state_recv.try_recv() {
-                    Err(TryRecvError::Empty) => {
+                match self.network_channels.state_recv.pop() {
+                    Err(PopError::Empty) => {
                         break;
                     }
                     Ok(recv_state_cmd) => {
@@ -456,17 +456,12 @@ impl ClientTerminal {
                         }
                         should_draw = true;
                     }
-                    Err(TryRecvError::Disconnected) => {
-                        //state_common.debug_string.push_str("Network Debug Recv Disconnected!!!\n");
-                        //state_common.debug_lines += 1;
-                        break;
-                    }
                 }
             }
 
             loop {
-                match self.network_channels.debug_recv.try_recv() {
-                    Err(TryRecvError::Empty) => {
+                match self.network_channels.debug_recv.pop() {
+                    Err(PopError::Empty) => {
                         break;
                     }
                     Ok(recv_string) => {
@@ -474,28 +469,18 @@ impl ClientTerminal {
                         self.client.debug_lines += 1;
                         should_draw = true;
                     }
-                    Err(TryRecvError::Disconnected) => {
-                        //state_common.debug_string.push_str("Network Debug Recv Disconnected!!!\n");
-                        //state_common.debug_lines += 1;
-                        break;
-                    }
                 }
             }
 
             loop {
-                match self.audio_channels.debug_recv.try_recv() {
-                    Err(TryRecvError::Empty) => {
+                match self.audio_channels.debug_recv.pop() {
+                    Err(PopError::Empty) => {
                         break;
                     }
                     Ok(recv_string) => {
-                        self.client.debug_string.push_str(recv_string);
+                        self.client.debug_string.push_str(&recv_string);
                         self.client.debug_lines += 1;
                         should_draw = true;
-                    }
-                    Err(TryRecvError::Disconnected) => {
-                        //state_common.debug_string.push_str("Network Debug Recv Disconnected!!!\n");
-                        //state_common.debug_lines += 1;
-                        break;
                     }
                 }
             }
@@ -509,7 +494,7 @@ impl ClientTerminal {
         let _ = self
             .network_channels
             .command_send
-            .send(NetworkCommand::Stop(42));
+            .push(NetworkCommand::Stop(42));
 
         // Cleanup Console Here:
         self.terminal.stop()

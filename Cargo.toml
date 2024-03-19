@@ -35,7 +35,7 @@ client = ["dep:swiftlet_audio"]
 bpaf = { version = "*", features = ["derive"] }
 
 # Thread Sync Requirements:
-crossbeam-channel = "*"
+rtrb = "*"
 
 # Terminal Requirements:
 crossterm = "*"

@@ -40,10 +40,10 @@ const TRANSFER_AUDIO: &str = "audio/transfer.opus";
 mod communication;
 use communication::{
     NetworkCommand, NetworkStateConnection, NetworkStateMessage, TerminalNetworkThreadChannels,
-    TryRecvError,
 };
 
 mod network;
+use rtrb::PopError;
 use swiftlet_quic::endpoint::SocketAddr;
 
 #[cfg(feature = "client")]
@@ -261,7 +261,7 @@ fn console_ui(frame: &mut ratatui::Frame, state: &ConsoleStateCommon, my_state: 
 
 fn run_console_server(
     servername: String,
-    terminal_channels: TerminalNetworkThreadChannels,
+    mut terminal_channels: TerminalNetworkThreadChannels,
 ) -> std::io::Result<()> {
     // Start Console Here:
     crossterm::terminal::enable_raw_mode().unwrap();
@@ -303,18 +303,9 @@ fn run_console_server(
         }
 
         loop {
-            match terminal_channels.state_recv.try_recv() {
-                Err(try_recv_error) => {
-                    match try_recv_error {
-                        TryRecvError::Empty => {
-                            break;
-                        }
-                        TryRecvError::Disconnected => {
-                            //state_common.debug_string.push_str("Network Debug Recv Disconnected!!!\n");
-                            //state_common.debug_lines += 1;
-                            break;
-                        }
-                    }
+            match terminal_channels.state_recv.pop() {
+                Err(PopError::Empty) => {
+                    break;
                 }
                 Ok(recv_state_cmd) => {
                     match recv_state_cmd {
@@ -341,18 +332,9 @@ fn run_console_server(
         }
 
         loop {
-            match terminal_channels.debug_recv.try_recv() {
-                Err(try_recv_error) => {
-                    match try_recv_error {
-                        TryRecvError::Empty => {
-                            break;
-                        }
-                        TryRecvError::Disconnected => {
-                            //state_common.debug_string.push_str("Network Debug Recv Disconnected!!!\n");
-                            //state_common.debug_lines += 1;
-                            break;
-                        }
-                    }
+            match terminal_channels.debug_recv.pop() {
+                Err(PopError::Empty) => {
+                    break;
                 }
                 Ok(recv_string) => {
                     state_common.debug_string.push_str(&recv_string);
@@ -370,7 +352,7 @@ fn run_console_server(
 
     let _ = terminal_channels
         .command_send
-        .send(NetworkCommand::Stop(42));
+        .push(NetworkCommand::Stop(42));
 
     // Cleanup Console Here:
     std::io::stdout().execute(crossterm::terminal::LeaveAlternateScreen)?;

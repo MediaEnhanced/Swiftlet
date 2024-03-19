@@ -177,9 +177,6 @@ impl Connection {
             config.verify_peer(false);
 
             config.set_initial_max_streams_bidi(2); // 1 For Main Communication, 2 and 3 for Unordered Alt Data (like file transfers)
-
-            // Enable the ability to log the secret keys for wireshark debugging
-            config.log_keys();
         } else {
             // Temporary solution for client to verify certificate
             // Maybe not return error immediately here?
@@ -188,6 +185,9 @@ impl Connection {
 
             config.set_initial_max_streams_bidi(0);
         }
+
+        // Enable the ability to log the secret keys for wireshark debugging
+        config.log_keys();
 
         // Malicious Second Chance Add In Future
         config.set_initial_max_streams_uni(100); // Based on 1 second of 10ms Real-time Streams
@@ -258,8 +258,13 @@ impl Connection {
         if server_name.is_some() {
             // Create client connection
 
-            let connection =
+            let mut connection =
                 quiche::connect(server_name, &current_scid, local_addr, peer_addr, config)?;
+
+            if let Some(writer) = writer_opt {
+                // called before recv
+                connection.set_keylog(writer);
+            }
 
             let conn_mgr = Connection {
                 id,

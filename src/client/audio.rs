@@ -21,18 +21,17 @@
 //SOFTWARE.
 
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use crate::communication::{
-    AudioStateMessage, AudioThreadChannels, NetworkAudioInPackets, NetworkAudioOutPackets,
-    Receiver, Sender, TerminalAudioInCommands, TerminalAudioOutCommands, TryRecvError,
-    TrySendError,
+    AudioStateMessage, AudioThreadChannels, Consumer, NetworkAudioInPackets,
+    NetworkAudioOutPackets, PopError, Producer, PushError, TerminalAudioInCommands,
+    TerminalAudioOutCommands,
 };
 
 use swiftlet_audio::opus::{Decoder, Encoder, OpusData};
 
 pub(crate) fn audio_thread(channels: AudioThreadChannels) {
-    let debug_send = channels.debug_send.clone();
-
     let output = Output {
         callback_count: 0,
         playbacks: Vec::new(),
@@ -41,24 +40,24 @@ pub(crate) fn audio_thread(channels: AudioThreadChannels) {
         opus_list: Vec::new(),
         command_recv: channels.output_cmd_recv,
         packet_recv: channels.packet_recv,
-        state_send: channels.state_send.clone(),
-        debug_send: channels.debug_send.clone(),
-    };
-
-    let input = Input {
-        callback_count: 0,
-        is_running: false,
-        encoder: Encoder::new(false, true).unwrap(),
-        data: [0; 4096],
-        data_len: 0,
-        command_recv: channels.input_cmd_recv,
-        packet_send: channels.packet_send,
         state_send: channels.state_send,
         debug_send: channels.debug_send,
     };
 
+    let input = Input {
+        callback_count: 0,
+        last_instant: Instant::now(),
+        avg_duration: Duration::from_millis(0),
+        is_running: false,
+        encoder: Encoder::new(false, true).unwrap(),
+        data: [0; 2048],
+        data_len: 0,
+        command_recv: channels.input_cmd_recv,
+        packet_send: channels.packet_send,
+    };
+
     if swiftlet_audio::run_input_output(480, 2, 1, output, input).is_err() {
-        let _ = debug_send.send("Audio Error");
+        panic!("Audio Error");
     }
 }
 
@@ -68,10 +67,41 @@ struct Output {
     cleanup: Vec<usize>,
     realtimes: Vec<OutputRealtime>,
     opus_list: Vec<OpusData>,
-    command_recv: Receiver<TerminalAudioOutCommands>,
-    packet_recv: Receiver<NetworkAudioOutPackets>,
-    state_send: Sender<AudioStateMessage>,
-    debug_send: Sender<&'static str>,
+    command_recv: Consumer<TerminalAudioOutCommands>,
+    packet_recv: Consumer<NetworkAudioOutPackets>,
+    state_send: Producer<AudioStateMessage>,
+    debug_send: Producer<String>,
+}
+
+impl Output {
+    #[inline]
+    fn send_debug(&mut self, s: String) -> bool {
+        if self.debug_send.is_abandoned() {
+            true
+        } else {
+            match self.debug_send.push(s) {
+                Ok(_) => false,
+                Err(PushError::Full(_)) => panic!("Audio Output: Debug Send Full!"),
+            }
+        }
+    }
+
+    #[inline]
+    fn send_debug_str(&mut self, s: &str) -> bool {
+        self.send_debug(s.to_string())
+    }
+
+    #[inline]
+    fn send_state(&mut self, state_msg: AudioStateMessage) -> bool {
+        if self.state_send.is_abandoned() {
+            true
+        } else {
+            match self.state_send.push(state_msg) {
+                Ok(_) => false,
+                Err(PushError::Full(_)) => panic!("Audio Output: State Send Full!"),
+            }
+        }
+    }
 }
 
 struct OutputPlayback {
@@ -105,18 +135,21 @@ impl swiftlet_audio::OutputCallback for Output {
 
         let samples_len = samples.len();
         if samples_len != 960 {
-            let _ = self
-                .debug_send
-                .send("Not the expected amount of samples!\n");
+            if self.send_debug_str("Not the expected amount of samples!\n") {
+                return true;
+            }
             if samples_len == 0 {
                 // Quit Early
                 return true;
             }
         }
 
+        if self.command_recv.is_abandoned() {
+            return true;
+        }
         loop {
-            match self.command_recv.try_recv() {
-                Err(TryRecvError::Empty) => break,
+            match self.command_recv.pop() {
+                Err(PopError::Empty) => break,
                 Ok(command_recv) => match command_recv {
                     TerminalAudioOutCommands::LoadOpus(opus) => {
                         self.opus_list.push(opus);
@@ -127,8 +160,7 @@ impl swiftlet_audio::OutputCallback for Output {
                                 let decoder = match Decoder::new(opus_data.is_stereo()) {
                                     Ok(decoder) => decoder,
                                     Err(err) => {
-                                        let _ =
-                                            self.debug_send.send("Cannot Create Opus Decoder\n");
+                                        self.send_debug_str("Cannot Create Opus Decoder\n");
                                         return true;
                                     }
                                 };
@@ -151,16 +183,15 @@ impl swiftlet_audio::OutputCallback for Output {
                         }
                     }
                 },
-                Err(TryRecvError::Disconnected) => {
-                    let _ = self.debug_send.send("Audio Command Recv Disconnected!!!\n");
-                    return true;
-                }
             }
         }
 
+        if self.packet_recv.is_abandoned() {
+            return true;
+        }
         loop {
-            match self.packet_recv.try_recv() {
-                Err(TryRecvError::Empty) => break,
+            match self.packet_recv.pop() {
+                Err(PopError::Empty) => break,
                 Ok(NetworkAudioOutPackets::MusicPacket((music_id, music_data))) => {
                     if let Some(realtime_ind) =
                         self.realtimes.iter().position(|p| p.id == music_id as u64)
@@ -184,7 +215,7 @@ impl swiftlet_audio::OutputCallback for Output {
                                 }
                             }
                             Err(_) => {
-                                let _ = self.debug_send.send("Opus Decode Issue\n");
+                                self.send_debug_str("Opus Decode Issue\n");
                                 return true;
                             }
                         }
@@ -194,7 +225,7 @@ impl swiftlet_audio::OutputCallback for Output {
                         let mut decoder = match Decoder::new(is_stereo) {
                             Ok(decoder) => decoder,
                             Err(err) => {
-                                let _ = self.debug_send.send("Cannot Create Opus Decoder\n");
+                                self.send_debug_str("Cannot Create Opus Decoder\n");
                                 return true;
                             }
                         };
@@ -211,7 +242,7 @@ impl swiftlet_audio::OutputCallback for Output {
                                 }
                             }
                             Err(_) => {
-                                let _ = self.debug_send.send("Opus Decode Issue\n");
+                                self.send_debug_str("Opus Decode Issue\n");
                                 return true;
                             }
                         }
@@ -254,33 +285,19 @@ impl swiftlet_audio::OutputCallback for Output {
                                 output_data.data_len = decode_len;
                             }
                             Err(_) => {
-                                let _ = self.debug_send.send("Opus Decode Issue\n");
+                                self.send_debug_str("Opus Decode Issue\n");
                                 return true;
                             }
                         }
                         realtime.data_queue.push_back(output_data);
                     } else {
-                        let mut decoder = match Decoder::new(false) {
+                        let decoder = match Decoder::new(false) {
                             Ok(decoder) => decoder,
                             Err(err) => {
-                                let _ = self.debug_send.send("Cannot Create Opus Decoder\n");
+                                self.send_debug_str("Cannot Create Opus Decoder\n");
                                 return true;
                             }
                         };
-                        let mut output_data = OutputData {
-                            data: [0.0; 1920],
-                            data_len: 0,
-                            read_offset: 0,
-                        };
-                        match decoder.decode_float(&voice_data, &mut output_data.data) {
-                            Ok(decode_len) => {
-                                output_data.data_len = decode_len;
-                            }
-                            Err(_) => {
-                                let _ = self.debug_send.send("Opus Decode Issue\n");
-                                return true;
-                            }
-                        }
 
                         let mut output_realtime = OutputRealtime {
                             id: voice_id as u64,
@@ -289,6 +306,32 @@ impl swiftlet_audio::OutputCallback for Output {
                             data_queue: VecDeque::with_capacity(4),
                             starve_counter: 0,
                         };
+
+                        let output_data = OutputData {
+                            data: [0.0; 1920],
+                            data_len: 960,
+                            read_offset: 0,
+                        };
+                        output_realtime.data_queue.push_back(output_data);
+
+                        let mut output_data = OutputData {
+                            data: [0.0; 1920],
+                            data_len: 0,
+                            read_offset: 0,
+                        };
+                        match output_realtime
+                            .decoder
+                            .decode_float(&voice_data, &mut output_data.data)
+                        {
+                            Ok(decode_len) => {
+                                output_data.data_len = decode_len;
+                            }
+                            Err(_) => {
+                                self.send_debug_str("Opus Decode Issue\n");
+                                return true;
+                            }
+                        }
+
                         output_realtime.data_queue.push_back(output_data);
                         self.realtimes.push(output_realtime);
                     }
@@ -299,14 +342,9 @@ impl swiftlet_audio::OutputCallback for Output {
                     {
                         self.realtimes.remove(realtime_ind);
                     }
-                }
-                // Ok(_) => {
-                //     //Nothing yet
-                // }
-                Err(TryRecvError::Disconnected) => {
-                    let _ = self.debug_send.send("Audio Packet Recv Disconnected!!!\n");
-                    return true;
-                }
+                } // Ok(_) => {
+                  //     //Nothing yet
+                  // }
             }
         }
 
@@ -326,7 +364,7 @@ impl swiftlet_audio::OutputCallback for Output {
                         playback.probable_index = new_index;
                         &self.opus_list[playback.probable_index]
                     } else {
-                        let _ = self.debug_send.send("Could not find playback Opus Data!\n");
+                        self.send_debug_str("Could not find playback Opus Data!\n");
                         return true;
                     }
                 }
@@ -353,7 +391,7 @@ impl swiftlet_audio::OutputCallback for Output {
                                     readable_samples = decode_len * 2;
                                 }
                                 Err(err) => {
-                                    let _ = self.debug_send.send("Opus Decode Issue\n");
+                                    self.send_debug_str("Opus Decode Issue\n");
                                     return true;
                                 }
                             }
@@ -430,7 +468,13 @@ impl swiftlet_audio::OutputCallback for Output {
                         }
                         samples_count = next_samples_count;
                     } else {
-                        let _ = self.debug_send.send("Realtime playback starved!\n");
+                        match self
+                            .debug_send
+                            .push("Realtime playback starved!\n".to_string())
+                        {
+                            Ok(_) => {}
+                            Err(PushError::Full(_)) => return true,
+                        }
                         realtime.starve_counter += 1;
                         if realtime.starve_counter >= 200 {
                             self.cleanup.push(realtime_ind);
@@ -470,10 +514,14 @@ impl swiftlet_audio::OutputCallback for Output {
                         }
                         samples_count = next_samples_count;
                     } else {
+                        //let _ = self.debug_send.send("Voice Realtime Starved!\n");
                         realtime.starve_counter += 1;
                         if realtime.starve_counter >= 200 {
                             self.cleanup.push(realtime_ind);
-                            let _ = self.debug_send.send("Realtime starved out!\n");
+                            match self.debug_send.push("Realtime starved out!\n".to_string()) {
+                                Ok(_) => {}
+                                Err(PushError::Full(_)) => return true,
+                            }
                         }
                         break;
                     }
@@ -491,33 +539,45 @@ impl swiftlet_audio::OutputCallback for Output {
 
 struct Input {
     callback_count: u64,
+    last_instant: Instant,
+    avg_duration: Duration,
     is_running: bool,
     encoder: Encoder,
-    data: [u8; 4096],
+    data: [u8; 2048],
     data_len: usize,
-    command_recv: Receiver<TerminalAudioInCommands>,
-    packet_send: Sender<NetworkAudioInPackets>,
-    state_send: Sender<AudioStateMessage>,
-    debug_send: Sender<&'static str>,
+    command_recv: Consumer<TerminalAudioInCommands>,
+    packet_send: Producer<NetworkAudioInPackets>,
+    // state_send: Producer<AudioStateMessage>,
+    // debug_send: Producer<String>,
 }
 
 impl Input {
     #[inline]
-    fn send_debug(&self, s: &'static str) -> bool {
-        match self.debug_send.try_send(s) {
-            Ok(_) => false,
-            Err(TrySendError::Disconnected(_)) => true,
-            Err(TrySendError::Full(_)) => panic!("Debug Send Full!"),
-        }
+    fn send_debug(&self, s: String) -> bool {
+        // match self.debug_send.send_timeout(s, Duration::from_millis(1)) {
+        //     Ok(_) => false,
+        //     Err(SendTimeoutError::Disconnected(_)) => true,
+        //     Err(SendTimeoutError::Timeout(_)) => panic!("Audio Input: Debug Send Timeout!"),
+        // }
+        false
+    }
+
+    #[inline]
+    fn send_debug_str(&self, s: &str) -> bool {
+        self.send_debug(s.to_string())
     }
 
     #[inline]
     fn send_state(&self, state_msg: AudioStateMessage) -> bool {
-        match self.state_send.try_send(state_msg) {
-            Ok(_) => false,
-            Err(TrySendError::Disconnected(_)) => true,
-            Err(TrySendError::Full(_)) => panic!("State Send Full!"),
-        }
+        // match self
+        //     .state_send
+        //     .send_timeout(state_msg, Duration::from_millis(1))
+        // {
+        //     Ok(_) => false,
+        //     Err(SendTimeoutError::Disconnected(_)) => true,
+        //     Err(SendTimeoutError::Timeout(_)) => panic!("Audio Input: State Send Timeout!"),
+        // }
+        false
     }
 }
 
@@ -525,9 +585,23 @@ impl swiftlet_audio::InputCallback for Input {
     fn input_callback(&mut self, samples: &[f32]) -> bool {
         self.callback_count += 1;
 
+        let current_instant = Instant::now();
+        self.avg_duration += current_instant - self.last_instant;
+        self.last_instant = current_instant;
+        if (self.callback_count % 100) == 0 {
+            // let s = format!("Avg Input Callback Timing: {:?}\n", self.avg_duration / 100);
+            // if self.send_debug(s) {
+            //     return true;
+            // }
+            self.avg_duration = Duration::from_millis(0);
+        }
+
+        if self.command_recv.is_abandoned() {
+            return true;
+        }
         loop {
-            match self.command_recv.try_recv() {
-                Err(TryRecvError::Empty) => break,
+            match self.command_recv.pop() {
+                Err(PopError::Empty) => break,
                 Ok(TerminalAudioInCommands::Start) => {
                     self.encoder = match Encoder::new(false, true) {
                         Ok(enc) => {
@@ -535,17 +609,12 @@ impl swiftlet_audio::InputCallback for Input {
                             enc
                         }
                         Err(e) => {
-                            self.send_debug("Encoder could not be created!!!\n");
+                            self.send_debug_str("Encoder could not be created!!!\n");
                             return true;
                         }
                     };
                 }
                 Ok(TerminalAudioInCommands::Pause) => self.is_running = false,
-                Err(TryRecvError::Disconnected) => {
-                    if self.send_debug("Audio Command Recv Disconnected!!!\n") {
-                        return true;
-                    }
-                }
             }
         }
 
@@ -555,7 +624,7 @@ impl swiftlet_audio::InputCallback for Input {
             if self.send_state(AudioStateMessage::InputPaused) {
                 return true;
             }
-            if self.send_debug("Audio Input: Did not get the expected amount of samples!") {
+            if self.send_debug_str("Audio Input: Did not get the expected amount of samples!") {
                 return true;
             }
         }
@@ -566,14 +635,14 @@ impl swiftlet_audio::InputCallback for Input {
             // }
             match self.encoder.encode_float(samples, &mut self.data) {
                 Ok(len) => {
-                    match self
-                        .packet_send
-                        .try_send(NetworkAudioInPackets::VoiceOpusData(Vec::from(
-                            &self.data[..len],
-                        ))) {
+                    let in_packet = NetworkAudioInPackets {
+                        data: self.data,
+                        len,
+                        instant: Instant::now(),
+                    };
+                    match self.packet_send.push(in_packet) {
                         Ok(_) => {}
-                        Err(TrySendError::Disconnected(_)) => return true,
-                        Err(TrySendError::Full(_)) => panic!("State Send Full!"),
+                        Err(PushError::Full(_)) => panic!("Audio Input: Send Packet Full!"),
                     }
                 }
                 Err(e) => {
@@ -581,7 +650,9 @@ impl swiftlet_audio::InputCallback for Input {
                     if self.send_state(AudioStateMessage::InputPaused) {
                         return true;
                     }
-                    if self.send_debug("Audio Input: Did not get the expected amount of samples!") {
+                    if self
+                        .send_debug_str("Audio Input: Did not get the expected amount of samples!")
+                    {
                         return true;
                     }
                 }

@@ -31,16 +31,14 @@ const PKEY_PATH: &str = "security/pkey.pem"; // Location of the private key for 
 // IPv6 Addresses and Sockets used when sending the client an initial connection addresss
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 #[cfg(feature = "client")]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // Use Inter-Thread Communication Definitions
 #[cfg(feature = "client")]
-use crate::communication::{
-    ClientCommand, NetworkAudioInPackets, NetworkAudioOutPackets, NetworkAudioThreadChannels,
-};
+use crate::communication::{ClientCommand, NetworkAudioOutPackets, NetworkAudioThreadChannels};
 use crate::communication::{
     NetworkCommand, NetworkStateConnection, NetworkStateMessage, NetworkTerminalThreadChannels,
-    ServerCommand, TryRecvError,
+    PopError, PushError, ServerCommand,
 };
 
 // Use quic sub-library for internet communications
@@ -238,8 +236,8 @@ impl ServerState {
     }
 
     #[inline]
-    fn send_debug_text(&self, text: &str) {
-        let _ = self.terminal_channels.debug_send.send(text.to_string());
+    fn send_debug_text(&mut self, text: &str) {
+        let _ = self.terminal_channels.debug_send.push(text.to_string());
     }
 
     #[inline]
@@ -439,7 +437,7 @@ impl ServerState {
         data
     }
 
-    fn refresh_update(&self) {
+    fn refresh_update(&mut self) {
         let mut state_populate = Vec::<NetworkStateConnection>::new();
 
         for cs in &self.client_states {
@@ -451,20 +449,20 @@ impl ServerState {
         }
 
         let state_update = NetworkStateMessage::ConnectionsRefresh((None, state_populate));
-        let _ = self.terminal_channels.state_send.send(state_update);
+        let _ = self.terminal_channels.state_send.push(state_update);
     }
 
-    fn new_connection_update(&self, verified_index: usize) {
+    fn new_connection_update(&mut self, verified_index: usize) {
         let cs = &self.client_states[verified_index];
         let conn_name = u8_to_str(&cs.user_name[..cs.user_name_len]);
         let state_update = NetworkStateMessage::NewConnection((conn_name, cs.state));
-        let _ = self.terminal_channels.state_send.send(state_update);
+        let _ = self.terminal_channels.state_send.push(state_update);
     }
 
-    fn state_change_update(&self, verified_index: usize) {
+    fn state_change_update(&mut self, verified_index: usize) {
         let cs = &self.client_states[verified_index];
         let state_update = NetworkStateMessage::StateChange((verified_index, cs.state));
-        let _ = self.terminal_channels.state_send.send(state_update);
+        let _ = self.terminal_channels.state_send.push(state_update);
     }
 }
 
@@ -482,7 +480,7 @@ impl EndpointEventCallbacks for ServerState {
     ) -> bool {
         if self.remove_connection_state(cid) {
             let ended_reason = format!("Server Connection Ended Reason: {:?}\n", reason);
-            let _ = self.terminal_channels.debug_send.send(ended_reason);
+            let _ = self.terminal_channels.debug_send.push(ended_reason);
 
             // Temporarily (inefficiently) used for removing of clients
             for vi in 0..self.client_states.len() {
@@ -501,7 +499,7 @@ impl EndpointEventCallbacks for ServerState {
         reason: ConnectionEndReason,
     ) {
         let ending_reason = format!("Server Connection Ending Reason: {:?}\n", reason);
-        let _ = self.terminal_channels.debug_send.send(ending_reason);
+        let _ = self.terminal_channels.debug_send.push(ending_reason);
     }
 
     fn tick(&mut self, endpoint: &mut Endpoint) -> bool {
@@ -556,8 +554,8 @@ impl EndpointEventCallbacks for ServerState {
         self.command_handler_tick += 1;
         if self.command_handler_tick >= 10 {
             loop {
-                match self.terminal_channels.command_recv.try_recv() {
-                    Err(TryRecvError::Empty) => break,
+                match self.terminal_channels.command_recv.pop() {
+                    Err(PopError::Empty) => break,
                     Ok(NetworkCommand::Server(server_cmd)) => {
                         self.handle_commands(endpoint, server_cmd)
                     }
@@ -567,7 +565,6 @@ impl EndpointEventCallbacks for ServerState {
                         }
                         return true;
                     }
-                    Err(_) => return true, // Other recv errors
                     #[cfg(feature = "client")]
                     Ok(NetworkCommand::Client(_)) => {}
                 }
@@ -775,9 +772,13 @@ struct ClientHandler {
     main_recv_type: Option<StreamMsgType>,
     rt_recv_type: Option<StreamMsgType>,
     rt_recv_expected_id: u64,
+    avg_voice_send: u64,
     background_recv_type: Option<StreamMsgType>,
     transfer_data: Option<Vec<u8>>,
     audio_channels: NetworkAudioThreadChannels,
+    callback_count: u64,
+    last_instant: Instant,
+    avg_duration: Duration,
 }
 
 #[cfg(feature = "client")]
@@ -795,15 +796,32 @@ impl ClientHandler {
             main_recv_type: None,
             rt_recv_type: None,
             rt_recv_expected_id: 0,
+            avg_voice_send: 0,
             background_recv_type: None,
             transfer_data: None,
             audio_channels,
+            callback_count: 0,
+            last_instant: Instant::now(),
+            avg_duration: Duration::from_millis(0),
         }
     }
 
     #[inline]
-    fn send_debug_text(&self, text: &str) {
-        let _ = self.terminal_channels.debug_send.send(text.to_string());
+    fn send_debug(&mut self, s: String) -> bool {
+        match self.terminal_channels.debug_send.push(s) {
+            Ok(_) => false,
+            Err(PushError::Full(_)) => panic!("Network Client: Debug Send Full!"),
+        }
+    }
+
+    #[inline]
+    fn send_debug_str(&mut self, s: &str) -> bool {
+        self.send_debug(s.to_string())
+    }
+
+    #[inline]
+    fn send_debug_text(&mut self, text: &str) {
+        let _ = self.send_debug(text.to_string());
     }
 
     fn handle_commands(&mut self, endpoint: &mut Endpoint, cmd: ClientCommand) {
@@ -843,16 +861,15 @@ impl ClientHandler {
         }
     }
 
-    fn handle_limited_commands(&self, endpoint: &mut Endpoint) -> bool {
+    fn handle_limited_commands(&mut self, endpoint: &mut Endpoint) -> bool {
         loop {
-            match self.terminal_channels.command_recv.try_recv() {
-                Err(TryRecvError::Empty) => break,
+            match self.terminal_channels.command_recv.pop() {
+                Err(PopError::Empty) => break,
                 Ok(NetworkCommand::Client(ClientCommand::ServerConnect(server_address))) => {
                     let _ = endpoint.add_client_connection(server_address, SERVER_NAME);
                     return true;
                 }
                 Ok(NetworkCommand::Stop(int)) => return true,
-                Err(_) => return true, // Other recv errors
                 Ok(_) => {}
             }
         }
@@ -916,13 +933,13 @@ impl ClientHandler {
         data
     }
 
-    fn handle_state_refresh(&self, read_data: &[u8]) {
+    fn handle_state_refresh(&mut self, read_data: &[u8]) {
         let conn_ind = read_data[1] as usize;
 
         let mut name_end: usize = (read_data[2] + 3).into();
         let server_name = u8_to_str(&read_data[3..name_end]);
         let name_update = NetworkStateMessage::ServerNameChange(server_name);
-        let _ = self.terminal_channels.state_send.send(name_update);
+        let _ = self.terminal_channels.state_send.push(name_update);
 
         let mut state_populate = Vec::<NetworkStateConnection>::new();
 
@@ -947,17 +964,17 @@ impl ClientHandler {
 
         let state_update =
             NetworkStateMessage::ConnectionsRefresh((Some(conn_ind), state_populate));
-        let _ = self.terminal_channels.state_send.send(state_update);
+        let _ = self.terminal_channels.state_send.push(state_update);
     }
 
-    fn handle_new_client(&self, read_data: &[u8]) {
+    fn handle_new_client(&mut self, read_data: &[u8]) {
         let name_end: usize = (read_data[0] + 1).into();
         let client_name = u8_to_str(&read_data[1..name_end]);
         let new_conn = NetworkStateMessage::NewConnection((client_name, read_data[name_end]));
-        let _ = self.terminal_channels.state_send.send(new_conn);
+        let _ = self.terminal_channels.state_send.push(new_conn);
     }
 
-    fn handle_client_new_state(&self, read_data: &[u8]) {
+    fn handle_client_new_state(&mut self, read_data: &[u8]) {
         let conn_pos = read_data[0] as usize;
         let new_state = read_data[1];
 
@@ -965,7 +982,7 @@ impl ClientHandler {
             let _ = self
                 .audio_channels
                 .packet_send
-                .send(NetworkAudioOutPackets::MusicStop(255));
+                .push(NetworkAudioOutPackets::MusicStop(255));
         }
         // if (new_state & 0x4) == 0 {
         //     let _ = self
@@ -975,7 +992,7 @@ impl ClientHandler {
         // }
 
         let new_conn = NetworkStateMessage::StateChange((conn_pos, new_state));
-        let _ = self.terminal_channels.state_send.send(new_conn);
+        let _ = self.terminal_channels.state_send.push(new_conn);
     }
 }
 
@@ -985,7 +1002,7 @@ impl EndpointEventCallbacks for ClientHandler {
         let _ = self
             .terminal_channels
             .debug_send
-            .send("Announcing Self to Server!\n".to_string());
+            .push("Announcing Self to Server!\n".to_string());
         let mut send_data = self.create_announce_data();
         set_stream_msg_size(&mut send_data);
         let _ = endpoint.main_stream_send(cid, send_data);
@@ -1003,7 +1020,7 @@ impl EndpointEventCallbacks for ClientHandler {
                 self.cid_option = None;
                 self.main_recv_type = None;
                 let ended_reason = format!("Client Connection Ended Reason: {:?}\n", reason);
-                let _ = self.terminal_channels.debug_send.send(ended_reason);
+                let _ = self.terminal_channels.debug_send.push(ended_reason);
             }
         }
 
@@ -1022,39 +1039,74 @@ impl EndpointEventCallbacks for ClientHandler {
                 self.cid_option = None;
                 self.main_recv_type = None;
                 let ending_reason = format!("Client Connection Ending Reason: {:?}\n", reason);
-                let _ = self.terminal_channels.debug_send.send(ending_reason);
+                let _ = self.terminal_channels.debug_send.push(ending_reason);
             }
         }
     }
 
     fn tick(&mut self, endpoint: &mut Endpoint) -> bool {
-        loop {
-            match self.audio_channels.packet_recv.try_recv() {
-                Err(TryRecvError::Empty) => break,
-                Ok(NetworkAudioInPackets::VoiceOpusData(mut opus_data)) => {
-                    if let Some(cid) = &self.cid_option {
-                        //self.send_debug_text("Sending Voice Data!\n");
-                        let mut send_data = StreamMsgType::VoiceDataPacket
-                            .get_send_data_vec(Some(opus_data.len() + 2));
+        self.callback_count += 1;
+        let current_instant = Instant::now();
+        let current_duration = current_instant - self.last_instant;
+        self.avg_duration += current_duration;
+
+        if (self.callback_count % 200) == 0 {
+            // let s = format!(
+            //     "Avg Client Tick Callback Timing: {:?}\n",
+            //     self.avg_duration / 200
+            // );
+            // if self.send_debug(s) {
+            //     return true;
+            // }
+            self.avg_duration = Duration::from_millis(0);
+        }
+
+        if let Some(cid) = &self.cid_option {
+            let mut pkt_times = 0;
+            loop {
+                match self.audio_channels.packet_recv.pop() {
+                    Err(PopError::Empty) => break,
+                    Ok(pkt) => {
+                        let channel_latency = Instant::now() - pkt.instant;
+                        //if channel_latency > Duration::from_millis(6) {
+                        let s = format!(
+                            "Channel Latency: {:?}; Since Last Tick: {:?}\n",
+                            channel_latency, current_duration
+                        );
+                        let _ = self.terminal_channels.debug_send.push(s);
+                        //}
+                        pkt_times += 1;
+                        self.avg_voice_send += 1;
+                        let mut send_data =
+                            StreamMsgType::VoiceDataPacket.get_send_data_vec(Some(pkt.len + 2));
                         send_data.push(0);
                         send_data.push(0);
-                        send_data.append(&mut opus_data);
+                        send_data.extend_from_slice(&pkt.data[..pkt.len]);
 
                         let _ = endpoint.rt_stream_send(cid, Some(send_data), true);
                     }
                 }
-                Ok(_) => {
-                    // Do Nothing
-                }
-                Err(_) => return true, // Other recv errors
             }
+            if pkt_times > 1 {
+                // let s = format!("Voice Sends: {}: {}\n", self.callback_count, pkt_times);
+                // if self.send_debug(s) {
+                //     return true;
+                // }
+            }
+        }
+        if (self.callback_count % 500) == 0 {
+            // let s = format!("Avg Voice Send: {}\n", self.avg_voice_send);
+            // if self.send_debug(s) {
+            //     return true;
+            // }
+            self.avg_voice_send = 0;
         }
 
         self.command_handler_tick += 1;
-        if self.command_handler_tick >= 10 {
+        if self.command_handler_tick >= 25 {
             loop {
-                match self.terminal_channels.command_recv.try_recv() {
-                    Err(TryRecvError::Empty) => break,
+                match self.terminal_channels.command_recv.pop() {
+                    Err(PopError::Empty) => break,
                     Ok(NetworkCommand::Client(client_cmd)) => {
                         self.handle_commands(endpoint, client_cmd);
                     }
@@ -1064,13 +1116,13 @@ impl EndpointEventCallbacks for ClientHandler {
                         }
                         return true;
                     }
-                    Err(_) => return true, // Other recv errors
                     Ok(NetworkCommand::Server(_)) => {}
                 }
             }
             self.command_handler_tick = 0;
         }
 
+        self.last_instant = current_instant;
         false
     }
 
@@ -1125,6 +1177,12 @@ impl EndpointEventCallbacks for ClientHandler {
                 // let debug_string = format!("Rt Id: {}, len: {}\n", rt_id, read_data.len());
                 // let _ = self.terminal_channels.debug_send.send(debug_string);
                 if self.rt_recv_expected_id != rt_id {
+                    let diff = rt_id - self.rt_recv_expected_id;
+                    if diff > 1 {
+                        let debug_string = format!("Realtime Recv Packet Skip: {}\n", diff);
+                        let _ = self.terminal_channels.debug_send.push(debug_string);
+                    }
+
                     // Skipped IDs
                     self.rt_recv_type = None;
                     self.rt_recv_expected_id = rt_id;
@@ -1137,7 +1195,7 @@ impl EndpointEventCallbacks for ClientHandler {
                             let _ = self
                                 .audio_channels
                                 .packet_send
-                                .send(NetworkAudioOutPackets::VoiceData((voice_id, vec_data)));
+                                .push(NetworkAudioOutPackets::VoiceData((voice_id, vec_data)));
                             protocol::MESSAGE_HEADER_SIZE
                         }
                         StreamMsgType::NextMusicPacket => {
@@ -1146,7 +1204,7 @@ impl EndpointEventCallbacks for ClientHandler {
                             let _ = self
                                 .audio_channels
                                 .packet_send
-                                .send(NetworkAudioOutPackets::MusicPacket((255, vec_data)));
+                                .push(NetworkAudioOutPackets::MusicPacket((255, vec_data)));
                             protocol::MESSAGE_HEADER_SIZE
                         }
                         _ => {
@@ -1227,7 +1285,7 @@ pub(crate) fn server_thread(
     use_ipv4: bool,
     port: u16,
     server_name: String,
-    terminal_channels: NetworkTerminalThreadChannels,
+    mut terminal_channels: NetworkTerminalThreadChannels,
 ) {
     let bind_address = match use_ipv4 {
         false => SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0)),
@@ -1253,7 +1311,7 @@ pub(crate) fn server_thread(
             Err(err) => {
                 let _ = terminal_channels
                     .debug_send
-                    .send("Server Endpoint Creation Error!\n".to_string());
+                    .push("Server Endpoint Creation Error!\n".to_string());
                 // Can add more detailed print here later
                 return;
             }
@@ -1267,7 +1325,7 @@ pub(crate) fn server_thread(
         Ok(_) => {}
         Err(e) => {
             let error_print = format!("Server Error: {:?}\n", e);
-            let _ = server_state.terminal_channels.debug_send.send(error_print);
+            let _ = server_state.terminal_channels.debug_send.push(error_print);
         }
     }
 
@@ -1280,7 +1338,7 @@ pub(crate) fn server_thread(
 pub(crate) fn client_thread(
     server_address: SocketAddr,
     user_name: String,
-    terminal_channels: NetworkTerminalThreadChannels,
+    mut terminal_channels: NetworkTerminalThreadChannels,
     audio_channels: NetworkAudioThreadChannels,
 ) {
     let bind_address = match server_address.is_ipv6() {
@@ -1312,7 +1370,7 @@ pub(crate) fn client_thread(
         Err(err) => {
             let _ = terminal_channels
                 .debug_send
-                .send("Client Endpoint Creation Error!\n".to_string());
+                .push("Client Endpoint Creation Error!\n".to_string());
             // Can add more detailed print here later
             return;
         }
@@ -1343,7 +1401,7 @@ pub(crate) fn client_thread(
                 let _ = client_handler
                     .terminal_channels
                     .debug_send
-                    .send(error_print);
+                    .push(error_print);
                 break;
             }
         }
