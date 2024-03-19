@@ -28,10 +28,9 @@ pub(super) struct AudioOwner {
 
 impl AudioOwner {
     pub(super) fn new() -> Option<Self> {
-        match wasapi::ComOwner::new() {
-            Ok(owner) => Some(AudioOwner { owner }),
-            Err(_e) => None,
-        }
+        let owner = wasapi::ComOwner::new()?;
+
+        Some(AudioOwner { owner })
     }
 }
 

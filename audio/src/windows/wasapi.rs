@@ -20,7 +20,6 @@
 //OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //SOFTWARE.
 
-pub(super) use windows::core::Error;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Media::Audio::{
     IAudioCaptureClient, IAudioClient3, IAudioRenderClient, IMMDevice, ISimpleAudioVolume,
@@ -42,14 +41,18 @@ use windows::Win32::System::{Com, Threading};
 pub(super) struct ComOwner;
 
 impl ComOwner {
-    pub(super) fn new() -> Result<Self, Error> {
+    pub(super) fn new() -> Option<Self> {
         unsafe {
-            Com::CoInitializeEx(
+            if Com::CoInitializeEx(
                 Some(ptr::null()),
                 Com::COINIT_MULTITHREADED | Com::COINIT_DISABLE_OLE1DDE,
-            )?;
+            )
+            .is_err()
+            {
+                return None;
+            }
 
-            Ok(ComOwner {})
+            Some(ComOwner {})
         }
     }
 }

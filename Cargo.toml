@@ -32,10 +32,14 @@ client = ["dep:swiftlet_audio"]
 
 [dependencies]
 # Argument parsing
-bpaf = { version = "0.9", features = ["derive"] }
+bpaf = { version = "*", features = ["derive"] }
 
 # Thread Sync Requirements:
 crossbeam-channel = "*"
+
+# Terminal Requirements:
+crossterm = "*"
+ratatui = "*"
 
 # Network (Thread) Requirements:
 swiftlet_quic = { version = "*", path = "quic" }
@@ -46,18 +50,14 @@ swiftlet_quic = { version = "*", path = "quic" }
 swiftlet_audio = { version = "*", path = "audio", features = ["opus"], optional = true }
 #swiftlet_binaural = { version = "*", path = "binaural" }
 
-# Console Requirements:
-crossterm = "*"
-ratatui = "*"
-
 
 [workspace]
 resolver = "2"
 members = [
   ".",
+  "quic",
   "audio",
   "binaural",
-  "quic",
 ]
 
 [workspace.lints.rust]

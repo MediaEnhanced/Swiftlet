@@ -28,74 +28,33 @@ const AUDIO_FILES: [&str; 3] = [
 const TRANSFER_AUDIO: &str = "audio/transfer.opus";
 
 pub(crate) mod audio;
-use audio::OpusData;
+use swiftlet_audio::opus::OpusData;
 
 use crate::communication::{
-    ClientCommand, ConsoleAudioCommands, ConsoleAudioOutputChannels, ConsoleThreadChannels,
-    NetworkCommand, NetworkStateConnection, NetworkStateMessage, TryRecvError,
+    ClientCommand, NetworkCommand, NetworkStateConnection, NetworkStateMessage,
+    TerminalAudioInCommands, TerminalAudioOutCommands, TerminalAudioThreadChannels,
+    TerminalNetworkThreadChannels, TryRecvError,
 };
 
+use crossterm::event::{Event, KeyCode, KeyEventKind};
 use crossterm::ExecutableCommand; // Needed to use .execute on Stdout for crossterm setup
 use ratatui::{prelude::*, widgets::*};
 use swiftlet_quic::endpoint::SocketAddr;
 
-struct TerminalUi {
-    terminal: ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
-}
-
-impl TerminalUi {
-    fn new() -> std::io::Result<Self> {
-        crossterm::terminal::enable_raw_mode().unwrap();
-        std::io::stdout().execute(crossterm::terminal::EnterAlternateScreen)?;
-        let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
-        let terminal: Terminal<CrosstermBackend<std::io::Stdout>> =
-            ratatui::terminal::Terminal::new(backend)?;
-        Ok(TerminalUi { terminal })
-    }
-
-    fn draw(&mut self, f: impl Fn(&mut ratatui::Frame<'_>)) {
-        let _ = self.terminal.draw(f);
-    }
-}
-
-impl Drop for TerminalUi {
-    fn drop(&mut self) {
-        std::io::stdout()
-            .execute(crossterm::terminal::LeaveAlternateScreen)
-            .unwrap();
-        crossterm::terminal::disable_raw_mode().unwrap();
-    }
-}
-
-pub(crate) struct Client {
+struct Client {
     server_name: String,
     server_address: SocketAddr,
+    connections: Vec<NetworkStateConnection>,
+    my_conn_ind: Option<usize>,
     debug_title: String,
     debug_string: String,
     debug_lines: u16,
     debug_scroll: u16,
-    connections: Vec<NetworkStateConnection>,
-    my_conn_ind: Option<usize>,
-    audio_out_channels: ConsoleAudioOutputChannels,
     main_layout: ratatui::layout::Layout,
 }
 
 impl Client {
-    pub(crate) fn new(
-        server_address: SocketAddr,
-        audio_out_channels: ConsoleAudioOutputChannels,
-    ) -> Self {
-        // Load in Audio Files
-        for (ind, f) in AUDIO_FILES.iter().enumerate() {
-            if let Ok(bytes) = std::fs::read(std::path::Path::new(f)) {
-                if let Some(opus_data) = OpusData::create_from_ogg_file(&bytes, (ind as u64) + 1) {
-                    let _ = audio_out_channels
-                        .command_send
-                        .send(ConsoleAudioCommands::LoadOpus(opus_data));
-                }
-            }
-        }
-
+    fn new(server_address: SocketAddr) -> Self {
         let constraints = vec![
             Constraint::Length(6),
             Constraint::Fill(1),
@@ -106,20 +65,19 @@ impl Client {
         Client {
             server_name: String::from("Connecting..."),
             server_address,
+            connections: Vec::new(),
+            my_conn_ind: None,
             debug_title: String::from("Debug"),
             debug_string: String::from("Client Console Started!\n"),
             debug_lines: 1,
             debug_scroll: 0,
-            connections: Vec::new(),
-            my_conn_ind: None,
-            audio_out_channels,
             main_layout: Layout::default()
                 .direction(Direction::Vertical)
                 .constraints(constraints),
         }
     }
 
-    fn draw_console_ui(&self, frame: &mut ratatui::Frame) {
+    fn draw_ui(&self, frame: &mut ratatui::Frame) {
         let main_areas = self.main_layout.split(frame.size());
 
         let server_line = Line::default().spans([
@@ -280,50 +238,151 @@ impl Client {
             &mut scrollbar_state,
         );
     }
+}
 
-    pub(crate) fn run_console(&mut self, channels: ConsoleThreadChannels) -> std::io::Result<()> {
+struct Terminal {
+    interface: ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+}
+
+impl Terminal {
+    fn new() -> std::io::Result<Self> {
+        let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
+        let interface = ratatui::terminal::Terminal::new(backend)?;
+        Ok(Terminal { interface })
+    }
+
+    fn start(&self) -> std::io::Result<()> {
+        crossterm::terminal::enable_raw_mode()?;
+        std::io::stdout().execute(crossterm::terminal::EnterAlternateScreen)?;
+        Ok(())
+    }
+
+    fn stop(&self) -> std::io::Result<()> {
+        std::io::stdout().execute(crossterm::terminal::LeaveAlternateScreen)?;
+        crossterm::terminal::disable_raw_mode()?;
+        Ok(())
+    }
+
+    fn draw(&mut self, f: impl Fn(&mut ratatui::Frame<'_>)) -> std::io::Result<()> {
+        self.interface.draw(f)?;
+        Ok(())
+    }
+}
+
+pub(crate) struct ClientTerminal {
+    client: Client,
+    terminal: Terminal,
+    network_channels: TerminalNetworkThreadChannels,
+    audio_channels: TerminalAudioThreadChannels,
+    is_in_vc: bool,
+}
+
+impl ClientTerminal {
+    pub(crate) fn new(
+        server_address: SocketAddr,
+        network_channels: TerminalNetworkThreadChannels,
+        audio_channels: TerminalAudioThreadChannels,
+    ) -> std::io::Result<Self> {
+        // Load in Audio Files
+        for (ind, f) in AUDIO_FILES.iter().enumerate() {
+            if let Ok(bytes) = std::fs::read(std::path::Path::new(f)) {
+                if let Some(opus_data) = OpusData::create_from_ogg_file(&bytes, (ind as u64) + 1) {
+                    let _ = audio_channels
+                        .output_cmd_send
+                        .send(TerminalAudioOutCommands::LoadOpus(opus_data));
+                }
+            }
+        }
+
+        Ok(ClientTerminal {
+            client: Client::new(server_address),
+            terminal: Terminal::new()?,
+            network_channels,
+            audio_channels,
+            is_in_vc: false,
+        })
+    }
+
+    fn new_state(&mut self, state: u8) {
+        if state & 4 > 0 {
+            if !self.is_in_vc {
+                self.is_in_vc = true;
+
+                let _ = self
+                    .audio_channels
+                    .output_cmd_send
+                    .send(TerminalAudioOutCommands::PlayOpus(1));
+
+                let _ = self
+                    .audio_channels
+                    .input_cmd_send
+                    .send(TerminalAudioInCommands::Start);
+            }
+        } else if self.is_in_vc {
+            self.is_in_vc = false;
+
+            let _ = self
+                .audio_channels
+                .input_cmd_send
+                .send(TerminalAudioInCommands::Pause);
+
+            let _ = self
+                .audio_channels
+                .output_cmd_send
+                .send(TerminalAudioOutCommands::PlayOpus(2));
+        }
+    }
+
+    pub(crate) fn run_terminal(&mut self) -> std::io::Result<()> {
         // Start Console Here:
-        let mut terminal_ui = TerminalUi::new()?;
+        self.terminal.start()?;
 
-        let mut is_in_vc = false;
         let mut already_transfered = false;
-
         let mut should_draw = true;
 
         loop {
             if crossterm::event::poll(std::time::Duration::from_millis(50))? {
-                // Bool?
-                if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
-                    // Bool?
-                    if key.kind == crossterm::event::KeyEventKind::Press {
+                if let Event::Key(key) = crossterm::event::read()? {
+                    if key.kind == KeyEventKind::Press {
                         match key.code {
-                            crossterm::event::KeyCode::Up => {
-                                if self.debug_scroll > 0 {
-                                    self.debug_scroll -= 1;
+                            KeyCode::Up => {
+                                if self.client.debug_scroll > 0 {
+                                    self.client.debug_scroll -= 1;
                                     should_draw = true;
                                 }
                             }
-                            crossterm::event::KeyCode::Down => {
-                                if self.debug_scroll < (self.debug_lines - 1) {
-                                    self.debug_scroll += 1;
+                            KeyCode::Down => {
+                                if self.client.debug_scroll < (self.client.debug_lines - 1) {
+                                    self.client.debug_scroll += 1;
                                     should_draw = true;
                                 }
                             }
-                            crossterm::event::KeyCode::Char(c) => {
+                            KeyCode::Char(c) => {
                                 let uc = c.to_ascii_uppercase();
                                 if uc == 'Q' {
                                     break;
                                 } else if uc == 'M' {
                                     let _ = self
-                                        .audio_out_channels
-                                        .command_send
-                                        .send(ConsoleAudioCommands::PlayOpus(3));
+                                        .audio_channels
+                                        .output_cmd_send
+                                        .send(TerminalAudioOutCommands::PlayOpus(3));
                                 } else if uc == 'V' {
-                                    if let Some(ind) = self.my_conn_ind {
-                                        let state_change = self.connections[ind].state ^ 4;
-                                        let _ = channels.command_send.send(NetworkCommand::Client(
-                                            ClientCommand::StateChange(state_change),
-                                        ));
+                                    if let Some(ind) = self.client.my_conn_ind {
+                                        let state_change = self.client.connections[ind].state ^ 4;
+                                        let _ = self.network_channels.command_send.send(
+                                            NetworkCommand::Client(ClientCommand::StateChange(
+                                                state_change,
+                                            )),
+                                        );
+                                    }
+                                } else if uc == 'L' {
+                                    if let Some(ind) = self.client.my_conn_ind {
+                                        let state_change = self.client.connections[ind].state ^ 8;
+                                        let _ = self.network_channels.command_send.send(
+                                            NetworkCommand::Client(ClientCommand::StateChange(
+                                                state_change,
+                                            )),
+                                        );
                                     }
                                 } else if uc == 'T' && !already_transfered {
                                     if let Ok(bytes) =
@@ -332,19 +391,22 @@ impl Client {
                                         if let Some(opus_data) =
                                             OpusData::create_from_ogg_file(&bytes, 45)
                                         {
-                                            let _ =
-                                                channels.command_send.send(NetworkCommand::Client(
+                                            let _ = self.network_channels.command_send.send(
+                                                NetworkCommand::Client(
                                                     ClientCommand::MusicTransfer(opus_data),
-                                                ));
+                                                ),
+                                            );
                                             already_transfered = true;
                                         }
                                     }
                                 } else if uc == 'S' {
-                                    if let Some(ind) = self.my_conn_ind {
-                                        let state_change = self.connections[ind].state ^ 2;
-                                        let _ = channels.command_send.send(NetworkCommand::Client(
-                                            ClientCommand::StateChange(state_change),
-                                        ));
+                                    if let Some(ind) = self.client.my_conn_ind {
+                                        let state_change = self.client.connections[ind].state ^ 2;
+                                        let _ = self.network_channels.command_send.send(
+                                            NetworkCommand::Client(ClientCommand::StateChange(
+                                                state_change,
+                                            )),
+                                        );
                                     }
                                 }
                             }
@@ -357,42 +419,17 @@ impl Client {
             }
 
             loop {
-                match channels.network_state_recv.try_recv() {
-                    Err(try_recv_error) => {
-                        match try_recv_error {
-                            TryRecvError::Empty => {
-                                break;
-                            }
-                            TryRecvError::Disconnected => {
-                                //state_common.debug_string.push_str("Network Debug Recv Disconnected!!!\n");
-                                //state_common.debug_lines += 1;
-                                break;
-                            }
-                        }
+                match self.network_channels.state_recv.try_recv() {
+                    Err(TryRecvError::Empty) => {
+                        break;
                     }
                     Ok(recv_state_cmd) => {
                         match recv_state_cmd {
                             NetworkStateMessage::StateChange((entry, state)) => {
-                                self.connections[entry].state = state;
-                                if let Some(ind) = self.my_conn_ind {
+                                self.client.connections[entry].state = state;
+                                if let Some(ind) = self.client.my_conn_ind {
                                     if entry == ind {
-                                        if state & 4 > 0 {
-                                            if !is_in_vc {
-                                                is_in_vc = true;
-
-                                                let _ = self
-                                                    .audio_out_channels
-                                                    .command_send
-                                                    .send(ConsoleAudioCommands::PlayOpus(1));
-                                            }
-                                        } else if is_in_vc {
-                                            is_in_vc = false;
-
-                                            let _ = self
-                                                .audio_out_channels
-                                                .command_send
-                                                .send(ConsoleAudioCommands::PlayOpus(2));
-                                        }
+                                        self.new_state(state);
                                     }
                                 }
                             }
@@ -401,98 +438,80 @@ impl Client {
                                     name: user_name,
                                     state,
                                 };
-                                self.connections.push(conn_state);
+                                self.client.connections.push(conn_state);
                             }
                             NetworkStateMessage::ServerNameChange(server_name) => {
-                                self.server_name = server_name;
+                                self.client.server_name = server_name;
                             }
                             NetworkStateMessage::ConnectionsRefresh((
                                 new_conn_index,
                                 connection_state_vec,
                             )) => {
-                                self.my_conn_ind = new_conn_index;
-                                self.connections = connection_state_vec;
-                                if let Some(conn_ind) = self.my_conn_ind {
-                                    let state_test = self.connections[conn_ind].state;
-                                    if state_test & 4 > 0 {
-                                        if !is_in_vc {
-                                            is_in_vc = true;
-
-                                            let _ = self
-                                                .audio_out_channels
-                                                .command_send
-                                                .send(ConsoleAudioCommands::PlayOpus(1));
-                                        }
-                                    } else if is_in_vc {
-                                        is_in_vc = false;
-
-                                        let _ = self
-                                            .audio_out_channels
-                                            .command_send
-                                            .send(ConsoleAudioCommands::PlayOpus(2));
-                                    }
+                                self.client.my_conn_ind = new_conn_index;
+                                self.client.connections = connection_state_vec;
+                                if let Some(conn_ind) = self.client.my_conn_ind {
+                                    self.new_state(self.client.connections[conn_ind].state)
                                 }
                             }
                         }
                         should_draw = true;
                     }
-                }
-            }
-
-            loop {
-                match channels.network_debug_recv.try_recv() {
-                    Err(try_recv_error) => {
-                        match try_recv_error {
-                            TryRecvError::Empty => {
-                                break;
-                            }
-                            TryRecvError::Disconnected => {
-                                //state_common.debug_string.push_str("Network Debug Recv Disconnected!!!\n");
-                                //state_common.debug_lines += 1;
-                                break;
-                            }
-                        }
-                    }
-                    Ok(recv_string) => {
-                        self.debug_string.push_str(&recv_string);
-                        self.debug_lines += 1;
-                        should_draw = true;
+                    Err(TryRecvError::Disconnected) => {
+                        //state_common.debug_string.push_str("Network Debug Recv Disconnected!!!\n");
+                        //state_common.debug_lines += 1;
+                        break;
                     }
                 }
             }
 
             loop {
-                match self.audio_out_channels.debug_recv.try_recv() {
-                    Err(try_recv_error) => {
-                        match try_recv_error {
-                            TryRecvError::Empty => {
-                                break;
-                            }
-                            TryRecvError::Disconnected => {
-                                //state_common.debug_string.push_str("Network Debug Recv Disconnected!!!\n");
-                                //state_common.debug_lines += 1;
-                                break;
-                            }
-                        }
+                match self.network_channels.debug_recv.try_recv() {
+                    Err(TryRecvError::Empty) => {
+                        break;
                     }
                     Ok(recv_string) => {
-                        self.debug_string.push_str(recv_string);
-                        self.debug_lines += 1;
+                        self.client.debug_string.push_str(&recv_string);
+                        self.client.debug_lines += 1;
                         should_draw = true;
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        //state_common.debug_string.push_str("Network Debug Recv Disconnected!!!\n");
+                        //state_common.debug_lines += 1;
+                        break;
+                    }
+                }
+            }
+
+            loop {
+                match self.audio_channels.debug_recv.try_recv() {
+                    Err(TryRecvError::Empty) => {
+                        break;
+                    }
+                    Ok(recv_string) => {
+                        self.client.debug_string.push_str(recv_string);
+                        self.client.debug_lines += 1;
+                        should_draw = true;
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        //state_common.debug_string.push_str("Network Debug Recv Disconnected!!!\n");
+                        //state_common.debug_lines += 1;
+                        break;
                     }
                 }
             }
 
             if should_draw {
-                terminal_ui.draw(|frame| self.draw_console_ui(frame));
+                self.terminal.draw(|frame| self.client.draw_ui(frame))?;
                 should_draw = false;
             }
         }
 
-        let _ = channels.command_send.send(NetworkCommand::Stop(42));
+        let _ = self
+            .network_channels
+            .command_send
+            .send(NetworkCommand::Stop(42));
 
         // Cleanup Console Here:
-
-        Ok(())
+        self.terminal.stop()
     }
 }

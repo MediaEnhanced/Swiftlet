@@ -39,7 +39,7 @@ const TRANSFER_AUDIO: &str = "audio/transfer.opus";
 
 mod communication;
 use communication::{
-    ConsoleThreadChannels, NetworkCommand, NetworkStateConnection, NetworkStateMessage,
+    NetworkCommand, NetworkStateConnection, NetworkStateMessage, TerminalNetworkThreadChannels,
     TryRecvError,
 };
 
@@ -92,7 +92,8 @@ fn main() -> std::io::Result<()> {
     }
 
     // Initialize inter-thread channels common to both clients and servers (a future "headless" server won't need these)
-    let (network_channels, console_channels) = communication::create_networking_console_channels();
+    let (network_terminal_channels, terminal_network_channels) =
+        communication::create_networking_channels();
 
     // Check if the program started as a Client or a Server
     match args.address {
@@ -104,27 +105,32 @@ fn main() -> std::io::Result<()> {
 
             #[cfg(feature = "client")]
             {
-                let (audio_out_channels, network_audio_out_channels, console_audio_out_channels) =
-                    communication::create_audio_output_channels();
+                let (audio_channels, network_audio_channels, terminal_audio_channels) =
+                    communication::create_audio_channels();
 
-                let mut client = client::Client::new(server_address, console_audio_out_channels);
+                let mut client_terminal = client::ClientTerminal::new(
+                    server_address,
+                    terminal_network_channels,
+                    terminal_audio_channels,
+                )?;
 
                 // Start Network Thread
                 let network_thread_handler = thread::spawn(move || {
                     network::client_thread(
                         server_address,
                         args.name,
-                        network_channels,
-                        network_audio_out_channels,
+                        network_terminal_channels,
+                        network_audio_channels,
                     )
                 });
 
                 // Start Audio Thread
                 let audio_thread_handler =
-                    thread::spawn(move || client::audio::audio_thread(audio_out_channels));
+                    thread::spawn(move || client::audio::audio_thread(audio_channels));
 
                 // Start Console
-                let _ = client.run_console(console_channels);
+                client_terminal.run_terminal()?;
+                drop(client_terminal);
 
                 // Wait for Network Thread to Finish
                 network_thread_handler.join().unwrap();
@@ -139,11 +145,11 @@ fn main() -> std::io::Result<()> {
             // Start Network Thread
             let server_name = args.name.clone();
             let network_thread_handler = thread::spawn(move || {
-                network::server_thread(args.ipv4, args.port, server_name, network_channels)
+                network::server_thread(args.ipv4, args.port, server_name, network_terminal_channels)
             });
 
             // Start Console
-            let _ = run_console_server(args.name, console_channels);
+            let _ = run_console_server(args.name, terminal_network_channels);
 
             // Wait for Network Thread to Finish
             network_thread_handler.join().unwrap();
@@ -253,7 +259,10 @@ fn console_ui(frame: &mut ratatui::Frame, state: &ConsoleStateCommon, my_state: 
     );
 }
 
-fn run_console_server(servername: String, channels: ConsoleThreadChannels) -> std::io::Result<()> {
+fn run_console_server(
+    servername: String,
+    terminal_channels: TerminalNetworkThreadChannels,
+) -> std::io::Result<()> {
     // Start Console Here:
     crossterm::terminal::enable_raw_mode().unwrap();
     std::io::stdout().execute(crossterm::terminal::EnterAlternateScreen)?;
@@ -294,7 +303,7 @@ fn run_console_server(servername: String, channels: ConsoleThreadChannels) -> st
         }
 
         loop {
-            match channels.network_state_recv.try_recv() {
+            match terminal_channels.state_recv.try_recv() {
                 Err(try_recv_error) => {
                     match try_recv_error {
                         TryRecvError::Empty => {
@@ -332,7 +341,7 @@ fn run_console_server(servername: String, channels: ConsoleThreadChannels) -> st
         }
 
         loop {
-            match channels.network_debug_recv.try_recv() {
+            match terminal_channels.debug_recv.try_recv() {
                 Err(try_recv_error) => {
                     match try_recv_error {
                         TryRecvError::Empty => {
@@ -359,7 +368,9 @@ fn run_console_server(servername: String, channels: ConsoleThreadChannels) -> st
         }
     }
 
-    let _ = channels.command_send.send(NetworkCommand::Stop(42));
+    let _ = terminal_channels
+        .command_send
+        .send(NetworkCommand::Stop(42));
 
     // Cleanup Console Here:
     std::io::stdout().execute(crossterm::terminal::LeaveAlternateScreen)?;

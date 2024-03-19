@@ -72,6 +72,7 @@ impl SendBuffer {
 struct RealtimeRecv {
     id: u64,
     captured: usize,
+    initial_target: usize,
     target: usize,
     data: Option<Vec<u8>>,
     count: u64,
@@ -87,6 +88,7 @@ impl RealtimeRecv {
         RealtimeRecv {
             id,
             captured: 0,
+            initial_target: 0,
             target: 0,
             data: None,
             count: 0,
@@ -143,6 +145,7 @@ pub(super) enum RecvResult {
 }
 
 pub(super) enum StreamResult {
+    NoMore,
     Nothing,
     MainStreamReadable((Vec<u8>, usize)),
     RealtimeStreamReadable((Vec<u8>, usize, u64)),
@@ -570,6 +573,10 @@ impl Connection {
         }
 
         if self.established_once {
+            self.main_stream_send_next()?;
+            self.rt_stream_send_next()?;
+            self.bkgd_stream_send_next()?;
+
             Ok(RecvResult::StreamProcess(self.id))
         } else if self.connection.is_established() {
             Ok(RecvResult::Established(self.id))
@@ -600,7 +607,8 @@ impl Connection {
 
         self.main_recv.target = main_recv_bytes;
         self.main_recv.data = Some(main_recv_data);
-        self.rt_recv.target = rt_recv_bytes_initial;
+        self.rt_recv.initial_target = rt_recv_bytes_initial;
+        self.rt_recv.target = self.rt_recv.initial_target;
         self.rt_recv.data = Some(rt_recv_data);
         self.bkgd_recv.target = background_recv_bytes;
         self.bkgd_recv.data = Some(background_recv_data);
@@ -611,10 +619,6 @@ impl Connection {
 
     // A returned Error::InvalidState indicates something went wrong with the read process
     pub(super) fn stream_process(&mut self) -> Result<StreamResult, Error> {
-        self.main_stream_send_next()?;
-        self.rt_stream_send_next()?;
-        self.bkgd_stream_send_next()?;
-
         if let Some(next_readable_stream) = self.connection.stream_readable_next() {
             if next_readable_stream == MAIN_STREAM_ID {
                 if let Some(mut recv_data) = self.main_recv.data.take() {
@@ -668,13 +672,28 @@ impl Connection {
                 } else {
                     Err(Error::InvalidStreamState(13))
                 }
-            } else if let Some(recv_data) = self.rt_recv.data.take() {
-                self.stream_process_realtime(next_readable_stream, recv_data)
+            } else if !self.connection.stream_finished(next_readable_stream) {
+                if let Some(recv_data) = self.rt_recv.data.take() {
+                    self.stream_process_realtime(next_readable_stream, recv_data)
+                } else {
+                    Err(Error::InvalidStreamState(14))
+                }
             } else {
-                Err(Error::InvalidStreamState(14))
+                let mut temp_data = [0; 8];
+                match self
+                    .connection
+                    .stream_recv(next_readable_stream, &mut temp_data)
+                {
+                    Err(Error::StreamReset(_)) => {
+                        return Ok(StreamResult::Nothing);
+                    }
+                    Err(Error::Done) => Ok(StreamResult::Nothing),
+                    Err(e) => Err(e),
+                    Ok(_) => Ok(StreamResult::Nothing),
+                }
             }
         } else {
-            Ok(StreamResult::Nothing)
+            Ok(StreamResult::NoMore)
         }
     }
 
@@ -703,10 +722,12 @@ impl Connection {
             self.rt_recv.id = next_readable_stream;
             self.rt_recv.captured = 0;
             self.rt_recv.count += stream_id_difference >> 2;
+            self.rt_recv.target = self.rt_recv.initial_target;
         } else if next_readable_stream != self.rt_recv.id {
+            // Look more into but this specifies that next_readable_stream should just be ignored!
             self.rt_recv.data = Some(recv_data);
             return Ok(StreamResult::Nothing);
-            //return Err(Error::InvalidStreamState(16));
+            // return Err(Error::InvalidStreamState(16));
         }
 
         if self.rt_recv.target == 0 {
@@ -737,44 +758,70 @@ impl Connection {
                         self.rt_recv.data = Some(recv_data);
                         return Ok(StreamResult::Nothing);
                     }
+                    // Err(Error::StreamReset(_)) => {
+                    //     self.rt_recv.data = Some(recv_data);
+                    //     return Ok(StreamResult::Nothing);
+                    // }
                     Err(e) => return Err(e),
                 }
             }
         } else {
-            let (bytes_read, is_finished) = self.connection.stream_recv(
+            // println!(
+            //     "                           First Length:                               {}",
+            //     self.rt_recv.target
+            // );
+            match self.connection.stream_recv(
                 self.rt_recv.id,
                 &mut recv_data[self.rt_recv.captured..self.rt_recv.target],
-            )?;
-            self.rt_recv.captured += bytes_read;
-            if !is_finished {
-                #[allow(clippy::comparison_chain)]
-                if self.rt_recv.captured == self.rt_recv.target {
-                    Ok(StreamResult::RealtimeStreamReadable((
-                        recv_data,
-                        self.rt_recv.target,
-                        self.rt_recv.count,
-                    )))
-                } else if self.rt_recv.captured < self.rt_recv.target {
-                    self.rt_recv.data = Some(recv_data);
-                    Ok(StreamResult::Nothing)
-                } else {
-                    Err(Error::InvalidStreamState(18))
+            ) {
+                Ok((bytes_read, is_finished)) => {
+                    self.rt_recv.captured += bytes_read;
+                    if !is_finished {
+                        #[allow(clippy::comparison_chain)]
+                        if self.rt_recv.captured == self.rt_recv.target {
+                            Ok(StreamResult::RealtimeStreamReadable((
+                                recv_data,
+                                self.rt_recv.target,
+                                self.rt_recv.count,
+                            )))
+                        } else if self.rt_recv.captured < self.rt_recv.target {
+                            self.rt_recv.data = Some(recv_data);
+                            Ok(StreamResult::Nothing)
+                        } else {
+                            Err(Error::InvalidStreamState(18))
+                        }
+                    } else if self.rt_recv.captured == self.rt_recv.target {
+                        //self.rt_recv.target = 0; // Why was this here...?
+                        Ok(StreamResult::RealtimeStreamReadable((
+                            recv_data,
+                            self.rt_recv.captured,
+                            self.rt_recv.count,
+                        )))
+                    } else if self.rt_recv.captured < self.rt_recv.target {
+                        // Unexpected finish (recoverable)
+                        self.rt_recv.id += 4;
+                        self.rt_recv.captured = 0;
+                        self.rt_recv.count += 1;
+                        self.rt_recv.target = self.rt_recv.initial_target;
+                        Err(Error::Done)
+                    } else {
+                        Err(Error::InvalidStreamState(19))
+                    }
                 }
-            } else if self.rt_recv.captured == self.rt_recv.target {
-                self.rt_recv.target = 0;
-                Ok(StreamResult::RealtimeStreamReadable((
-                    recv_data,
-                    self.rt_recv.captured,
-                    self.rt_recv.count,
-                )))
-            } else if self.rt_recv.captured < self.rt_recv.target {
-                // Unexpected finish (recoverable)
-                self.rt_recv.id += 4;
-                self.rt_recv.captured = 0;
-                self.rt_recv.count += 1;
-                Err(Error::Done)
-            } else {
-                Err(Error::InvalidStreamState(19))
+                Err(Error::Done) => {
+                    //self.rt_recv.data = Some(recv_data);
+                    //Ok(StreamResult::Nothing)
+                    Err(Error::Done)
+                }
+                // Err(Error::StreamReset(_)) => {
+                //     println!("Still Happens!");
+                //     self.rt_recv.data = Some(recv_data);
+                //     self.rt_recv.id += 4;
+                //     self.rt_recv.captured = 0;
+                //     self.rt_recv.count += 1;
+                //     Ok(StreamResult::Nothing)
+                // }
+                Err(e) => Err(e),
             }
         }
     }
@@ -884,7 +931,6 @@ impl Connection {
     }
 
     // A returned Error::InvalidState indicates something went wrong with the read process
-    // A returned Error::Done indicates an unexpected real-time stream finish
     pub(super) fn rt_stream_read(
         &mut self,
         mut data_vec: Vec<u8>,
@@ -899,7 +945,12 @@ impl Connection {
             return Ok(None);
         }
 
-        if target_len == 0 {
+        // Weird quiche?? error occurs if this test isn't here
+        // Might get moved around in future
+        if self.connection.stream_finished(self.rt_recv.id) {
+            self.rt_recv.data = Some(data_vec);
+            Ok(None)
+        } else if target_len == 0 {
             self.rt_recv.captured = 0;
             self.rt_recv.target = target_len;
             loop {
@@ -928,6 +979,10 @@ impl Connection {
                 }
             }
         } else {
+            // println!(
+            //     "                        Target Length:                               {}",
+            //     target_len
+            // );
             if target_len > data_vec.len() {
                 data_vec.resize(target_len, 0);
             }
@@ -936,6 +991,7 @@ impl Connection {
                 .stream_recv(self.rt_recv.id, &mut data_vec[..target_len])
             {
                 Ok((bytes_read, is_finished)) => {
+                    // Tests can get rearranged in future
                     if !is_finished {
                         #[allow(clippy::comparison_chain)]
                         if bytes_read == target_len {
@@ -948,12 +1004,14 @@ impl Connection {
                         } else {
                             Err(Error::InvalidState)
                         }
+                    } else if bytes_read == target_len {
+                        Ok(Some((data_vec, target_len)))
+                    } else if bytes_read < target_len {
+                        // Need to change this later
+                        // Based on incorrect realtime application protocol stuff
+                        Err(Error::InvalidStreamState(20))
                     } else {
-                        // Unexpected Finish (recoverable)
-                        self.rt_recv.id += 4;
-                        self.rt_recv.captured = 0;
-                        self.rt_recv.count += 1;
-                        Err(Error::Done)
+                        Err(Error::InvalidState)
                     }
                 }
                 Err(Error::Done) => {

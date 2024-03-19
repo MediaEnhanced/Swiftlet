@@ -21,38 +21,35 @@
 //SOFTWARE.
 
 use crossbeam_channel::bounded;
-pub(crate) use crossbeam_channel::{Receiver, Sender, TryRecvError};
+pub(crate) use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError};
 
-#[cfg(feature = "client")]
-use crate::client::audio::OpusData;
-
-pub(crate) struct NetworkThreadChannels {
+pub(crate) struct NetworkTerminalThreadChannels {
     pub(crate) command_recv: Receiver<NetworkCommand>,
-    pub(crate) network_state_send: Sender<NetworkStateMessage>,
-    pub(crate) network_debug_send: Sender<String>, // String so that non-static debug messages can be made!
+    pub(crate) state_send: Sender<NetworkStateMessage>,
+    pub(crate) debug_send: Sender<String>, // String so that non-static debug messages can be made!
 }
 
-pub(crate) struct ConsoleThreadChannels {
+pub(crate) struct TerminalNetworkThreadChannels {
     pub(crate) command_send: Sender<NetworkCommand>,
-    pub(crate) network_state_recv: Receiver<NetworkStateMessage>,
-    pub(crate) network_debug_recv: Receiver<String>,
+    pub(crate) state_recv: Receiver<NetworkStateMessage>,
+    pub(crate) debug_recv: Receiver<String>,
 }
 
-pub(crate) fn create_networking_console_channels() -> (NetworkThreadChannels, ConsoleThreadChannels)
-{
+pub(crate) fn create_networking_channels(
+) -> (NetworkTerminalThreadChannels, TerminalNetworkThreadChannels) {
     let (command_send, command_recv) = bounded(64);
-    let (network_state_send, network_state_recv) = bounded(64);
-    let (network_debug_send, network_debug_recv) = bounded(256);
+    let (state_send, state_recv) = bounded(64);
+    let (debug_send, debug_recv) = bounded(256);
 
-    let network_channels = NetworkThreadChannels {
+    let network_channels = NetworkTerminalThreadChannels {
         command_recv,
-        network_state_send,
-        network_debug_send,
+        state_send,
+        debug_send,
     };
-    let console_channels = ConsoleThreadChannels {
+    let console_channels = TerminalNetworkThreadChannels {
         command_send,
-        network_state_recv,
-        network_debug_recv,
+        state_recv,
+        debug_recv,
     };
 
     (network_channels, console_channels)
@@ -60,20 +57,20 @@ pub(crate) fn create_networking_console_channels() -> (NetworkThreadChannels, Co
 
 pub(crate) enum NetworkCommand {
     Stop(u64),
+    Server(ServerCommand),
     #[cfg(feature = "client")]
     Client(ClientCommand),
-    Server(ServerCommand),
+}
+
+pub(crate) enum ServerCommand {
+    ConnectionClose(usize),
 }
 
 #[cfg(feature = "client")]
 pub(crate) enum ClientCommand {
     StateChange(u8),
     ServerConnect(swiftlet_quic::endpoint::SocketAddr),
-    MusicTransfer(OpusData),
-}
-
-pub(crate) enum ServerCommand {
-    ConnectionClose(usize),
+    MusicTransfer(swiftlet_audio::opus::OpusData),
 }
 
 pub(crate) enum NetworkStateMessage {
@@ -89,50 +86,62 @@ pub(crate) struct NetworkStateConnection {
 }
 
 #[cfg(feature = "client")]
-pub(crate) struct AudioOutputThreadChannels {
-    pub(crate) command_recv: Receiver<ConsoleAudioCommands>,
-    pub(crate) packet_recv: Receiver<NetworkAudioPackets>,
+pub(crate) struct AudioThreadChannels {
+    // Audio Input Specific Channels
+    pub(crate) output_cmd_recv: Receiver<TerminalAudioOutCommands>,
+    pub(crate) packet_recv: Receiver<NetworkAudioOutPackets>,
+    // Audio Output Specific Channels
+    pub(crate) input_cmd_recv: Receiver<TerminalAudioInCommands>,
+    pub(crate) packet_send: Sender<NetworkAudioInPackets>,
+    // Shared Channels
     pub(crate) state_send: Sender<AudioStateMessage>,
     pub(crate) debug_send: Sender<&'static str>,
 }
 
 #[cfg(feature = "client")]
-pub(crate) struct NetworkAudioOutputChannels {
-    pub(crate) packet_send: Sender<NetworkAudioPackets>,
+pub(crate) struct NetworkAudioThreadChannels {
+    pub(crate) packet_send: Sender<NetworkAudioOutPackets>,
+    pub(crate) packet_recv: Receiver<NetworkAudioInPackets>,
 }
 
 #[cfg(feature = "client")]
-pub(crate) struct ConsoleAudioOutputChannels {
-    pub(crate) command_send: Sender<ConsoleAudioCommands>,
+pub(crate) struct TerminalAudioThreadChannels {
+    pub(crate) output_cmd_send: Sender<TerminalAudioOutCommands>,
+    pub(crate) input_cmd_send: Sender<TerminalAudioInCommands>,
     pub(crate) state_recv: Receiver<AudioStateMessage>,
     pub(crate) debug_recv: Receiver<&'static str>,
 }
 
 #[cfg(feature = "client")]
-pub(crate) fn create_audio_output_channels() -> (
-    AudioOutputThreadChannels,
-    NetworkAudioOutputChannels,
-    ConsoleAudioOutputChannels,
+pub(crate) fn create_audio_channels() -> (
+    AudioThreadChannels,
+    NetworkAudioThreadChannels,
+    TerminalAudioThreadChannels,
 ) {
-    let (audio_output_command_send, audio_output_command_recv) =
-        bounded::<ConsoleAudioCommands>(64);
-    let (audio_output_packet_send, audio_output_packet_recv) = bounded(64);
-    let (audio_output_state_send, audio_output_state_recv) = bounded(64);
-    let (audio_output_debug_send, audio_output_debug_recv) = bounded(256);
+    let (output_cmd_send, output_cmd_recv) = bounded(64);
+    let (input_cmd_send, input_cmd_recv) = bounded(64);
+    let (packet_send, audio_packet_recv) = bounded(64);
+    let (audio_packet_send, packet_recv) = bounded(64);
+    let (state_send, state_recv) = bounded(64);
+    let (debug_send, debug_recv) = bounded(256);
 
-    let audio_output_channels = AudioOutputThreadChannels {
-        command_recv: audio_output_command_recv,
-        packet_recv: audio_output_packet_recv,
-        state_send: audio_output_state_send,
-        debug_send: audio_output_debug_send,
+    let audio_output_channels = AudioThreadChannels {
+        output_cmd_recv,
+        packet_recv: audio_packet_recv,
+        input_cmd_recv,
+        packet_send: audio_packet_send,
+        state_send,
+        debug_send,
     };
-    let network_audio_output_channels = NetworkAudioOutputChannels {
-        packet_send: audio_output_packet_send,
+    let network_audio_output_channels = NetworkAudioThreadChannels {
+        packet_send,
+        packet_recv,
     };
-    let console_audio_output_channels = ConsoleAudioOutputChannels {
-        command_send: audio_output_command_send,
-        state_recv: audio_output_state_recv,
-        debug_recv: audio_output_debug_recv,
+    let console_audio_output_channels = TerminalAudioThreadChannels {
+        output_cmd_send,
+        input_cmd_send,
+        state_recv,
+        debug_recv,
     };
 
     (
@@ -142,18 +151,35 @@ pub(crate) fn create_audio_output_channels() -> (
     )
 }
 
+// Quit happens as a result of the disconnect channel error
 #[cfg(feature = "client")]
-pub(crate) enum ConsoleAudioCommands {
-    LoadOpus(OpusData),
+pub(crate) enum TerminalAudioOutCommands {
+    LoadOpus(swiftlet_audio::opus::OpusData),
     PlayOpus(u64),
 }
 
 #[cfg(feature = "client")]
-pub(crate) enum NetworkAudioPackets {
+pub(crate) enum NetworkAudioOutPackets {
     MusicPacket((u8, Vec<u8>)),
     MusicStop(u8),
-    VoiceData(Vec<u8>),
+    VoiceData((u16, Vec<u8>)),
+    VoiceStop(u16),
+}
+
+// Quit happens as a result of the disconnect channel error
+#[cfg(feature = "client")]
+pub(crate) enum TerminalAudioInCommands {
+    Start,
+    Pause,
 }
 
 #[cfg(feature = "client")]
-pub(crate) enum AudioStateMessage {}
+pub(crate) enum NetworkAudioInPackets {
+    Nothing,
+    VoiceOpusData(Vec<u8>),
+}
+
+#[cfg(feature = "client")]
+pub(crate) enum AudioStateMessage {
+    InputPaused,
+}

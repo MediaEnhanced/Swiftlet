@@ -98,6 +98,7 @@ pub struct Endpoint {
     next_connection_id: u64,
     connections: Vec<Connection>,
     last_valid_index: usize,
+    stream_process_index: Option<(u64, usize)>,
     rand: SystemRandom,
     config: Config,
     is_server: bool,
@@ -385,6 +386,7 @@ impl Endpoint {
                 next_connection_id: 1,
                 connections: Vec::new(),
                 last_valid_index: 0,
+                stream_process_index: None,
                 rand,
                 config,
                 is_server: true,
@@ -443,6 +445,7 @@ impl Endpoint {
                 next_connection_id: 1,
                 connections: Vec::new(),
                 last_valid_index: 0,
+                stream_process_index: None,
                 rand,
                 config,
                 is_server: false,
@@ -727,7 +730,97 @@ impl Endpoint {
         }
     }
 
+    fn stream_process(
+        &mut self,
+        connection_id: u64,
+        verified_index: usize,
+    ) -> Result<RecvEvent, Error> {
+        self.last_valid_index = verified_index;
+        match self.connections[verified_index].stream_process() {
+            Ok(StreamResult::NoMore) => {
+                self.stream_process_index = None;
+                Ok(RecvEvent::NoUpdate)
+            }
+            Ok(StreamResult::MainStreamReadable((data_vec, len))) => {
+                if self.send(verified_index)?.is_none() {
+                    Ok(RecvEvent::MainStreamReceived((
+                        connection_id,
+                        verified_index,
+                        data_vec,
+                        len,
+                    )))
+                } else {
+                    Err(Error::UnexpectedClose)
+                }
+            }
+            Ok(StreamResult::RealtimeStreamReadable((data_vec, len, rt_id))) => {
+                if self.send(verified_index)?.is_none() {
+                    Ok(RecvEvent::RealtimeReceived(
+                        connection_id,
+                        verified_index,
+                        data_vec,
+                        len,
+                        rt_id,
+                    ))
+                } else {
+                    Err(Error::UnexpectedClose)
+                }
+            }
+            Ok(StreamResult::BkgdStreamReadable((data_vec, len))) => {
+                if self.send(verified_index)?.is_none() {
+                    Ok(RecvEvent::BackgroundStreamReceived((
+                        connection_id,
+                        verified_index,
+                        data_vec,
+                        len,
+                    )))
+                } else {
+                    Err(Error::UnexpectedClose)
+                }
+            }
+            Ok(StreamResult::Nothing) => Ok(RecvEvent::NoUpdate),
+            Ok(StreamResult::MainStreamFinished) => {
+                if let Some(close_info) =
+                    self.connection_close(verified_index, EndpointCloseReason::MainStreamFinished)?
+                {
+                    let end_reason = ConnectionEndReason::from_close_info(&close_info);
+                    if close_info.is_closed {
+                        self.remove_connection(verified_index);
+                        Ok(RecvEvent::ConnectionEnded((connection_id, end_reason)))
+                    } else {
+                        Ok(RecvEvent::ConnectionEnding((connection_id, end_reason)))
+                    }
+                } else {
+                    Ok(RecvEvent::NoUpdate)
+                }
+            }
+            Ok(StreamResult::BkgdStreamFinished) => {
+                if let Some(close_info) = self.connection_close(
+                    verified_index,
+                    EndpointCloseReason::BackgroundStreamFinished,
+                )? {
+                    let end_reason = ConnectionEndReason::from_close_info(&close_info);
+                    if close_info.is_closed {
+                        self.remove_connection(verified_index);
+                        Ok(RecvEvent::ConnectionEnded((connection_id, end_reason)))
+                    } else {
+                        Ok(RecvEvent::ConnectionEnding((connection_id, end_reason)))
+                    }
+                } else {
+                    Ok(RecvEvent::NoUpdate)
+                }
+            }
+
+            Err(e) => Err(Error::StreamRecv(e)),
+        }
+    }
+
     pub(super) fn recv(&mut self) -> Result<RecvEvent, Error> {
+        // Gotta Process Coallesced Stream Packets Here!
+        if let Some((connection_id, verified_index)) = self.stream_process_index {
+            return self.stream_process(connection_id, verified_index);
+        }
+
         match self.udp.get_next_recv_data() {
             Ok((recv_data, from_addr)) => {
                 // Only bother to look at a datagram that is less than or equal to the target
@@ -800,104 +893,8 @@ impl Endpoint {
                             };
                             match recv_res {
                                 RecvResult::StreamProcess(conn_id) => {
-                                    let connection_id = conn_id;
-                                    self.last_valid_index = verified_index;
-                                    match self.connections[verified_index].stream_process() {
-                                        Ok(StreamResult::MainStreamReadable((data_vec, len))) => {
-                                            if self.send(verified_index)?.is_none() {
-                                                Ok(RecvEvent::MainStreamReceived((
-                                                    connection_id,
-                                                    verified_index,
-                                                    data_vec,
-                                                    len,
-                                                )))
-                                            } else {
-                                                Err(Error::UnexpectedClose)
-                                            }
-                                        }
-                                        Ok(StreamResult::RealtimeStreamReadable((
-                                            data_vec,
-                                            len,
-                                            rt_id,
-                                        ))) => {
-                                            if self.send(verified_index)?.is_none() {
-                                                Ok(RecvEvent::RealtimeReceived(
-                                                    connection_id,
-                                                    verified_index,
-                                                    data_vec,
-                                                    len,
-                                                    rt_id,
-                                                ))
-                                            } else {
-                                                Err(Error::UnexpectedClose)
-                                            }
-                                        }
-                                        Ok(StreamResult::BkgdStreamReadable((data_vec, len))) => {
-                                            if self.send(verified_index)?.is_none() {
-                                                Ok(RecvEvent::BackgroundStreamReceived((
-                                                    connection_id,
-                                                    verified_index,
-                                                    data_vec,
-                                                    len,
-                                                )))
-                                            } else {
-                                                Err(Error::UnexpectedClose)
-                                            }
-                                        }
-                                        Ok(StreamResult::Nothing) => Ok(RecvEvent::NoUpdate),
-                                        Ok(StreamResult::MainStreamFinished) => {
-                                            if let Some(close_info) = self.connection_close(
-                                                verified_index,
-                                                EndpointCloseReason::MainStreamFinished,
-                                            )? {
-                                                let end_reason =
-                                                    ConnectionEndReason::from_close_info(
-                                                        &close_info,
-                                                    );
-                                                if close_info.is_closed {
-                                                    self.remove_connection(verified_index);
-                                                    Ok(RecvEvent::ConnectionEnded((
-                                                        connection_id,
-                                                        end_reason,
-                                                    )))
-                                                } else {
-                                                    Ok(RecvEvent::ConnectionEnding((
-                                                        connection_id,
-                                                        end_reason,
-                                                    )))
-                                                }
-                                            } else {
-                                                Ok(RecvEvent::NoUpdate)
-                                            }
-                                        }
-                                        Ok(StreamResult::BkgdStreamFinished) => {
-                                            if let Some(close_info) = self.connection_close(
-                                                verified_index,
-                                                EndpointCloseReason::BackgroundStreamFinished,
-                                            )? {
-                                                let end_reason =
-                                                    ConnectionEndReason::from_close_info(
-                                                        &close_info,
-                                                    );
-                                                if close_info.is_closed {
-                                                    self.remove_connection(verified_index);
-                                                    Ok(RecvEvent::ConnectionEnded((
-                                                        connection_id,
-                                                        end_reason,
-                                                    )))
-                                                } else {
-                                                    Ok(RecvEvent::ConnectionEnding((
-                                                        connection_id,
-                                                        end_reason,
-                                                    )))
-                                                }
-                                            } else {
-                                                Ok(RecvEvent::NoUpdate)
-                                            }
-                                        }
-
-                                        Err(e) => Err(Error::StreamRecv(e)),
-                                    }
+                                    self.stream_process_index = Some((conn_id, verified_index));
+                                    self.stream_process(conn_id, verified_index)
                                 }
                                 RecvResult::Nothing => Ok(RecvEvent::NoUpdate),
                                 RecvResult::Established(conn_id) => {
@@ -1035,8 +1032,17 @@ impl Endpoint {
                 target_len = self.config.initial_main_recv_size;
             }
             match self.connections[verified_index].main_stream_read(data_vec, target_len) {
-                Ok(Some(vec_data)) => Ok(ReadInfo::ReadData((vec_data, target_len))),
-                Ok(None) => Ok(ReadInfo::DoneReceiving),
+                Ok(vec_data_opt) => {
+                    if self.send(verified_index)?.is_none() {
+                        if let Some(vec_data) = vec_data_opt {
+                            Ok(ReadInfo::ReadData((vec_data, target_len)))
+                        } else {
+                            Ok(ReadInfo::DoneReceiving)
+                        }
+                    } else {
+                        Err(Error::UnexpectedClose)
+                    }
+                }
                 Err(connection::Error::Done) => {
                     if let Some(close_info) = self
                         .connection_close(verified_index, EndpointCloseReason::MainStreamFinished)?
@@ -1116,11 +1122,16 @@ impl Endpoint {
         target_len: usize,
     ) -> Result<Option<(Vec<u8>, usize)>, Error> {
         match self.connections[verified_index].rt_stream_read(data_vec, target_len) {
-            Ok(Some((vec_data, vec_len))) => Ok(Some((vec_data, vec_len))),
-            Ok(None) => Ok(None),
-            Err(connection::Error::Done) => {
-                // Might do more here in future...?
-                Ok(None)
+            Ok(vec_info_opt) => {
+                if self.send(verified_index)?.is_none() {
+                    if let Some((vec_data, vec_len)) = vec_info_opt {
+                        Ok(Some((vec_data, vec_len)))
+                    } else {
+                        Ok(None)
+                    }
+                } else {
+                    Err(Error::UnexpectedClose)
+                }
             }
             Err(_) => Err(Error::StreamSend),
         }
@@ -1164,8 +1175,17 @@ impl Endpoint {
                 target_len = self.config.initial_background_recv_size;
             }
             match self.connections[verified_index].bkgd_stream_read(data_vec, target_len) {
-                Ok(Some(vec_data)) => Ok(ReadInfo::ReadData((vec_data, target_len))),
-                Ok(None) => Ok(ReadInfo::DoneReceiving),
+                Ok(vec_data_opt) => {
+                    if self.send(verified_index)?.is_none() {
+                        if let Some(vec_data) = vec_data_opt {
+                            Ok(ReadInfo::ReadData((vec_data, target_len)))
+                        } else {
+                            Ok(ReadInfo::DoneReceiving)
+                        }
+                    } else {
+                        Err(Error::UnexpectedClose)
+                    }
+                }
                 Err(connection::Error::Done) => {
                     if let Some(close_info) = self
                         .connection_close(verified_index, EndpointCloseReason::MainStreamFinished)?

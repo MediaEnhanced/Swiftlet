@@ -45,7 +45,7 @@ pub(super) enum StreamMsgType {
     TransferRequest,  // Data_Len_Size (3), TransferIntention (1)
     TransferResponse, // Transfer ID (2)
     TransferData,     // Header (Includes Transfer ID instead of Size) TransferData
-    VoiceData,
+    VoiceDataPacket,  // ID (2), Data
 
     // Client Messages:
     NewClientAnnounce, // ClientNameLen, ClientName
@@ -67,7 +67,7 @@ impl StreamMsgType {
             x if x == Self::TransferRequest as u8 => Self::TransferRequest,
             x if x == Self::TransferResponse as u8 => Self::TransferResponse,
             x if x == Self::TransferData as u8 => Self::TransferData,
-            x if x == Self::VoiceData as u8 => Self::VoiceData,
+            x if x == Self::VoiceDataPacket as u8 => Self::VoiceDataPacket,
 
             x if x == Self::NewClientAnnounce as u8 => Self::NewClientAnnounce,
             x if x == Self::NewStateRequest as u8 => Self::NewStateRequest,
@@ -102,7 +102,7 @@ impl StreamMsgType {
             Self::TransferRequest => Self::TransferRequest as u8,
             Self::TransferResponse => Self::TransferResponse as u8,
             Self::TransferData => Self::TransferData as u8,
-            Self::VoiceData => Self::VoiceData as u8,
+            Self::VoiceDataPacket => Self::VoiceDataPacket as u8,
 
             Self::NewClientAnnounce => Self::NewClientAnnounce as u8,
             Self::NewStateRequest => Self::NewStateRequest as u8,
@@ -125,7 +125,7 @@ impl StreamMsgType {
                 | Self::TransferRequest
                 | Self::TransferResponse
                 | Self::TransferData
-                | Self::VoiceData
+                | Self::VoiceDataPacket
         )
     }
 
@@ -136,7 +136,7 @@ impl StreamMsgType {
             Self::TransferRequest
                 | Self::TransferResponse
                 | Self::TransferData
-                | Self::VoiceData
+                | Self::VoiceDataPacket
                 | Self::NewClientAnnounce
                 | Self::NewStateRequest
                 | Self::MusicRequest
@@ -149,8 +149,9 @@ impl StreamMsgType {
         if let Some(body_size) = body_capacity {
             let mut send_data = Vec::with_capacity(body_size + MESSAGE_HEADER_SIZE);
             send_data.push(self.to_u8());
-            send_data.push(0);
-            send_data.push(0);
+            let num_bytes = usize::to_le_bytes(body_size);
+            send_data.push(num_bytes[0]);
+            send_data.push(num_bytes[1]);
             send_data
         } else {
             Vec::from([self.to_u8(), 0, 0])
