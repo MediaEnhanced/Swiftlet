@@ -4,6 +4,7 @@
 # Cargo Command Aliases that have usefulness
 [alias]
 run-quic-example = "run -p swiftlet_quic --example simple"
+run-mio-timeout-test = "run -p swiftlet_quic --example timeout"
 run-audio-loopback-example = "run -p swiftlet_audio --example loopback"
 run-audio-playback-example = "run -p swiftlet_audio --example playback --features opus"
 

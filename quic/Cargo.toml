@@ -62,3 +62,12 @@ doc = false
 test = false
 harness = false
 bench = false
+
+[[example]]
+name = "timeout"
+path = "examples/timeout.rs"
+crate-type = ["bin"]
+doc = false
+test = false
+harness = false
+bench = false
