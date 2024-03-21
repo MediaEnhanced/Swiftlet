@@ -1069,11 +1069,11 @@ impl EndpointEventCallbacks for ClientHandler {
                     Ok(pkt) => {
                         let channel_latency = Instant::now() - pkt.instant;
                         //if channel_latency > Duration::from_millis(6) {
-                        let s = format!(
-                            "Channel Latency: {:?}; Since Last Tick: {:?}\n",
-                            channel_latency, current_duration
-                        );
-                        let _ = self.terminal_channels.debug_send.push(s);
+                        // let s = format!(
+                        //     "Channel Latency: {:?}; Since Last Tick: {:?}\n",
+                        //     channel_latency, current_duration
+                        // );
+                        // let _ = self.terminal_channels.debug_send.push(s);
                         //}
                         pkt_times += 1;
                         self.avg_voice_send += 1;

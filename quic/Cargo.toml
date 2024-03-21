@@ -29,6 +29,10 @@ mio = { version = "0.8", features = ["os-poll", "net"]}
 quiche = { version = "0.20" } # features = ["boringssl-boring-crate"]
 ring = { version = "0.17" }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.54", features = [
+	"Win32_Media",
+]}
 
 [lib]
 # Unnecessary Name since it matches the package name

@@ -98,6 +98,9 @@ pub(super) enum SocketError {
 
 impl UdpSocket {
     pub(super) fn new(bind_addr: SocketAddr) -> Result<(Self, SocketAddr), SocketError> {
+        #[cfg(target_os = "windows")]
+        let _ = unsafe { windows::Win32::Media::timeBeginPeriod(1) };
+
         let mut socket = match mio::net::UdpSocket::bind(bind_addr) {
             Ok(s) => s,
             Err(_) => return Err(SocketError::CouldNotCreate),
