@@ -20,22 +20,138 @@
 //OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //SOFTWARE.
 
+// UDP Management Intended for use with QUIC
+
 use crate::endpoint::SocketAddr;
 
-// UDP Management Intended for use with QUIC
-use std::collections::BinaryHeap;
+#[cfg_attr(target_os = "windows", path = "udp/windows.rs")]
+#[cfg_attr(target_os = "linux", path = "udp/mio.rs")]
+#[cfg_attr(target_os = "macos", path = "udp/mio.rs")]
+mod os;
+//use os::{AudioInput, AudioOutput, AudioOwner};
 
+use std::collections::BinaryHeap;
 use std::time::Instant;
 
+#[allow(dead_code)]
 pub(super) const MAX_UDP_LENGTH: usize = 65536;
 
 // QUIC defines a minimum UDP maximum datagram(payload) size of 1200 bytes for both IPv4 and IPv6
 //  https://datatracker.ietf.org/doc/html/rfc9000#name-datagram-size
-//pub(super) const MIN_MAX_DATAGRAM_SIZE: usize = 1200;
+//pub const MIN_MAX_DATAGRAM_SIZE: usize = 1200;
 // The target maximum datagram size is based on the IPv6 standard minimum of 1280 bytes (that cannot be fragmented)
 //  which after the non-extended IPv6 and UDP headers are subtracted becomes 1232 bytes
 // Modern IPv4 networks SHOULD be able to handle this target max datagram size (need source links HERE)
 pub(super) const TARGET_MAX_DATAGRAM_SIZE: usize = 1232;
+
+// UDP Socket Manager (Using the mio crate)
+pub(super) struct Socket {
+    os_socket: os::UdpSocket,
+    delayed_sends: BinaryHeap<DelayedSendPacket>,
+}
+
+#[derive(Debug)]
+pub(super) enum SocketError {
+    CouldNotCreate,
+    BadLocalAddress,
+    RecvBlocked,
+}
+
+impl Socket {
+    pub(super) fn new(ipv6_mode: bool, bind_port: u16) -> Result<(Self, SocketAddr), SocketError> {
+        let os_socket = match os::UdpSocket::new(ipv6_mode, bind_port) {
+            Some(s) => s,
+            None => return Err(SocketError::CouldNotCreate),
+        };
+
+        let local_addr = match os_socket.get_local_address() {
+            Some(la) => la,
+            None => return Err(SocketError::BadLocalAddress),
+        };
+
+        let socket = Socket {
+            os_socket,
+            delayed_sends: BinaryHeap::new(),
+        };
+
+        Ok((socket, local_addr))
+    }
+
+    // Returns true if there is data to be read
+    // It should capture "missed" events between calls and return without delay in this case
+    #[inline]
+    pub(super) fn sleep_till_recv_data(&mut self, timeout_duration: std::time::Duration) -> bool {
+        // Possible timeout_duration parameter (safety) check here in future
+        self.os_socket.sleep_till_next_recv(timeout_duration)
+    }
+
+    #[inline]
+    pub(super) fn get_next_recv_data(&mut self) -> Result<(&mut [u8], SocketAddr), SocketError> {
+        match self.os_socket.get_next_recv() {
+            Some((recv_size, addr_from)) => Ok((recv_size, addr_from)),
+            None => Err(SocketError::RecvBlocked),
+        }
+    }
+
+    #[inline]
+    pub(super) fn done_with_recv_data(&mut self) {
+        self.os_socket.done_with_recv();
+    }
+
+    #[inline]
+    pub(super) fn get_next_send_data(&mut self) -> &mut [u8] {
+        self.os_socket.get_next_send()
+    }
+
+    pub(super) fn done_with_send_data(
+        &mut self,
+        to_addr: SocketAddr,
+        len: usize,
+        instant: Instant,
+    ) -> Result<bool, SocketError> {
+        if instant <= Instant::now() {
+            self.os_socket.done_with_send(to_addr, len);
+            Ok(true)
+        } else {
+            let delayed_send_packet = DelayedSendPacket {
+                data: self.os_socket.get_next_send()[..TARGET_MAX_DATAGRAM_SIZE]
+                    .try_into()
+                    .unwrap(),
+                data_len: len,
+                to_addr,
+                instant,
+            };
+            self.delayed_sends.push(delayed_send_packet);
+
+            Ok(false)
+        }
+    }
+
+    #[inline]
+    pub(super) fn next_send_instant(&self) -> Option<Instant> {
+        self.delayed_sends
+            .peek()
+            .map(|delayed_send_packet| delayed_send_packet.instant)
+    }
+
+    pub(super) fn send_check(&mut self) -> Result<u64, SocketError> {
+        let mut sends = 0;
+        while let Some(delayed_send_packet) = self.delayed_sends.peek() {
+            if delayed_send_packet.instant <= Instant::now() {
+                let next_send = self.os_socket.get_next_send();
+                next_send[..delayed_send_packet.data_len]
+                    .copy_from_slice(&delayed_send_packet.data[..delayed_send_packet.data_len]);
+                self.os_socket
+                    .done_with_send(delayed_send_packet.to_addr, delayed_send_packet.data_len);
+                sends += 1;
+                self.delayed_sends.pop();
+            } else {
+                return Ok(sends);
+            }
+        }
+        Ok(sends)
+    }
+}
 
 // A delayed send packet contains data that is sent from the socket only AFTER an Instant is reached
 struct DelayedSendPacket {
@@ -72,202 +188,5 @@ impl Eq for DelayedSendPacket {}
 impl PartialEq for DelayedSendPacket {
     fn eq(&self, other: &Self) -> bool {
         self.instant == other.instant
-    }
-}
-
-// UDP Socket Manager (Using the mio crate)
-pub(super) struct UdpSocket {
-    poll: mio::Poll,
-    events: mio::Events,
-    socket: mio::net::UdpSocket,
-    read_data: [u8; MAX_UDP_LENGTH],
-    //prev_recv_size: usize,
-    //prev_recv_from: Option<SocketAddr>,
-    packet: [u8; TARGET_MAX_DATAGRAM_SIZE],
-    send_queue: BinaryHeap<DelayedSendPacket>,
-}
-
-pub(super) enum SocketError {
-    CouldNotCreate,
-    SendSizeWrong,
-    SendBlocked,
-    SendOtherIssue,
-    RecvBlocked,
-    RecvOtherIssue(std::io::ErrorKind),
-}
-
-impl UdpSocket {
-    pub(super) fn new(bind_addr: SocketAddr) -> Result<(Self, SocketAddr), SocketError> {
-        #[cfg(target_os = "windows")]
-        let _ = unsafe { windows::Win32::Media::timeBeginPeriod(1) };
-
-        let mut socket = match mio::net::UdpSocket::bind(bind_addr) {
-            Ok(s) => s,
-            Err(_) => return Err(SocketError::CouldNotCreate),
-        };
-
-        let local_addr = match socket.local_addr() {
-            Ok(la) => la,
-            Err(_) => return Err(SocketError::CouldNotCreate),
-        };
-
-        let poll = match mio::Poll::new() {
-            Ok(p) => p,
-            Err(_) => return Err(SocketError::CouldNotCreate),
-        };
-
-        match poll
-            .registry()
-            .register(&mut socket, mio::Token(0), mio::Interest::READABLE)
-        {
-            Ok(_) => {}
-            Err(_) => return Err(SocketError::CouldNotCreate),
-        }
-
-        let socket_state = UdpSocket {
-            poll,
-            events: mio::Events::with_capacity(1024),
-            socket,
-            read_data: [0; MAX_UDP_LENGTH],
-            //prev_recv_size: 0,
-            //prev_recv_from: None,
-            packet: [0; TARGET_MAX_DATAGRAM_SIZE],
-            send_queue: BinaryHeap::new(),
-        };
-
-        Ok((socket_state, local_addr))
-    }
-
-    #[inline]
-    pub(super) fn get_packet_data(&mut self) -> &mut [u8] {
-        &mut self.packet
-    }
-
-    pub(super) fn send_packet(
-        &mut self,
-        len: usize,
-        to_addr: SocketAddr,
-        instant: Instant,
-    ) -> Result<bool, SocketError> {
-        if instant <= Instant::now() {
-            // Drops packet before it enters network stack if it would block
-            // Uncertain if it will partially fill socket (could even be OS dependent)
-            match self.socket.send_to(&self.packet[..len], to_addr) {
-                Ok(send_size) => {
-                    if send_size != len {
-                        Err(SocketError::SendSizeWrong)
-                    } else {
-                        Ok(true)
-                    }
-                }
-                Err(err) => {
-                    if err.kind() == std::io::ErrorKind::WouldBlock {
-                        Err(SocketError::SendBlocked)
-                    } else {
-                        Err(SocketError::SendOtherIssue)
-                    }
-                }
-            }
-        } else {
-            let delayed_send_packet = DelayedSendPacket {
-                data: self.packet, // It copies it...?
-                data_len: len,
-                to_addr,
-                instant,
-            };
-            self.send_queue.push(delayed_send_packet);
-
-            Ok(false)
-        }
-    }
-
-    #[inline]
-    pub(super) fn next_send_instant(&self) -> Option<Instant> {
-        self.send_queue
-            .peek()
-            .map(|delayed_send_packet| delayed_send_packet.instant)
-    }
-
-    pub(super) fn send_check(&mut self) -> Result<u64, SocketError> {
-        let mut sends = 0;
-        while let Some(delayed_send_packet) = self.send_queue.peek() {
-            if delayed_send_packet.instant <= Instant::now() {
-                // Drops packet before it enters network stack if it would block
-                // Uncertain if it will partially fill socket (could even be OS dependent)
-                match self.socket.send_to(
-                    &delayed_send_packet.data[..delayed_send_packet.data_len],
-                    delayed_send_packet.to_addr,
-                ) {
-                    Ok(send_size) => {
-                        if send_size != delayed_send_packet.data_len {
-                            return Err(SocketError::SendSizeWrong);
-                        }
-                        sends += 1;
-                    }
-                    Err(err) => {
-                        if err.kind() == std::io::ErrorKind::WouldBlock {
-                            return Err(SocketError::SendBlocked);
-                        } else {
-                            return Err(SocketError::SendOtherIssue);
-                        }
-                    }
-                }
-                self.send_queue.pop();
-            } else {
-                return Ok(sends);
-            }
-        }
-        Ok(sends)
-    }
-
-    // Returns true if there is data to be read
-    // It should capture "missed" events between calls and return without delay
-    #[inline]
-    pub(super) fn sleep_till_recv_data(&mut self, timeout: std::time::Duration) -> bool {
-        match self.poll.poll(&mut self.events, Some(timeout)) {
-            Ok(_) => !self.events.is_empty(),
-            Err(_) => false,
-        }
-    }
-
-    // #[inline]
-    // pub(super) fn has_data_to_recv(&mut self) -> Result<bool, SocketError> {
-    //     match self.socket.recv_from(&mut self.read_data) {
-    //         Ok((recv_size, addr_from)) => {
-    //             self.prev_recv_size = recv_size;
-    //             self.prev_recv_from = Some(addr_from);
-    //             Ok(true)
-    //         }
-    //         Err(err) => {
-    //             if err.kind() == std::io::ErrorKind::WouldBlock {
-    //                 Ok(false)
-    //             } else {
-    //                 Err(SocketError::RecvOtherIssue)
-    //             }
-    //         }
-    //     }
-    // }
-
-    #[inline]
-    pub(super) fn get_next_recv_data(&mut self) -> Result<(&mut [u8], SocketAddr), SocketError> {
-        // if let Some(prev_addr_from) = self.prev_recv_from {
-        //     self.prev_recv_from = None;
-        //     //let recv_size = self.prev_recv_size;
-        //     //self.prev_recv_size = 0;
-        //     //Ok((&mut self.read_data[..recv_size], prev_addr_from))
-        //     Ok((&mut self.read_data[..self.prev_recv_size], prev_addr_from))
-        // } else {
-        match self.socket.recv_from(&mut self.read_data) {
-            Ok((recv_size, addr_from)) => Ok((&mut self.read_data[..recv_size], addr_from)),
-            Err(e) => {
-                let kind = e.kind();
-                if kind == std::io::ErrorKind::WouldBlock {
-                    Err(SocketError::RecvBlocked)
-                } else {
-                    Err(SocketError::RecvOtherIssue(kind))
-                }
-            }
-        }
-        // }
     }
 }

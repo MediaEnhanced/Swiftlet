@@ -49,7 +49,7 @@ fn main() {
         std::thread::spawn(move || server_thread(port, "Server".to_string()));
     std::thread::sleep(std::time::Duration::from_secs(1));
 
-    let local_ipv6 = std::net::Ipv6Addr::from([0, 0, 0, 0, 0, 0, 0, 1]);
+    let local_ipv6 = std::net::Ipv6Addr::LOCALHOST;
     let server_address = SocketAddr::V6(std::net::SocketAddrV6::new(local_ipv6, port, 0, 0));
     let client_thread_handle =
         std::thread::spawn(move || client_thread(server_address, "Client".to_string()));
@@ -67,13 +67,6 @@ fn main() {
 }
 
 fn server_thread(port: u16, server_name: String) {
-    let bind_address = SocketAddr::V6(std::net::SocketAddrV6::new(
-        std::net::Ipv6Addr::UNSPECIFIED,
-        port,
-        0,
-        0,
-    ));
-
     let config = Config {
         idle_timeout_in_ms: 5000,
         reliable_stream_buffer: 65536,
@@ -88,7 +81,7 @@ fn server_thread(port: u16, server_name: String) {
     };
 
     let mut server_endpoint =
-        match Endpoint::new_server(bind_address, ALPN_NAME, CERT_PATH, PKEY_PATH, config) {
+        match Endpoint::new_server(true, port, ALPN_NAME, CERT_PATH, PKEY_PATH, config) {
             Ok(endpoint) => endpoint,
             Err(_) => {
                 println!("Server Endpoint Creation Error!");
@@ -117,13 +110,6 @@ fn server_thread(port: u16, server_name: String) {
 }
 
 fn client_thread(server_address: SocketAddr, user_name: String) {
-    let bind_address = SocketAddr::V6(std::net::SocketAddrV6::new(
-        std::net::Ipv6Addr::UNSPECIFIED,
-        0, // Unspecified bind port (OS chooses)
-        0,
-        0,
-    ));
-
     let config = Config {
         idle_timeout_in_ms: 5000,
         reliable_stream_buffer: 65536,
@@ -138,7 +124,7 @@ fn client_thread(server_address: SocketAddr, user_name: String) {
     };
 
     let mut client_endpoint = match Endpoint::new_client_with_first_connection(
-        bind_address,
+        true,
         ALPN_NAME,
         CERT_PATH,
         server_address,

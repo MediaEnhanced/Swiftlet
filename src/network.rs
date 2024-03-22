@@ -29,7 +29,6 @@ const CERT_PATH: &str = "security/cert.pem"; // Location of the certificate for 
 const PKEY_PATH: &str = "security/pkey.pem"; // Location of the private key for the server to use
 
 // IPv6 Addresses and Sockets used when sending the client an initial connection addresss
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 #[cfg(feature = "client")]
 use std::time::{Duration, Instant};
 
@@ -1287,11 +1286,6 @@ pub(crate) fn server_thread(
     server_name: String,
     mut terminal_channels: NetworkTerminalThreadChannels,
 ) {
-    let bind_address = match use_ipv4 {
-        false => SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0)),
-        true => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)),
-    };
-
     let config = Config {
         idle_timeout_in_ms: 5000,
         reliable_stream_buffer: 65536,
@@ -1306,7 +1300,7 @@ pub(crate) fn server_thread(
     };
 
     let mut server_endpoint =
-        match Endpoint::new_server(bind_address, ALPN_NAME, CERT_PATH, PKEY_PATH, config) {
+        match Endpoint::new_server(!use_ipv4, port, ALPN_NAME, CERT_PATH, PKEY_PATH, config) {
             Ok(endpoint) => endpoint,
             Err(err) => {
                 let _ = terminal_channels
@@ -1341,11 +1335,6 @@ pub(crate) fn client_thread(
     mut terminal_channels: NetworkTerminalThreadChannels,
     audio_channels: NetworkAudioThreadChannels,
 ) {
-    let bind_address = match server_address.is_ipv6() {
-        true => SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0)),
-        false => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)),
-    };
-
     let config = Config {
         idle_timeout_in_ms: 5000,
         reliable_stream_buffer: 65536,
@@ -1359,7 +1348,7 @@ pub(crate) fn client_thread(
         background_recv_first_bytes: protocol::MESSAGE_HEADER_SIZE,
     };
     let mut client_endpoint = match Endpoint::new_client_with_first_connection(
-        bind_address,
+        server_address.is_ipv6(),
         ALPN_NAME,
         CERT_PATH,
         server_address,

@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use ring::rand::*;
 
 mod udp;
-use udp::{SocketError, UdpSocket};
+use udp::{Socket, SocketError};
 
 mod connection;
 use connection::{CloseInfo, CloseOrigin, Connection, RecvResult, SendResult, StreamResult};
@@ -91,7 +91,7 @@ pub struct Config {
 
 /// The Quic Endpoint structure
 pub struct Endpoint {
-    udp: UdpSocket,
+    udp: Socket,
     max_payload_size: usize,
     local_addr: SocketAddr,
     connection_config: connection::Config,
@@ -342,13 +342,14 @@ impl Endpoint {
 
     /// Create a QUIC Server Endpoint
     pub fn new_server(
-        bind_addr: SocketAddr,
+        ipv6_mode: bool,
+        bind_port: u16,
         alpn: &[u8],
         cert_path: &str,
         pkey_path: &str,
         mut config: Config,
     ) -> Result<Self, Error> {
-        if let Ok((socket_mgr, local_addr)) = UdpSocket::new(bind_addr) {
+        if let Ok((socket_mgr, local_addr)) = Socket::new(ipv6_mode, bind_port) {
             let max_payload_size = udp::TARGET_MAX_DATAGRAM_SIZE;
 
             let connection_config = match Connection::create_config(
@@ -401,12 +402,12 @@ impl Endpoint {
 
     /// Create a QUIC Client Endpoint
     pub fn new_client(
-        bind_addr: SocketAddr,
+        ipv6_mode: bool,
         alpn: &[u8],
         cert_path: &str,
         mut config: Config,
     ) -> Result<Self, Error> {
-        if let Ok((socket_mgr, local_addr)) = UdpSocket::new(bind_addr) {
+        if let Ok((socket_mgr, local_addr)) = Socket::new(ipv6_mode, 0) {
             let max_payload_size = udp::TARGET_MAX_DATAGRAM_SIZE;
 
             let connection_config = match Connection::create_config(
@@ -479,10 +480,10 @@ impl Endpoint {
         //let mut immediate_sends = 0;
         //let mut delayed_sends = 0;
         loop {
-            let packet_data = self.udp.get_packet_data();
+            let packet_data = self.udp.get_next_send_data();
             match self.connections[verified_index].get_next_send_packet(packet_data) {
                 Ok(SendResult::DataToSend((packet_len, to_addr, instant))) => {
-                    match self.udp.send_packet(packet_len, to_addr, instant) {
+                    match self.udp.done_with_send_data(to_addr, packet_len, instant) {
                         Ok(true) => {
                             //immediate_sends += 1;
                         }
@@ -564,14 +565,14 @@ impl Endpoint {
 
     /// Create a QUIC Client Endpoint with an initial connection
     pub fn new_client_with_first_connection(
-        bind_addr: SocketAddr,
+        ipv6_mode: bool,
         alpn: &[u8],
         cert_path: &str,
         peer_addr: SocketAddr,
         server_name: &str,
         config: Config,
     ) -> Result<Self, Error> {
-        let mut endpoint_mgr = Endpoint::new_client(bind_addr, alpn, cert_path, config)?;
+        let mut endpoint_mgr = Endpoint::new_client(ipv6_mode, alpn, cert_path, config)?;
 
         endpoint_mgr.add_client_connection(peer_addr, server_name)?;
 
@@ -832,7 +833,7 @@ impl Endpoint {
             }
         }
 
-        match self.udp.get_next_recv_data() {
+        let res = match self.udp.get_next_recv_data() {
             Ok((recv_data, from_addr)) => {
                 // Only bother to look at a datagram that is less than or equal to the target
                 if recv_data.len() <= self.max_payload_size {
@@ -954,9 +955,11 @@ impl Endpoint {
                 }
             }
             Err(SocketError::RecvBlocked) => Ok(RecvEvent::DoneReceiving),
-            Err(SocketError::RecvOtherIssue(e)) => Err(Error::SocketRecv(e)),
+            //Err(SocketError::RecvOtherIssue(e)) => Err(Error::SocketRecv(e)),
             Err(_) => Err(Error::SocketRecv(std::io::ErrorKind::WouldBlock)),
-        }
+        };
+        self.udp.done_with_recv_data();
+        res
     }
 
     // Close a connection with a given error code value
