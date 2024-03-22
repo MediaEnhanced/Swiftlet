@@ -154,7 +154,6 @@ impl<'a> AudioOutput<'a> {
             frame_period: desired_period,
             channels: 2,
         })
-        // None
     }
 
     pub(super) fn get_channels(&self) -> u32 {
@@ -174,8 +173,6 @@ impl<'a> AudioOutput<'a> {
     pub(super) fn run_callback_loop(&self, mut callback: impl crate::OutputCallback) -> bool {
         let buffer_len = (self.frame_period * self.channels) as usize;
         let mut data_vec = vec![0.0 as f32; buffer_len];
-        let float_p = data_vec.as_mut_ptr() as *mut f32;
-        let buffer = unsafe { std::slice::from_raw_parts_mut(float_p, buffer_len) };
 
         if !self.start() {
             return false;
@@ -187,7 +184,7 @@ impl<'a> AudioOutput<'a> {
                     let available_frames = self.device.get_available_frames();
                     //println!("Frames Available: {}", available_frames);
                     if available_frames >= (self.frame_period as i64) {
-                        let callback_quit = callback.output_callback(buffer);
+                        let callback_quit = callback.output_callback(&mut data_vec);
                         match self
                             .device
                             .write_interleaved_float_frames(&data_vec, self.frame_period as u64)
@@ -223,10 +220,141 @@ impl<'a> AudioOutput<'a> {
     }
 }
 
-pub(super) struct AudioInput {
-    //device: PCM,
+pub(super) struct AudioInput<'a> {
+    owner: &'a AudioOwner,
+    device: Pcm,
+    frame_period: u32,
+    channels: u32,
 }
 
-impl AudioInput {
-    //pub(super) fn new() -> Self {}
+impl<'a> AudioInput<'a> {
+    pub(super) fn new(
+        audio_owner: &'a AudioOwner,
+        desired_period: u32,
+        channels: u32,
+    ) -> Option<Self> {
+        // Open default playback device
+        let pcm_device = match alsa::Pcm::new_from_default_capture() {
+            Ok(p) => p,
+            Err(e) => {
+                handle_alsa_error(e);
+                return None;
+            }
+        };
+
+        handle_alsa_state(pcm_device.get_state());
+
+        let hw_params = match alsa::PcmHwParams::any_from_pcm(&pcm_device) {
+            Ok(p) => p,
+            Err(e) => {
+                handle_alsa_error(e);
+                return None;
+            }
+        };
+
+        if hw_params
+            .set_param(alsa::PcmHwParam::NearestRate(48000))
+            .is_err()
+        {
+            return None;
+        }
+        if hw_params.set_param(alsa::PcmHwParam::FormatFloat).is_err() {
+            return None;
+        }
+        if hw_params
+            .set_param(alsa::PcmHwParam::BufferInterleaved)
+            .is_err()
+        {
+            return None;
+        }
+
+        if hw_params.set_param(alsa::PcmHwParam::Channels(1)).is_err() {
+            return None;
+        }
+
+        if hw_params
+            .set_param(alsa::PcmHwParam::NearestPeriod(desired_period as u64))
+            .is_err()
+        {
+            return None;
+        }
+
+        if hw_params
+            .set_param(alsa::PcmHwParam::NearestBufferSize(desired_period as u64))
+            .is_err()
+        {
+            return None;
+        }
+
+        if pcm_device.set_hw_params(&hw_params).is_err() {
+            return None;
+        }
+        drop(hw_params); // Manual Drop Necessary...?
+
+        Some(AudioInput {
+            owner: audio_owner,
+            device: pcm_device,
+            frame_period: desired_period,
+            channels: 1,
+        })
+    }
+
+    pub(super) fn get_channels(&self) -> u32 {
+        self.channels
+    }
+
+    // Returns true if started
+    fn start(&self) -> bool {
+        // Need to do an initial read to clear stuff based on documentation
+        self.device.start().is_ok()
+    }
+
+    fn stop(&self) -> bool {
+        self.device.stop().is_ok()
+    }
+
+    pub(super) fn run_callback_loop(&self, mut callback: impl crate::InputCallback) -> bool {
+        let buffer_len = (self.frame_period * self.channels) as usize;
+        let mut data_vec = vec![0.0 as f32; buffer_len];
+
+        if !self.start() {
+            return false;
+        }
+        loop {
+            match self.device.wait_until_ready(15) {
+                Ok(true) => {
+                    // Process Frames
+                    let available_frames = self.device.get_available_frames();
+                    //println!("Avail Frames: {}", available_frames);
+                    match self
+                        .device
+                        .read_interleaved_float_frames(&mut data_vec, self.frame_period as u64)
+                    {
+                        Ok(frames) => {
+                            if frames == self.frame_period as u64 {
+                                if callback.input_callback(&data_vec) {
+                                    break;
+                                }
+                            } else {
+                                return false;
+                            }
+                        }
+                        Err(e) => {
+                            println!("False!");
+                            handle_alsa_error(e);
+                            return false;
+                        }
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    // Alsa Wait Error
+                    handle_alsa_error(e);
+                    return false;
+                }
+            }
+        }
+
+        self.stop()
+    }
 }

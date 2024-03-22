@@ -188,6 +188,13 @@ extern "C" {
         num_frames: c_ulong,
     ) -> c_long;
 
+    /// Alsa PCM read interleaved data
+    fn snd_pcm_readi(
+        pcm_handle: *mut OpaqueStructure,
+        frame_buffer: *mut c_void,
+        num_frames: c_ulong,
+    ) -> c_long;
+
     // Hw Parameter Functions
     fn snd_pcm_hw_params_malloc(handle_ptr: *mut *mut OpaqueStructure) -> c_int;
     fn snd_pcm_hw_params_free(pcm_handle: *mut OpaqueStructure) -> c_int;
@@ -281,7 +288,7 @@ impl Pcm {
     pub(super) fn new_from_default_capture() -> Result<Self, Error> {
         let mut handle = ptr::null_mut();
         let cname = CString::new("default").unwrap();
-        let errnum = unsafe { snd_pcm_open(&mut handle, cname.as_ptr(), PcmStream::Playback, 0) };
+        let errnum = unsafe { snd_pcm_open(&mut handle, cname.as_ptr(), PcmStream::Capture, 0) };
         if errnum != 0 {
             return Err(Error::from_errnum(errnum));
         }
@@ -361,6 +368,20 @@ impl Pcm {
         // In Future check if this is even allowed based on the pcm config
         let res =
             unsafe { snd_pcm_writei(self.handle, data.as_ptr() as *const c_void, num_frames) };
+        if res < 0 {
+            return Err(Error::from_errnum(res as i32));
+        }
+        Ok(res as u64)
+    }
+
+    pub(super) fn read_interleaved_float_frames(
+        &self,
+        data: &mut [f32],
+        num_frames: u64,
+    ) -> Result<u64, Error> {
+        // In Future check if this is even allowed based on the pcm config
+        let res =
+            unsafe { snd_pcm_readi(self.handle, data.as_mut_ptr() as *mut c_void, num_frames) };
         if res < 0 {
             return Err(Error::from_errnum(res as i32));
         }
