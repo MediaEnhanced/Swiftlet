@@ -871,7 +871,10 @@ impl Endpoint {
                                     verified_index_opt = Some(self.connections.len());
                                     self.connections.push(conn_mgr);
                                 }
-                                Err(_) => return Ok(RecvEvent::NoUpdate),
+                                Err(_) => {
+                                    self.udp.done_with_recv_data();
+                                    return Ok(RecvEvent::NoUpdate);
+                                }
                             }
                         }
 
@@ -887,11 +890,13 @@ impl Endpoint {
                                             ConnectionEndReason::from_close_info(&close_info);
                                         if close_info.is_closed {
                                             self.remove_connection(verified_index);
+                                            self.udp.done_with_recv_data();
                                             return Ok(RecvEvent::ConnectionEnded((
                                                 connection_id,
                                                 end_reason,
                                             )));
                                         }
+                                        self.udp.done_with_recv_data();
                                         return Ok(RecvEvent::ConnectionEnding((
                                             connection_id,
                                             end_reason,
@@ -900,6 +905,7 @@ impl Endpoint {
                                     res
                                 }
                                 Err(e) => {
+                                    self.udp.done_with_recv_data();
                                     return Err(Error::ConnectionRecv(e));
                                 }
                             };
@@ -933,6 +939,7 @@ impl Endpoint {
                                         )
                                         .is_err()
                                     {
+                                        self.udp.done_with_recv_data();
                                         return Err(Error::StreamCreation);
                                     }
                                     self.last_valid_index = verified_index;

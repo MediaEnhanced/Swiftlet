@@ -50,8 +50,8 @@ fn winsock_startup() {
 //pub(super) enum Error
 #[derive(Debug)]
 enum AsyncError {
-    //UnexpectedCompletion,
     NotInitiated(WinSock::WSA_ERROR),
+    NotEnoughRecvBuffers,
     WrongSendLength,
 }
 
@@ -159,7 +159,7 @@ impl UdpSocket {
         for msg in &mut recv_msgs {
             match msg.recv_queue(socket) {
                 Ok(_) => {}
-                _ => {
+                Err(_) => {
                     unsafe {
                         WinSock::closesocket(socket);
                     }
@@ -270,7 +270,7 @@ impl UdpSocket {
     pub(super) fn get_next_send(&mut self) -> &mut [u8] {
         match self.send_msgs[self.send_current_msg].get_send_data() {
             Ok(Some(data)) => data,
-            Ok(None) => panic!("UDP Socket Windows Sends Not Enough!"),
+            Ok(None) => panic!("UDP Socket Windows Not Enough Send Buffers!"),
             Err(e) => panic!("UDP Socket Windows Get Send Error: {:?}", e),
         }
     }
@@ -383,9 +383,7 @@ impl AsyncMessage {
                     Err(AsyncError::NotInitiated(wsa_error))
                 }
             } else {
-                //Err(AsyncError::UnexpectedCompletion)
-                self.already_waited = false;
-                Ok(true)
+                Err(AsyncError::NotEnoughRecvBuffers)
             }
         } else {
             Ok(false)
