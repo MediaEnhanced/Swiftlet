@@ -72,8 +72,8 @@ enum GetDataError {
     OverlappedResult(WinSock::WSA_ERROR),
 }
 
-const RECV_MSGS: usize = 50; //50 Based on 250Mbps and 2ms processing time (not sure anymore)
-const SEND_MSGS: usize = 20;
+const RECV_MSGS: usize = 1024; // Based on 2MiB of 2048 byte messages
+const SEND_MSGS: usize = 1024;
 
 pub(super) struct UdpSocket {
     is_ipv6: bool,

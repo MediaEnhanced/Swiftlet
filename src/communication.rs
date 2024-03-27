@@ -72,6 +72,7 @@ pub(crate) enum ClientCommand {
     StateChange(u8),
     ServerConnect(swiftlet_quic::endpoint::SocketAddr),
     MusicTransfer(swiftlet_audio::opus::OpusData),
+    UploadTest(u8),
 }
 
 pub(crate) enum NetworkStateMessage {

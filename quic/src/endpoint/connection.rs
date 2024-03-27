@@ -140,6 +140,7 @@ pub(super) enum SendResult {
 pub(super) enum RecvResult {
     Nothing,
     CloseInitiated,
+    CloseInfo(CloseInfo),
     Established(u64),
     StreamProcess(u64),
 }
@@ -576,6 +577,9 @@ impl Connection {
                 return Ok(RecvResult::CloseInitiated);
             }
             return Err(e);
+        }
+        if let Some(close_info) = self.get_close_info() {
+            return Ok(RecvResult::CloseInfo(close_info));
         }
 
         if self.established_once {

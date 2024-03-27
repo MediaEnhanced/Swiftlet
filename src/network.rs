@@ -131,6 +131,7 @@ struct TransferInfo {
     id: u16,
     target: TransferIntention,
     size: usize,
+    first_recv_instant: Option<Instant>,
 }
 
 struct ClientState {
@@ -292,8 +293,8 @@ impl ServerState {
             StreamMsgType::TransferRequest => {
                 let transfer_size =
                     usize::from_ne_bytes([read_data[0], read_data[1], read_data[2], 0, 0, 0, 0, 0]);
-                let info_string = format!("Data transfer request: {}\n", transfer_size);
-                self.send_debug_text(info_string.as_str());
+                //let info_string = format!("Data transfer request: {}\n", transfer_size);
+                //self.send_debug_text(info_string.as_str());
                 if transfer_size <= BUFFER_SIZE_PER_CONNECTION {
                     // More Checking before acception in future
 
@@ -302,6 +303,7 @@ impl ServerState {
                         id: self.next_transfer_id,
                         target: TransferIntention::from_u8(read_data[3]),
                         size: transfer_size,
+                        first_recv_instant: None,
                     };
                     self.client_states[verified_index]
                         .transfers
@@ -309,7 +311,7 @@ impl ServerState {
 
                     self.next_transfer_id += 1; // Future rollover stuff or different scheme here
 
-                    let mut send_data = StreamMsgType::TransferResponse.get_send_data_vec(Some(2));
+                    let mut send_data = StreamMsgType::TransferGranted.get_send_data_vec(Some(2));
                     send_data.push(trans_id_bytes[0]);
                     send_data.push(trans_id_bytes[1]);
                     //set_stream_msg_size(&mut send_data);
@@ -327,8 +329,19 @@ impl ServerState {
                         .iter()
                         .position(|transfers| transfers.id == transfer_id)
                     {
+                        let finish_instant = Instant::now();
+
                         self.client_states[verified_index].state &= 0xFE;
                         self.update_client_state(endpoint, verified_index);
+
+                        let trans_id_bytes = u16::to_le_bytes(
+                            self.client_states[verified_index].transfers[transfer_ind].id,
+                        );
+                        let mut send_data = StreamMsgType::TransferRecv.get_send_data_vec(Some(2));
+                        send_data.push(trans_id_bytes[0]);
+                        send_data.push(trans_id_bytes[1]);
+                        let _ = endpoint
+                            .main_stream_send(&self.client_states[verified_index].cid, send_data);
 
                         match self.client_states[verified_index].transfers[transfer_ind].target {
                             TransferIntention::Music => {
@@ -345,6 +358,26 @@ impl ServerState {
                             _ => {
                                 // Deletion... so do nothing
                             }
+                        }
+
+                        if let Some(start_instant) = self.client_states[verified_index].transfers
+                            [transfer_ind]
+                            .first_recv_instant
+                        {
+                            let recv_duration = finish_instant - start_instant;
+                            let transfer_bytes =
+                                self.client_states[verified_index].transfers[transfer_ind].size;
+
+                            let info_string = format!(
+                                "{} Bytes transfered from {} ID in {:?} ({} avg. Mbps)\n",
+                                transfer_bytes,
+                                self.client_states[verified_index].cid,
+                                recv_duration,
+                                ((transfer_bytes * 8000) / (recv_duration.as_millis() as usize))
+                                    as f32
+                                    / 1_000_000.0
+                            );
+                            let _ = self.terminal_channels.debug_send.push(info_string);
                         }
                     }
                 }
@@ -727,18 +760,26 @@ impl EndpointEventCallbacks for ServerState {
                     match new_msg_type {
                         StreamMsgType::TransferData => {
                             let trans_id = size;
-                            let trans_size_opt = self.client_states[vi]
+                            if let Some(transfer_ind) = self.client_states[vi]
                                 .transfers
                                 .iter()
-                                .find(|ti| ti.id == trans_id)
-                                .map(|trans_info| trans_info.size);
-
-                            if let Some(trans_size) = trans_size_opt {
+                                .position(|transfers| transfers.id == trans_id)
+                            {
+                                self.client_states[vi].transfers[transfer_ind].first_recv_instant =
+                                    Some(Instant::now());
+                                let trans_size =
+                                    self.client_states[vi].transfers[transfer_ind].size;
                                 self.client_states[vi].bkgd_recv_type = Some(new_msg_type);
                                 self.client_states[vi].transfer_id_recv = Some(trans_id);
 
                                 self.client_states[vi].state |= 0x01;
                                 self.update_client_state(endpoint, vi);
+
+                                let info_string = format!(
+                                    "{} Background data recv from {} ID started!\n",
+                                    trans_id, cid
+                                );
+                                let _ = self.terminal_channels.debug_send.push(info_string);
 
                                 Some(trans_size)
                             } else {
@@ -774,11 +815,15 @@ struct ClientHandler {
     avg_voice_send: u64,
     background_recv_type: Option<StreamMsgType>,
     transfer_data: Option<Vec<u8>>,
+    test_data: Vec<u8>,
+    test_count: u64,
     audio_channels: NetworkAudioThreadChannels,
     callback_count: u64,
     last_instant: Instant,
     avg_duration: Duration,
 }
+
+const TEST_DATA_SIZE: usize = 2097152;
 
 #[cfg(feature = "client")]
 impl ClientHandler {
@@ -787,6 +832,9 @@ impl ClientHandler {
         terminal_channels: NetworkTerminalThreadChannels,
         audio_channels: NetworkAudioThreadChannels,
     ) -> Self {
+        let mut test_data = StreamMsgType::TransferData.get_send_data_vec(None);
+        test_data.resize(TEST_DATA_SIZE + protocol::MESSAGE_HEADER_SIZE, 9);
+
         ClientHandler {
             user_name,
             terminal_channels,
@@ -798,6 +846,8 @@ impl ClientHandler {
             avg_voice_send: 0,
             background_recv_type: None,
             transfer_data: None,
+            test_data,
+            test_count: 0,
             audio_channels,
             callback_count: 0,
             last_instant: Instant::now(),
@@ -857,6 +907,27 @@ impl ClientHandler {
                     }
                 }
             }
+            ClientCommand::UploadTest(test_num) => {
+                if let Some(cid) = &self.cid_option {
+                    self.test_count += test_num as u64;
+                    if self.transfer_data.is_none() {
+                        // let info_string = format!("Send Test Request!\n",);
+                        // let _ = self.terminal_channels.debug_send.push(info_string);
+
+                        let size_in_bytes = TEST_DATA_SIZE.to_ne_bytes();
+
+                        let mut send_data =
+                            StreamMsgType::TransferRequest.get_send_data_vec(Some(4));
+                        send_data.push(size_in_bytes[0]);
+                        send_data.push(size_in_bytes[1]);
+                        send_data.push(size_in_bytes[2]);
+                        send_data.push(TransferIntention::Deletion as u8);
+                        let _ = endpoint.main_stream_send(cid, send_data);
+
+                        self.transfer_data = Some(self.test_data.clone());
+                    }
+                }
+            }
         }
     }
 
@@ -893,12 +964,28 @@ impl ClientHandler {
             StreamMsgType::ClientNewState => {
                 self.handle_client_new_state(read_data);
             }
-            StreamMsgType::TransferResponse => {
+            StreamMsgType::TransferGranted => {
                 if let Some(mut t_data) = self.transfer_data.take() {
                     //self.send_debug_text("Got Here\n");
                     t_data[1] = read_data[0];
                     t_data[2] = read_data[1];
                     let _ = endpoint.background_stream_send(cid, t_data);
+                }
+            }
+            StreamMsgType::TransferRecv => {
+                // Not accounting for the off-chance self.transfer_data.is_some()
+                if self.test_count > 0 {
+                    self.test_count -= 1;
+
+                    let size_in_bytes = TEST_DATA_SIZE.to_ne_bytes();
+                    let mut send_data = StreamMsgType::TransferRequest.get_send_data_vec(Some(4));
+                    send_data.push(size_in_bytes[0]);
+                    send_data.push(size_in_bytes[1]);
+                    send_data.push(size_in_bytes[2]);
+                    send_data.push(TransferIntention::Deletion as u8);
+                    let _ = endpoint.main_stream_send(cid, send_data);
+
+                    self.transfer_data = Some(self.test_data.clone());
                 }
             }
             StreamMsgType::MusicIdReady => {

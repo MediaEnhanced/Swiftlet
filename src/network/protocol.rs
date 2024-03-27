@@ -42,10 +42,11 @@ pub(super) enum StreamMsgType {
     NextMusicPacket,    // Stereo, Music Packet
 
     // General Messages:
-    TransferRequest,  // Data_Len_Size (3), TransferIntention (1)
-    TransferResponse, // Transfer ID (2)
-    TransferData,     // Header (Includes Transfer ID instead of Size) TransferData
-    VoiceDataPacket,  // ID (2), Data
+    TransferRequest, // Data_Len_Size (3), TransferIntention (1)
+    TransferGranted, // Transfer ID (2)
+    TransferData,    // Header (Includes Transfer ID instead of Size) TransferData
+    TransferRecv,    // Transfer ID (2)
+    VoiceDataPacket, // ID (2), Data
 
     // Client Messages:
     NewClientAnnounce, // ClientNameLen, ClientName
@@ -65,8 +66,9 @@ impl StreamMsgType {
             x if x == Self::NextMusicPacket as u8 => Self::NextMusicPacket,
 
             x if x == Self::TransferRequest as u8 => Self::TransferRequest,
-            x if x == Self::TransferResponse as u8 => Self::TransferResponse,
+            x if x == Self::TransferGranted as u8 => Self::TransferGranted,
             x if x == Self::TransferData as u8 => Self::TransferData,
+            x if x == Self::TransferRecv as u8 => Self::TransferRecv,
             x if x == Self::VoiceDataPacket as u8 => Self::VoiceDataPacket,
 
             x if x == Self::NewClientAnnounce as u8 => Self::NewClientAnnounce,
@@ -100,8 +102,9 @@ impl StreamMsgType {
             Self::NextMusicPacket => Self::NextMusicPacket as u8,
 
             Self::TransferRequest => Self::TransferRequest as u8,
-            Self::TransferResponse => Self::TransferResponse as u8,
+            Self::TransferGranted => Self::TransferGranted as u8,
             Self::TransferData => Self::TransferData as u8,
+            Self::TransferRecv => Self::TransferRecv as u8,
             Self::VoiceDataPacket => Self::VoiceDataPacket as u8,
 
             Self::NewClientAnnounce => Self::NewClientAnnounce as u8,
@@ -123,8 +126,9 @@ impl StreamMsgType {
                 | Self::MusicIdReady
                 | Self::NextMusicPacket
                 | Self::TransferRequest
-                | Self::TransferResponse
+                | Self::TransferGranted
                 | Self::TransferData
+                | Self::TransferRecv
                 | Self::VoiceDataPacket
         )
     }
@@ -134,8 +138,9 @@ impl StreamMsgType {
         matches!(
             self,
             Self::TransferRequest
-                | Self::TransferResponse
+                | Self::TransferGranted
                 | Self::TransferData
+                | Self::TransferRecv
                 | Self::VoiceDataPacket
                 | Self::NewClientAnnounce
                 | Self::NewStateRequest
