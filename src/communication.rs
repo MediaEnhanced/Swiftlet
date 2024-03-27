@@ -88,10 +88,10 @@ pub(crate) struct NetworkStateConnection {
 
 #[cfg(feature = "client")]
 pub(crate) struct AudioThreadChannels {
-    // Audio Input Specific Channels
+    // Audio Output Specific Channels
     pub(crate) output_cmd_recv: Consumer<TerminalAudioOutCommands>,
     pub(crate) packet_recv: Consumer<NetworkAudioOutPackets>,
-    // Audio Output Specific Channels
+    // Audio Input Specific Channels
     pub(crate) input_cmd_recv: Consumer<TerminalAudioInCommands>,
     pub(crate) packet_send: Producer<NetworkAudioInPackets>,
     // Shared Channels
@@ -122,7 +122,7 @@ pub(crate) fn create_audio_channels() -> (
     let (output_cmd_send, output_cmd_recv) = RingBuffer::new(64);
     let (input_cmd_send, input_cmd_recv) = RingBuffer::new(64);
     let (packet_send, audio_packet_recv) = RingBuffer::new(64);
-    let (audio_packet_send, packet_recv) = RingBuffer::new(8);
+    let (audio_packet_send, packet_recv) = RingBuffer::new(20); // 20 10ms Input Buffers
     let (state_send, state_recv) = RingBuffer::new(64);
     let (debug_send, debug_recv) = RingBuffer::new(256);
 
@@ -176,7 +176,7 @@ pub(crate) enum TerminalAudioInCommands {
 
 #[cfg(feature = "client")]
 pub(crate) struct NetworkAudioInPackets {
-    pub(crate) data: [u8; 2048],
+    pub(crate) data: [u8; 512],
     pub(crate) len: usize,
     pub(crate) instant: std::time::Instant,
 }

@@ -50,7 +50,7 @@ pub(crate) fn audio_thread(channels: AudioThreadChannels) {
         avg_duration: Duration::from_millis(0),
         is_running: false,
         encoder: Encoder::new(false, true).unwrap(),
-        data: [0; 2048],
+        data: [0; 512],
         data_len: 0,
         command_recv: channels.input_cmd_recv,
         packet_send: channels.packet_send,
@@ -307,12 +307,12 @@ impl swiftlet_audio::OutputCallback for Output {
                             starve_counter: 0,
                         };
 
-                        let output_data = OutputData {
-                            data: [0.0; 1920],
-                            data_len: 960,
-                            read_offset: 0,
-                        };
-                        output_realtime.data_queue.push_back(output_data);
+                        // let output_data = OutputData {
+                        //     data: [0.0; 1920],
+                        //     data_len: 960,
+                        //     read_offset: 0,
+                        // };
+                        // output_realtime.data_queue.push_back(output_data);
 
                         let mut output_data = OutputData {
                             data: [0.0; 1920],
@@ -543,7 +543,7 @@ struct Input {
     avg_duration: Duration,
     is_running: bool,
     encoder: Encoder,
-    data: [u8; 2048],
+    data: [u8; 512],
     data_len: usize,
     command_recv: Consumer<TerminalAudioInCommands>,
     packet_send: Producer<NetworkAudioInPackets>,

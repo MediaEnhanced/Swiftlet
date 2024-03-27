@@ -31,7 +31,7 @@ pub(super) use quiche::Error;
 // Bidirectional Stream ID# used for the main reliable communication in the application between the server and the client (started by client)
 // This stream has the first (#1) send priority compared to other streams
 const MAIN_STREAM_ID: u64 = 0;
-const MAIN_STREAM_PRIORITY: u8 = 200; //
+const MAIN_STREAM_PRIORITY: u8 = 100; //
 
 // Real-time Unidirectional Stream ID# start constants used for "unreliable" communication in the application
 const SERVER_REALTIME_START_ID: u64 = 3;
@@ -40,7 +40,7 @@ const CLIENT_REALTIME_START_ID: u64 = 2;
 // Bidirectional Stream ID# used for the background reliable communication in the application between the server and the client (started by client)
 // This stream has the last send priority compared to other streams
 const BACKGROUND_STREAM_ID: u64 = 4;
-const BACKGROUND_STREAM_PRIORITY: u8 = 100;
+const BACKGROUND_STREAM_PRIORITY: u8 = 200;
 
 struct StreamRecv {
     captured: usize,
@@ -201,7 +201,8 @@ impl Connection {
         config.set_initial_max_stream_data_bidi_remote(reliable_stream_buffer);
         config.set_initial_max_stream_data_uni(unreliable_stream_buffer);
 
-        config.set_initial_max_data(reliable_stream_buffer + (unreliable_stream_buffer * 4));
+        config
+            .set_initial_max_data((reliable_stream_buffer * 2) + (unreliable_stream_buffer * 100));
 
         config.enable_pacing(true); // Default that I confirm
 

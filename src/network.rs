@@ -898,7 +898,7 @@ impl ClientHandler {
                     //self.send_debug_text("Got Here\n");
                     t_data[1] = read_data[0];
                     t_data[2] = read_data[1];
-                    let _ = endpoint.main_stream_send(cid, t_data);
+                    let _ = endpoint.background_stream_send(cid, t_data);
                 }
             }
             StreamMsgType::MusicIdReady => {
