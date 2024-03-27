@@ -98,6 +98,7 @@ pub struct Endpoint {
     next_connection_id: u64,
     connections: Vec<Connection>,
     last_valid_index: usize,
+    last_recv_index: Option<usize>,
     stream_process_index: Option<(u64, usize)>,
     rand: SystemRandom,
     config: Config,
@@ -387,6 +388,7 @@ impl Endpoint {
                 next_connection_id: 1,
                 connections: Vec::new(),
                 last_valid_index: 0,
+                last_recv_index: None,
                 stream_process_index: None,
                 rand,
                 config,
@@ -446,6 +448,7 @@ impl Endpoint {
                 next_connection_id: 1,
                 connections: Vec::new(),
                 last_valid_index: 0,
+                last_recv_index: None,
                 stream_process_index: None,
                 rand,
                 config,
@@ -837,6 +840,7 @@ impl Endpoint {
             }
         }
 
+        let mut send_ind_opt = None;
         let res = match self.udp.get_next_recv_data() {
             Ok((recv_data, from_addr)) => {
                 // Only bother to look at a datagram that is less than or equal to the target
@@ -844,10 +848,27 @@ impl Endpoint {
                     if let Some((dcid, new_conn_possibility)) =
                         Connection::recv_header_analyze(recv_data, self.is_server)
                     {
-                        let mut verified_index_opt = self
-                            .connections
-                            .iter()
-                            .position(|conn| conn.matches_dcid(&dcid));
+                        let mut verified_index_opt = match self.last_recv_index {
+                            Some(ind) => {
+                                if self.connections[ind].matches_dcid(&dcid) {
+                                    Some(ind)
+                                } else {
+                                    send_ind_opt = Some(ind);
+                                    self.last_recv_index = self
+                                        .connections
+                                        .iter()
+                                        .position(|conn| conn.matches_dcid(&dcid));
+                                    self.last_recv_index
+                                }
+                            }
+                            None => {
+                                self.last_recv_index = self
+                                    .connections
+                                    .iter()
+                                    .position(|conn| conn.matches_dcid(&dcid));
+                                self.last_recv_index
+                            }
+                        };
 
                         if verified_index_opt.is_none() && new_conn_possibility && self.is_server {
                             let tag = ring::hmac::sign(&self.conn_id_seed_key, &dcid);
@@ -959,12 +980,32 @@ impl Endpoint {
                     Ok(RecvEvent::NoUpdate)
                 }
             }
-            Err(SocketError::RecvBlocked) => Ok(RecvEvent::DoneReceiving),
+            Err(SocketError::RecvBlocked) => {
+                if let Some(last_recv_ind) = self.last_recv_index {
+                    if self.send(last_recv_ind)?.is_none() {
+                        self.last_recv_index = None;
+                        Ok(RecvEvent::DoneReceiving)
+                    } else {
+                        Err(Error::UnexpectedClose)
+                    }
+                } else {
+                    Ok(RecvEvent::DoneReceiving)
+                }
+            }
             //Err(SocketError::RecvOtherIssue(e)) => Err(Error::SocketRecv(e)),
             Err(_) => Err(Error::SocketRecv(std::io::ErrorKind::WouldBlock)),
         };
         self.udp.done_with_recv_data();
-        res
+
+        if let Some(send_ind) = send_ind_opt {
+            if self.send(send_ind)?.is_none() {
+                res
+            } else {
+                Err(Error::UnexpectedClose)
+            }
+        } else {
+            res
+        }
     }
 
     // Close a connection with a given error code value

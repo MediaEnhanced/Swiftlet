@@ -46,7 +46,7 @@ use swiftlet_quic::{
     EndpointEventCallbacks, EndpointHandler,
 };
 
-const BUFFER_SIZE_PER_CONNECTION: usize = 4_194_304; // 4 MiB
+const BUFFER_SIZE_PER_CONNECTION: usize = 4_194_304 * 3; // 4 MiB
 
 mod protocol;
 use protocol::{set_stream_msg_size, StreamMsgType, TransferIntention};
@@ -823,7 +823,7 @@ struct ClientHandler {
     avg_duration: Duration,
 }
 
-const TEST_DATA_SIZE: usize = 2097152;
+const TEST_DATA_SIZE: usize = 2097152 * 4;
 
 #[cfg(feature = "client")]
 impl ClientHandler {

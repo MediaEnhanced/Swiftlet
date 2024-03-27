@@ -489,6 +489,7 @@ impl swiftlet_audio::OutputCallback for Output {
                         let readable_samples = (output_data.data_len - output_data.read_offset) * 2;
                         let writeable_samples = samples_len - samples_count;
                         if readable_samples >= writeable_samples {
+                            realtime.starve_counter = 0;
                             let next_read_offset = output_data.read_offset + writeable_samples;
                             //samples[samples_count..].copy_from_slice(&output_data.data[output_data.read_offset..next_read_offset]);
                             for (s_ind, s) in samples[samples_count..].iter_mut().enumerate() {
@@ -516,9 +517,20 @@ impl swiftlet_audio::OutputCallback for Output {
                     } else {
                         //let _ = self.debug_send.send("Voice Realtime Starved!\n");
                         realtime.starve_counter += 1;
-                        if realtime.starve_counter >= 200 {
+                        if realtime.starve_counter == 1 {
+                            match self
+                                .debug_send
+                                .push("Realtime voice starved!\n".to_string())
+                            {
+                                Ok(_) => {}
+                                Err(PushError::Full(_)) => return true,
+                            }
+                        } else if realtime.starve_counter >= 200 {
                             self.cleanup.push(realtime_ind);
-                            match self.debug_send.push("Realtime starved out!\n".to_string()) {
+                            match self
+                                .debug_send
+                                .push("Realtime voice starved out!\n".to_string())
+                            {
                                 Ok(_) => {}
                                 Err(PushError::Full(_)) => return true,
                             }

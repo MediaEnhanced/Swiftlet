@@ -400,9 +400,10 @@ impl ClientTerminal {
                                         }
                                     }
                                 } else if uc == 'U' {
-                                    let _ = self.network_channels.command_send.push(
-                                        NetworkCommand::Client(ClientCommand::UploadTest(16)),
-                                    );
+                                    let _ = self
+                                        .network_channels
+                                        .command_send
+                                        .push(NetworkCommand::Client(ClientCommand::UploadTest(8)));
                                 } else if uc == 'S' {
                                     if let Some(ind) = self.client.my_conn_ind {
                                         let state_change = self.client.connections[ind].state ^ 2;
