@@ -29,7 +29,7 @@ const CERT_PATH: &str = "security/cert.pem"; // Location of the certificate for 
 const PKEY_PATH: &str = "security/pkey.pem"; // Location of the private key for the server to use
 
 // IPv6 Addresses and Sockets used when sending the client an initial connection addresss
-#[cfg(feature = "client")]
+//#[cfg(feature = "client")]
 use std::time::{Duration, Instant};
 
 // Use Inter-Thread Communication Definitions
