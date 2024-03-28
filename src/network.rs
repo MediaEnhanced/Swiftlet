@@ -1375,14 +1375,14 @@ pub(crate) fn server_thread(
 ) {
     let config = Config {
         idle_timeout_in_ms: 5000,
-        reliable_stream_buffer: 65536,
+        reliable_stream_buffer: BUFFER_SIZE_PER_CONNECTION as u64,
         unreliable_stream_buffer: 65536,
         keep_alive_timeout: None,
-        initial_main_recv_size: BUFFER_SIZE_PER_CONNECTION,
+        initial_main_recv_size: 65536,
         main_recv_first_bytes: protocol::MESSAGE_HEADER_SIZE,
         initial_rt_recv_size: 65536,
         rt_recv_first_bytes: 0,
-        initial_background_recv_size: 65536,
+        initial_background_recv_size: BUFFER_SIZE_PER_CONNECTION,
         background_recv_first_bytes: protocol::MESSAGE_HEADER_SIZE,
     };
 
@@ -1424,14 +1424,14 @@ pub(crate) fn client_thread(
 ) {
     let config = Config {
         idle_timeout_in_ms: 5000,
-        reliable_stream_buffer: 65536,
+        reliable_stream_buffer: BUFFER_SIZE_PER_CONNECTION as u64,
         unreliable_stream_buffer: 65536,
         keep_alive_timeout: Some(Duration::from_millis(2000)),
-        initial_main_recv_size: BUFFER_SIZE_PER_CONNECTION,
+        initial_main_recv_size: 65536,
         main_recv_first_bytes: protocol::MESSAGE_HEADER_SIZE,
         initial_rt_recv_size: 65536,
         rt_recv_first_bytes: protocol::MESSAGE_HEADER_SIZE,
-        initial_background_recv_size: 65536,
+        initial_background_recv_size: BUFFER_SIZE_PER_CONNECTION,
         background_recv_first_bytes: protocol::MESSAGE_HEADER_SIZE,
     };
     let mut client_endpoint = match Endpoint::new_client_with_first_connection(
