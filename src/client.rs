@@ -324,7 +324,7 @@ impl ClientTerminal {
             let _ = self
                 .audio_channels
                 .input_cmd_send
-                .push(TerminalAudioInCommands::Pause);
+                .push(TerminalAudioInCommands::Stop);
 
             let _ = self
                 .audio_channels
@@ -478,7 +478,20 @@ impl ClientTerminal {
             }
 
             loop {
-                match self.audio_channels.debug_recv.pop() {
+                match self.audio_channels.output_debug_recv.pop() {
+                    Err(PopError::Empty) => {
+                        break;
+                    }
+                    Ok(recv_string) => {
+                        self.client.debug_string.push_str(&recv_string);
+                        self.client.debug_lines += 1;
+                        should_draw = true;
+                    }
+                }
+            }
+
+            loop {
+                match self.audio_channels.input_debug_recv.pop() {
                     Err(PopError::Empty) => {
                         break;
                     }
@@ -500,6 +513,15 @@ impl ClientTerminal {
             .network_channels
             .command_send
             .push(NetworkCommand::Stop(42));
+
+        let _ = self
+            .audio_channels
+            .input_cmd_send
+            .push(TerminalAudioInCommands::Quit);
+        let _ = self
+            .audio_channels
+            .input_cmd_send
+            .push(TerminalAudioInCommands::Quit);
 
         // Cleanup Console Here:
         self.terminal.stop()

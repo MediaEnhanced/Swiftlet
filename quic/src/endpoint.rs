@@ -127,7 +127,7 @@ pub enum Error {
     /// Error getting send data from a connection
     ConnectionSend,
     /// Error from an unexpected close
-    UnexpectedClose,
+    UnexpectedClose(u64),
     /// Error sending data on the UDP socket
     SocketSend,
     /// Error receiving data on the UDP socket
@@ -554,7 +554,7 @@ impl Endpoint {
                     self.connections.push(conn_mgr);
                     let verified_index = self.connections.len() - 1;
                     if self.send(verified_index)?.is_some() {
-                        Err(Error::UnexpectedClose)
+                        Err(Error::UnexpectedClose(0))
                     } else {
                         Ok(())
                     }
@@ -605,7 +605,7 @@ impl Endpoint {
                     Ok(false) => {}
                     Ok(true) => {
                         if self.send(verified_index)?.is_some() {
-                            return Err(Error::UnexpectedClose);
+                            return Err(Error::UnexpectedClose(1));
                         }
                         num_pings += 1;
                     }
@@ -754,7 +754,7 @@ impl Endpoint {
                 if self.send(verified_index)?.is_none() {
                     Ok(RecvEvent::NoUpdate)
                 } else {
-                    Err(Error::UnexpectedClose)
+                    Err(Error::UnexpectedClose(2))
                 }
             }
             Ok(StreamResult::MainStreamReadable((data_vec, len))) => {
@@ -953,14 +953,14 @@ impl Endpoint {
                                             Err(Error::StreamCreation)
                                         }
                                     } else {
-                                        Err(Error::UnexpectedClose)
+                                        Err(Error::UnexpectedClose(3))
                                     }
                                 }
                                 Ok(RecvResult::Nothing) => {
                                     if self.send(verified_index)?.is_none() {
                                         Ok(RecvEvent::NoUpdate)
                                     } else {
-                                        Err(Error::UnexpectedClose)
+                                        Err(Error::UnexpectedClose(4))
                                     }
                                 }
                                 Ok(RecvResult::CloseInitiated) => {
@@ -981,12 +981,20 @@ impl Endpoint {
                 }
             }
             Err(SocketError::RecvBlocked) => {
-                if let Some(last_recv_ind) = self.last_recv_index {
-                    if self.send(last_recv_ind)?.is_none() {
-                        self.last_recv_index = None;
-                        Ok(RecvEvent::DoneReceiving)
-                    } else {
-                        Err(Error::UnexpectedClose)
+                if let Some(last_recv_ind) = self.last_recv_index.take() {
+                    match self.send(last_recv_ind)? {
+                        None => Ok(RecvEvent::DoneReceiving),
+                        Some(close_info) => {
+                            let connection_id = close_info.id;
+                            self.last_valid_index = last_recv_ind;
+                            let end_reason = ConnectionEndReason::from_close_info(&close_info);
+                            if close_info.is_closed {
+                                self.remove_connection(last_recv_ind);
+                                Ok(RecvEvent::ConnectionEnded((connection_id, end_reason)))
+                            } else {
+                                Ok(RecvEvent::ConnectionEnding((connection_id, end_reason)))
+                            }
+                        }
                     }
                 } else {
                     Ok(RecvEvent::DoneReceiving)
@@ -1001,7 +1009,7 @@ impl Endpoint {
             if self.send(send_ind)?.is_none() {
                 res
             } else {
-                Err(Error::UnexpectedClose)
+                Err(Error::UnexpectedClose(6))
             }
         } else {
             res
@@ -1031,7 +1039,7 @@ impl Endpoint {
             match self.connections[verified_index].app_close(error_code, b"app-reason") {
                 Ok(_) => {
                     if self.send(verified_index)?.is_some() {
-                        Err(Error::UnexpectedClose)
+                        Err(Error::UnexpectedClose(7))
                     } else {
                         Ok(true)
                     }
@@ -1069,7 +1077,7 @@ impl Endpoint {
             match self.connections[verified_index].main_stream_send(send_data) {
                 Ok(_) => {
                     if self.send(verified_index)?.is_some() {
-                        Err(Error::UnexpectedClose)
+                        Err(Error::UnexpectedClose(8))
                     } else {
                         Ok(())
                     }
@@ -1163,7 +1171,7 @@ impl Endpoint {
             {
                 Ok(_) => {
                     if self.send(verified_index)?.is_some() {
-                        Err(Error::UnexpectedClose)
+                        Err(Error::UnexpectedClose(9))
                     } else {
                         Ok(())
                     }
@@ -1212,7 +1220,7 @@ impl Endpoint {
             match self.connections[verified_index].bkgd_stream_send(send_data) {
                 Ok(_) => {
                     if self.send(verified_index)?.is_some() {
-                        Err(Error::UnexpectedClose)
+                        Err(Error::UnexpectedClose(10))
                     } else {
                         Ok(())
                     }

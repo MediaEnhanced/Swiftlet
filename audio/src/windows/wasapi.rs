@@ -392,7 +392,7 @@ impl OutputDevice {
                     unsafe { std::slice::from_raw_parts_mut(b as *mut f32, num_floats as usize) };
                 Ok(Some(buffer))
             }
-            Err(_) => Err(FoundationError::GetBuffer),
+            Err(_e) => Err(FoundationError::GetBuffer),
         }
     }
 
@@ -503,14 +503,14 @@ impl InputDevice {
         unsafe { self.reader.ReleaseBuffer(self.device.frame_period) }.is_ok()
     }
 
-    pub(super) fn run_input_event_loop(&self, mut callback: impl crate::InputCallback) -> bool {
+    pub(super) fn run_input_event_loop(&self, input_trait: &mut impl crate::InputTrait) -> bool {
         if !self.start() {
             return false;
         }
         loop {
             match self.wait_for_next_input(15) {
                 Ok(Some(buffer)) => {
-                    let callback_quit = callback.input_callback(buffer);
+                    let callback_quit = input_trait.callback(buffer);
                     if !self.release_input() {
                         return false;
                     }

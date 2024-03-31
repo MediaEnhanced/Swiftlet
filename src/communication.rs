@@ -92,12 +92,13 @@ pub(crate) struct AudioThreadChannels {
     // Audio Output Specific Channels
     pub(crate) output_cmd_recv: Consumer<TerminalAudioOutCommands>,
     pub(crate) packet_recv: Consumer<NetworkAudioOutPackets>,
+    pub(crate) state_send: Producer<AudioStateMessage>,
+    pub(crate) output_debug_send: Producer<String>,
+
     // Audio Input Specific Channels
     pub(crate) input_cmd_recv: Consumer<TerminalAudioInCommands>,
     pub(crate) packet_send: Producer<NetworkAudioInPackets>,
-    // Shared Channels
-    pub(crate) state_send: Producer<AudioStateMessage>,
-    pub(crate) debug_send: Producer<String>,
+    pub(crate) input_debug_send: Producer<String>,
 }
 
 #[cfg(feature = "client")]
@@ -111,7 +112,8 @@ pub(crate) struct TerminalAudioThreadChannels {
     pub(crate) output_cmd_send: Producer<TerminalAudioOutCommands>,
     pub(crate) input_cmd_send: Producer<TerminalAudioInCommands>,
     pub(crate) state_recv: Consumer<AudioStateMessage>,
-    pub(crate) debug_recv: Consumer<String>,
+    pub(crate) output_debug_recv: Consumer<String>,
+    pub(crate) input_debug_recv: Consumer<String>,
 }
 
 #[cfg(feature = "client")]
@@ -125,15 +127,17 @@ pub(crate) fn create_audio_channels() -> (
     let (packet_send, audio_packet_recv) = RingBuffer::new(64);
     let (audio_packet_send, packet_recv) = RingBuffer::new(20); // 20 10ms Input Buffers
     let (state_send, state_recv) = RingBuffer::new(64);
-    let (debug_send, debug_recv) = RingBuffer::new(256);
+    let (output_debug_send, output_debug_recv) = RingBuffer::new(256);
+    let (input_debug_send, input_debug_recv) = RingBuffer::new(256);
 
     let audio_output_channels = AudioThreadChannels {
         output_cmd_recv,
         packet_recv: audio_packet_recv,
+        state_send,
+        output_debug_send,
         input_cmd_recv,
         packet_send: audio_packet_send,
-        state_send,
-        debug_send,
+        input_debug_send,
     };
     let network_audio_output_channels = NetworkAudioThreadChannels {
         packet_send,
@@ -143,7 +147,8 @@ pub(crate) fn create_audio_channels() -> (
         output_cmd_send,
         input_cmd_send,
         state_recv,
-        debug_recv,
+        output_debug_recv,
+        input_debug_recv,
     };
 
     (
@@ -172,7 +177,8 @@ pub(crate) enum NetworkAudioOutPackets {
 #[cfg(feature = "client")]
 pub(crate) enum TerminalAudioInCommands {
     Start,
-    Pause,
+    Stop,
+    Quit,
 }
 
 #[cfg(feature = "client")]

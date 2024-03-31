@@ -83,6 +83,7 @@ impl swiftlet_audio::OutputCallback for Output {
 struct Input {
     callback_count: u64,
     sync_tx: SyncSender<Vec<f32>>,
+    started_once: bool,
 }
 
 impl Input {
@@ -90,12 +91,13 @@ impl Input {
         Input {
             callback_count: 0,
             sync_tx,
+            started_once: false,
         }
     }
 }
 
-impl swiftlet_audio::InputCallback for Input {
-    fn input_callback(&mut self, samples: &[f32]) -> bool {
+impl swiftlet_audio::InputTrait for Input {
+    fn callback(&mut self, samples: &[f32]) -> bool {
         self.callback_count += 1;
 
         let samples_len = samples.len();
@@ -117,5 +119,14 @@ impl swiftlet_audio::InputCallback for Input {
         }
 
         self.callback_count >= CALLBACK_MAX_COUNT
+    }
+
+    fn wait_to_start(&mut self) -> bool {
+        if !self.started_once {
+            self.started_once = true;
+            true
+        } else {
+            false
+        }
     }
 }

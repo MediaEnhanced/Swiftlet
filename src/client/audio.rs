@@ -41,19 +41,19 @@ pub(crate) fn audio_thread(channels: AudioThreadChannels) {
         command_recv: channels.output_cmd_recv,
         packet_recv: channels.packet_recv,
         state_send: channels.state_send,
-        debug_send: channels.debug_send,
+        debug_send: channels.output_debug_send,
     };
 
     let input = Input {
         callback_count: 0,
         last_instant: Instant::now(),
         avg_duration: Duration::from_millis(0),
-        is_running: false,
         encoder: Encoder::new(false, true).unwrap(),
         data: [0; 512],
         data_len: 0,
         command_recv: channels.input_cmd_recv,
         packet_send: channels.packet_send,
+        debug_send: channels.input_debug_send,
     };
 
     if swiftlet_audio::run_input_output(480, 2, 1, output, input).is_err() {
@@ -75,6 +75,18 @@ struct Output {
 
 impl Output {
     #[inline]
+    fn send_state(&mut self, state_msg: AudioStateMessage) -> bool {
+        if self.state_send.is_abandoned() {
+            true
+        } else {
+            match self.state_send.push(state_msg) {
+                Ok(_) => false,
+                Err(PushError::Full(_)) => panic!("Audio Output: State Send Full!"),
+            }
+        }
+    }
+
+    #[inline]
     fn send_debug(&mut self, s: String) -> bool {
         if self.debug_send.is_abandoned() {
             true
@@ -89,18 +101,6 @@ impl Output {
     #[inline]
     fn send_debug_str(&mut self, s: &str) -> bool {
         self.send_debug(s.to_string())
-    }
-
-    #[inline]
-    fn send_state(&mut self, state_msg: AudioStateMessage) -> bool {
-        if self.state_send.is_abandoned() {
-            true
-        } else {
-            match self.state_send.push(state_msg) {
-                Ok(_) => false,
-                Err(PushError::Full(_)) => panic!("Audio Output: State Send Full!"),
-            }
-        }
     }
 }
 
@@ -307,12 +307,12 @@ impl swiftlet_audio::OutputCallback for Output {
                             starve_counter: 0,
                         };
 
-                        // let output_data = OutputData {
-                        //     data: [0.0; 1920],
-                        //     data_len: 960,
-                        //     read_offset: 0,
-                        // };
-                        // output_realtime.data_queue.push_back(output_data);
+                        let output_data = OutputData {
+                            data: [0.0; 1920],
+                            data_len: 960,
+                            read_offset: 0,
+                        };
+                        output_realtime.data_queue.push_back(output_data);
 
                         let mut output_data = OutputData {
                             data: [0.0; 1920],
@@ -553,32 +553,16 @@ struct Input {
     callback_count: u64,
     last_instant: Instant,
     avg_duration: Duration,
-    is_running: bool,
     encoder: Encoder,
     data: [u8; 512],
     data_len: usize,
     command_recv: Consumer<TerminalAudioInCommands>,
     packet_send: Producer<NetworkAudioInPackets>,
     // state_send: Producer<AudioStateMessage>,
-    // debug_send: Producer<String>,
+    debug_send: Producer<String>,
 }
 
 impl Input {
-    #[inline]
-    fn send_debug(&self, s: String) -> bool {
-        // match self.debug_send.send_timeout(s, Duration::from_millis(1)) {
-        //     Ok(_) => false,
-        //     Err(SendTimeoutError::Disconnected(_)) => true,
-        //     Err(SendTimeoutError::Timeout(_)) => panic!("Audio Input: Debug Send Timeout!"),
-        // }
-        false
-    }
-
-    #[inline]
-    fn send_debug_str(&self, s: &str) -> bool {
-        self.send_debug(s.to_string())
-    }
-
     #[inline]
     fn send_state(&self, state_msg: AudioStateMessage) -> bool {
         // match self
@@ -591,10 +575,52 @@ impl Input {
         // }
         false
     }
+
+    #[inline]
+    fn send_debug(&mut self, s: String) -> bool {
+        if self.debug_send.is_abandoned() {
+            true
+        } else {
+            match self.debug_send.push(s) {
+                Ok(_) => false,
+                Err(PushError::Full(_)) => panic!("Audio Output: Debug Send Full!"),
+            }
+        }
+    }
+
+    #[inline]
+    fn send_debug_str(&mut self, s: &str) -> bool {
+        self.send_debug(s.to_string())
+    }
 }
 
-impl swiftlet_audio::InputCallback for Input {
-    fn input_callback(&mut self, samples: &[f32]) -> bool {
+impl swiftlet_audio::InputTrait for Input {
+    fn wait_to_start(&mut self) -> bool {
+        loop {
+            loop {
+                match self.command_recv.pop() {
+                    Err(PopError::Empty) => break,
+                    Ok(TerminalAudioInCommands::Start) => {
+                        match Encoder::new(false, true) {
+                            Ok(enc) => {
+                                self.encoder = enc;
+                                return true;
+                            }
+                            Err(e) => {
+                                self.send_debug_str("Encoder could not be created!!!\n");
+                                return false;
+                            }
+                        };
+                    }
+                    Ok(TerminalAudioInCommands::Quit) => return false,
+                    _ => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn callback(&mut self, samples: &[f32]) -> bool {
         self.callback_count += 1;
 
         let current_instant = Instant::now();
@@ -614,25 +640,14 @@ impl swiftlet_audio::InputCallback for Input {
         loop {
             match self.command_recv.pop() {
                 Err(PopError::Empty) => break,
-                Ok(TerminalAudioInCommands::Start) => {
-                    self.encoder = match Encoder::new(false, true) {
-                        Ok(enc) => {
-                            self.is_running = true;
-                            enc
-                        }
-                        Err(e) => {
-                            self.send_debug_str("Encoder could not be created!!!\n");
-                            return true;
-                        }
-                    };
-                }
-                Ok(TerminalAudioInCommands::Pause) => self.is_running = false,
+                Ok(TerminalAudioInCommands::Stop) => return true,
+                Ok(TerminalAudioInCommands::Quit) => return true,
+                _ => {}
             }
         }
 
         let samples_len = samples.len();
         if samples_len != 480 {
-            self.is_running = false;
             if self.send_state(AudioStateMessage::InputPaused) {
                 return true;
             }
@@ -641,36 +656,36 @@ impl swiftlet_audio::InputCallback for Input {
             }
         }
 
-        if self.is_running {
-            // if self.send_debug("Audio Input is Running!\n") {
-            //     return true;
-            // }
-            match self.encoder.encode_float(samples, &mut self.data) {
-                Ok(len) => {
-                    let in_packet = NetworkAudioInPackets {
-                        data: self.data,
-                        len,
-                        instant: Instant::now(),
-                    };
-                    match self.packet_send.push(in_packet) {
-                        Ok(_) => {}
-                        Err(PushError::Full(_)) => panic!("Audio Input: Send Packet Full!"),
+        match self.encoder.encode_float(samples, &mut self.data) {
+            Ok(len) => {
+                let in_packet = NetworkAudioInPackets {
+                    data: self.data,
+                    len,
+                    instant: Instant::now(),
+                };
+                match self.packet_send.push(in_packet) {
+                    Ok(_) => {}
+                    Err(PushError::Full(_)) => {
+                        self.send_debug_str("Audio Input: Send Packet Full!");
+                        return true;
                     }
                 }
-                Err(e) => {
-                    self.is_running = false;
-                    if self.send_state(AudioStateMessage::InputPaused) {
-                        return true;
-                    }
-                    if self
-                        .send_debug_str("Audio Input: Did not get the expected amount of samples!")
-                    {
-                        return true;
-                    }
+            }
+            Err(e) => {
+                if self.send_state(AudioStateMessage::InputPaused) {
+                    return true;
+                }
+                if self.send_debug_str("Audio Input: Did not get the expected amount of samples!") {
+                    return true;
                 }
             }
         }
 
         false
+    }
+
+    fn error(&mut self, e: swiftlet_audio::Error, _recoverable: bool) {
+        let s = format!("Audio Input Error: {:?}", e);
+        self.send_debug(s);
     }
 }

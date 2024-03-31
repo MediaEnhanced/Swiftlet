@@ -91,7 +91,7 @@ impl<'a> AudioInput<'a> {
         self.device.get_channels()
     }
 
-    pub(super) fn run_callback_loop(&self, callback: impl crate::InputCallback) -> bool {
-        self.device.run_input_event_loop(callback)
+    pub(super) fn run_callback_loop(&self, input_trait: &mut impl crate::InputTrait) -> bool {
+        self.device.run_input_event_loop(input_trait)
     }
 }

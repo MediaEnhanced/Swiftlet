@@ -26,8 +26,21 @@ pub trait OutputCallback {
     fn output_callback(&mut self, samples: &mut [f32]) -> bool;
 }
 
-pub trait InputCallback {
-    fn input_callback(&mut self, samples: &[f32]) -> bool;
+pub trait InputTrait {
+    /// return true to start callback loop
+    ///
+    /// return false to quit input audio thread
+    fn wait_to_start(&mut self) -> bool;
+
+    /// will get called everytime there is new input audio samples
+    ///
+    /// return true to stop the callback loop at which point the
+    /// wait_to_start function will be called
+    fn callback(&mut self, samples: &[f32]) -> bool;
+
+    /// provides a way for the application to receive input audio errors
+    /// in order to handle them
+    fn error(&mut self, _e: Error, _recoverable: bool) {}
 }
 
 #[cfg_attr(target_os = "windows", path = "windows/os.rs")]
@@ -49,6 +62,7 @@ pub enum Error {
     OutputPlayback,
     InputCapture,
     ChannelMismatch,
+    InputCallback,
 }
 
 /// Takes control of thread and calls the callback function with a fillable sample buffer every
@@ -74,7 +88,7 @@ pub fn run_input_output(
     output_expected_channels: u32,
     input_expected_channels: u32,
     output_callback: impl OutputCallback + Send + 'static,
-    input_callback: impl InputCallback + Send + 'static,
+    input_trait: impl InputTrait + Send,
 ) -> Result<(), Error> {
     let owner = match AudioOwner::new() {
         Some(d) => d,
@@ -90,14 +104,7 @@ pub fn run_input_output(
                 output_callback,
             )
         });
-        scope.spawn(|| {
-            input_thread(
-                &owner,
-                desired_period,
-                input_expected_channels,
-                input_callback,
-            )
-        });
+        scope.spawn(|| input_thread(&owner, desired_period, input_expected_channels, input_trait));
     });
 
     Ok(())
@@ -125,16 +132,29 @@ fn input_thread(
     owner: &AudioOwner,
     desired_period: u32,
     expected_channels: u32,
-    callback: impl InputCallback + 'static,
-) -> Result<bool, Error> {
-    let input = match AudioInput::new(owner, desired_period, expected_channels) {
-        Some(i) => i,
-        None => return Err(Error::InputCreation),
-    };
-
-    if input.get_channels() != expected_channels {
-        return Err(Error::ChannelMismatch);
+    mut input_trait: impl InputTrait,
+) {
+    loop {
+        if input_trait.wait_to_start() {
+            match AudioInput::new(owner, desired_period, expected_channels) {
+                Some(input) => {
+                    if input.get_channels() == expected_channels {
+                        match input.run_callback_loop(&mut input_trait) {
+                            true => {}
+                            false => {
+                                input_trait.error(Error::InputCallback, true);
+                            }
+                        }
+                    } else {
+                        input_trait.error(Error::ChannelMismatch, true);
+                    }
+                }
+                None => {
+                    input_trait.error(Error::InputCreation, true);
+                }
+            }
+        } else {
+            break;
+        }
     }
-
-    Ok(input.run_callback_loop(callback))
 }

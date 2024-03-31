@@ -236,7 +236,7 @@ impl UdpSocket {
         } {
             Ok(_) => match self.recv_msgs[self.recv_current_msg].wait_for_msg(
                 self.timer_handle,
-                (timeout_duration.as_millis() as u32) + 10,
+                (timeout_duration.as_millis() as u32) + 100,
             ) {
                 Ok(b) => b,
                 Err(e) => panic!("UDP Socket Windows Wait Error: {:?}", e),
