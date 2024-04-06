@@ -651,9 +651,8 @@ impl swiftlet_audio::InputTrait for Input {
             if self.send_state(AudioStateMessage::InputPaused) {
                 return true;
             }
-            if self.send_debug_str("Audio Input: Did not get the expected amount of samples!") {
-                return true;
-            }
+            self.send_debug_str("Audio Input: Did not get the expected amount of samples!\n");
+            return true;
         }
 
         match self.encoder.encode_float(samples, &mut self.data) {
@@ -666,7 +665,7 @@ impl swiftlet_audio::InputTrait for Input {
                 match self.packet_send.push(in_packet) {
                     Ok(_) => {}
                     Err(PushError::Full(_)) => {
-                        self.send_debug_str("Audio Input: Send Packet Full!");
+                        self.send_debug_str("Audio Input: Send Packet Full!\n");
                         return true;
                     }
                 }
@@ -675,9 +674,8 @@ impl swiftlet_audio::InputTrait for Input {
                 if self.send_state(AudioStateMessage::InputPaused) {
                     return true;
                 }
-                if self.send_debug_str("Audio Input: Did not get the expected amount of samples!") {
-                    return true;
-                }
+                self.send_debug_str("Audio Input: Opus Encode Error!\n");
+                return true;
             }
         }
 
@@ -685,7 +683,7 @@ impl swiftlet_audio::InputTrait for Input {
     }
 
     fn error(&mut self, e: swiftlet_audio::Error, _recoverable: bool) {
-        let s = format!("Audio Input Error: {:?}", e);
+        let s = format!("Audio Input Error: {:?}\n", e);
         self.send_debug(s);
     }
 }

@@ -104,6 +104,25 @@ pub struct Endpoint {
     config: Config,
     is_server: bool,
     conn_id_seed_key: ring::hmac::Key, // Value matters ONLY if is_server is true
+    stats: Stats,
+}
+
+/// Endpoint Stats
+#[derive(Debug)]
+pub struct Stats {
+    /// Total Time Endpoint Spent Slept for
+    pub sleep_time: Duration,
+    /// Total number of delayed sends
+    pub delayed_sends: u64,
+}
+
+impl Stats {
+    fn new() -> Self {
+        Stats {
+            sleep_time: Duration::from_millis(0),
+            delayed_sends: 0,
+        }
+    }
 }
 
 /// A Connection ID used to communicate with the endpoint about a specific connection.
@@ -394,6 +413,7 @@ impl Endpoint {
                 config,
                 is_server: true,
                 conn_id_seed_key,
+                stats: Stats::new(),
             };
 
             Ok(endpoint_manager)
@@ -454,6 +474,7 @@ impl Endpoint {
                 config,
                 is_server: false,
                 conn_id_seed_key,
+                stats: Stats::new(),
             };
 
             Ok(endpoint_manager)
@@ -633,6 +654,7 @@ impl Endpoint {
         match self.udp.send_check() {
             Ok(send_count) => {
                 if send_count > 0 && next_tick_instant <= Instant::now() {
+                    self.stats.delayed_sends += send_count;
                     self.keep_alive()?;
                     return Ok(NextEvent::Tick);
                 }
@@ -710,15 +732,19 @@ impl Endpoint {
             }
         }
 
-        let sleep_duration = next_instant.duration_since(Instant::now());
+        let earlier = Instant::now();
+        let sleep_duration = next_instant.duration_since(earlier);
         if self.udp.sleep_till_recv_data(sleep_duration) {
+            //self.stats.sleep_time += Instant::now() - earlier;
             Ok(NextEvent::ReceivedData)
         } else if send_check_timeout {
+            //self.stats.sleep_time += Instant::now() - earlier;
             match self.udp.send_check() {
                 Ok(_) => Ok(NextEvent::AlreadyHandled),
                 Err(_) => Err(Error::SocketSend),
             }
         } else if let Some(vi) = conn_timeout_opt {
+            //self.stats.sleep_time += Instant::now() - earlier;
             if self.connections[vi].handle_possible_timeout().is_none() {
                 if let Some(close_info) = self.send(vi)? {
                     let connection_id = close_info.id;
@@ -737,6 +763,7 @@ impl Endpoint {
                 Ok(NextEvent::AlreadyHandled)
             }
         } else {
+            //self.stats.sleep_time += Instant::now() - earlier;
             self.keep_alive()?;
             Ok(NextEvent::Tick)
         }
@@ -1290,4 +1317,14 @@ impl Endpoint {
     //     self.send(verified_index)?;
     //     Ok(())
     // }
+
+    /// Get Endpoint Stats
+    pub fn get_stats(&self) -> &Stats {
+        &self.stats
+    }
+
+    /// Get Clear Stats
+    pub fn clear_stats(&mut self) {
+        self.stats = Stats::new()
+    }
 }

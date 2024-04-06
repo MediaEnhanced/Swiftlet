@@ -94,4 +94,8 @@ impl<'a> AudioInput<'a> {
     pub(super) fn run_callback_loop(&self, input_trait: &mut impl crate::InputTrait) -> bool {
         self.device.run_input_event_loop(input_trait)
     }
+
+    pub(super) fn run_callback_loop2(&self, input_trait: &mut impl crate::InputTrait) -> bool {
+        self.device.run_input_event_loop2(input_trait)
+    }
 }

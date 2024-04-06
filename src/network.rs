@@ -1155,9 +1155,10 @@ impl EndpointEventCallbacks for ClientHandler {
                     Ok(pkt) => {
                         let channel_latency = Instant::now() - pkt.instant;
                         if channel_latency > Duration::from_millis(6) {
+                            let stats = endpoint.get_stats();
                             let s = format!(
-                                "Channel Latency: {:?}; Since Last Tick: {:?}\n",
-                                channel_latency, current_duration
+                                "Channel Latency: {:?}; Since Last Tick: {:?}\nStats: {:?}\n",
+                                channel_latency, current_duration, stats
                             );
                             let _ = self.terminal_channels.debug_send.push(s);
                         }
@@ -1207,6 +1208,8 @@ impl EndpointEventCallbacks for ClientHandler {
             }
             self.command_handler_tick = 0;
         }
+
+        endpoint.clear_stats();
 
         self.last_instant = current_instant;
         false

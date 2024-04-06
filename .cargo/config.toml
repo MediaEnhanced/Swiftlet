@@ -6,7 +6,7 @@
 run-quic-example = "run -p swiftlet_quic --example simple"
 run-audio-loopback-example = "run -p swiftlet_audio --example loopback"
 run-audio-playback-example = "run -p swiftlet_audio --example playback --features opus"
-
+run-graphics-color-example = "run -p swiftlet_graphics --example color"
 run-binaural-example = "run -p swiftlet_binaural --example demo"
 
 windows-cross-windows-x64 = "--config target.x86_64-pc-windows-gnu.linker='../zig/zcc.bat' --config target.x86_64-pc-windows-gnu.rustflags=['-C','link-arg=--target=x86_64-windows'] build --target x86_64-pc-windows-gnu"

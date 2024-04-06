@@ -57,6 +57,7 @@ members = [
   ".",
   "quic",
   "audio",
+  "graphics",
   "binaural",
 ]
 

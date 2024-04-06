@@ -20,7 +20,7 @@
 //OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //SOFTWARE.
 
-use std::os::raw::{c_int, c_uchar};
+use std::ffi::{c_int, c_uchar};
 
 #[derive(Clone, Copy)]
 #[repr(C)]

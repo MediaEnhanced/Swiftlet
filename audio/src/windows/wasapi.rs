@@ -529,4 +529,35 @@ impl InputDevice {
 
         self.stop()
     }
+
+    pub(super) fn run_input_event_loop2(&self, input_trait: &mut impl crate::InputTrait) -> bool {
+        if !self.start() {
+            return false;
+        }
+        let mut buffer_convert = vec![0.0; 480];
+        loop {
+            match self.wait_for_next_input(15) {
+                Ok(Some(buffer)) => {
+                    for ind in 0..480 {
+                        buffer_convert[ind] = buffer[ind << 1];
+                    }
+                    let callback_quit = input_trait.callback(&buffer_convert);
+                    if !self.release_input() {
+                        return false;
+                    }
+                    if callback_quit {
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    // Timeout here
+                }
+                Err(e) => {
+                    println!("Input Wait Error: {:?}", e);
+                }
+            }
+        }
+
+        self.stop()
+    }
 }

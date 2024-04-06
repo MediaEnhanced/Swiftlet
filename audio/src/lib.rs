@@ -145,6 +145,13 @@ fn input_thread(
                                 input_trait.error(Error::InputCallback, true);
                             }
                         }
+                    } else if (input.get_channels() == 2) && (expected_channels == 1) {
+                        match input.run_callback_loop2(&mut input_trait) {
+                            true => {}
+                            false => {
+                                input_trait.error(Error::InputCallback, true);
+                            }
+                        }
                     } else {
                         input_trait.error(Error::ChannelMismatch, true);
                     }

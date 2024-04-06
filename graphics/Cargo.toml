@@ -1,0 +1,70 @@
+# Media Enhanced Swiftlet Graphics Cargo
+# Vulkan Graphics for Modern Platforms
+
+[package]
+name = "swiftlet_graphics"
+description = "vulkan graphics"
+version = "0.1.0"
+authors = ["MediaEnhanced"]
+repository = "https://github.com/MediaEnhanced/Swiftlet"
+license = "MIT"
+
+# Future Readme:
+#readme = "README.md"
+
+edition = "2021"
+rust-version = "1.75"
+publish = false
+
+# Disable Automatic Discovery
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+# Includes a build script that sets up cross-compiling
+# and compiles the opus library from source only when 
+# the opus feature is enabled
+build = "build.rs"
+
+[build-dependencies]
+cc = { version = "1" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.54", features = [
+	"Win32_Foundation",
+	"Win32_System_LibraryLoader",
+	"Win32_System_Threading",
+	"Win32_Security",
+	"Win32_Graphics_Dxgi",
+	"Win32_Graphics_Gdi",
+	"Win32_UI_WindowsAndMessaging"
+]}
+
+#[features]
+#opus = []
+
+[lib]
+# Unnecessary Name since it matches the package name
+#name = "swiftlet_audio"
+path = "src/lib.rs"
+# Rust Static Library:
+crate-type = ["rlib"]
+# No Documentation Yet
+doc = false
+# No Testing Yet
+test = false
+harness = false
+doctest = false
+bench = false
+# Not a proc-macro library
+proc-macro = false
+
+[[example]]
+name = "color"
+path = "examples/color.rs"
+crate-type = ["bin"]
+doc = false
+test = false
+harness = false
+bench = false
