@@ -80,6 +80,8 @@ pub const LAYER_NAME_SYNC: &str = "VK_LAYER_KHRONOS_synchronization2";
 pub const INSTANCE_EXTENSION_NAME_SURFACE: &str = "VK_KHR_surface";
 #[cfg(target_os = "windows")]
 pub const INSTANCE_EXTENSION_NAME_OS_SURFACE: &str = "VK_KHR_win32_surface";
+#[cfg(target_os = "macos")]
+pub const INSTANCE_EXTENSION_NAME_OS_SURFACE: &str = "VK_EXT_metal_surface";
 pub const INSTANCE_EXTENSION_NAME_DEBUG: &str = "VK_EXT_debug_utils";
 
 pub struct Instance {
@@ -160,6 +162,69 @@ pub struct PhysicalDevice {
 }
 
 impl PhysicalDevice {
+    pub fn new(instance: Instance) -> Result<Option<Self>, Error> {
+        let devices = [ptr::null(); 32];
+        let device_count = devices.len() as u32;
+        let result = unsafe {
+            api::vkEnumeratePhysicalDevices(instance.handle, &device_count, devices.as_ptr())
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+        let handle = devices[0];
+
+        let format_properties = api::FormatProperties::default();
+        unsafe {
+            api::vkGetPhysicalDeviceFormatProperties(
+                handle,
+                Format::B8G8R8A8unorm,
+                &format_properties,
+            )
+        }
+        let optimal_features = format_properties.optimal_tiling_features;
+        if !((optimal_features & FormatFeatureFlagBit::BlitSrc as FormatFeatureFlags > 0)
+            && (optimal_features & FormatFeatureFlagBit::BlitDst as FormatFeatureFlags > 0)
+            && (optimal_features & FormatFeatureFlagBit::SampledImage as FormatFeatureFlags > 0))
+        {
+            return Err(Error::BadOptimalFeatures);
+        }
+
+        let memory_properties = api::PhysicalDeviceMemoryProperties::default();
+        unsafe { api::vkGetPhysicalDeviceMemoryProperties(handle, &memory_properties) };
+
+        let mut local_only_memory_type_index = 0;
+        for i in 0..memory_properties.memory_type_count {
+            if (memory_properties.memory_types[i as usize].property_flags
+                & api::MemoryPropertyFlagBit::DeviceLocal as api::MemoryPropertyFlags)
+                > 0
+            {
+                local_only_memory_type_index = i;
+                break;
+            }
+        }
+
+        let mut basic_cpu_access_memory_type_index = 0;
+        for i in 0..memory_properties.memory_type_count {
+            if ((memory_properties.memory_types[i as usize].property_flags
+                & api::MemoryPropertyFlagBit::HostVisible as api::MemoryPropertyFlags)
+                > 0)
+                && ((memory_properties.memory_types[i as usize].property_flags
+                    & api::MemoryPropertyFlagBit::HostCoherent as api::MemoryPropertyFlags)
+                    > 0)
+            {
+                basic_cpu_access_memory_type_index = i;
+                break;
+            }
+        }
+
+        Ok(Some(PhysicalDevice {
+            handle,
+            instance,
+            local_only_memory_type_index,
+            basic_cpu_access_memory_type_index,
+        }))
+    }
+
     pub fn new_from_luid(instance: Instance, luid: [u32; 2]) -> Result<Option<Self>, Error> {
         let devices = [ptr::null(); 32];
         let device_count = devices.len() as u32;
@@ -808,6 +873,34 @@ impl Swapchain {
         println!("Got Surface!");
 
         Swapchain::create(physical_device, surface_handle)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn new(physical_device: PhysicalDevice, surface_parameters: ()) -> Result<Self, Error> {
+        // let surface_create_info = api::SurfaceCreateInfoWin32 {
+        //     header: StructureHeader::new(StructureType::SurfaceCreateInfoWin32),
+        //     flags: 0,
+        //     hinstance: surface_parameters.0,
+        //     hwnd: surface_parameters.1,
+        // };
+
+        // let surface_handle = ptr::null();
+        // let result = unsafe {
+        //     api::vkCreateWin32SurfaceKHR(
+        //         physical_device.instance.handle,
+        //         &surface_create_info,
+        //         ptr::null(),
+        //         &surface_handle,
+        //     )
+        // };
+        // if result != 0 {
+        //     return Err(Error::VkResult(result));
+        // }
+
+        // println!("Got Surface!");
+
+        // Swapchain::create(physical_device, surface_handle)
+        Err(Error::SurfaceNoTransfer)
     }
 
     fn render_next_image(&mut self, fence: OpaqueHandle) -> Result<(), Error> {

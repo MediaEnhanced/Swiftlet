@@ -41,12 +41,12 @@ pub enum OsError {
     UnexpectedEventCheckResult,
 }
 
-pub(super) fn get_device_luid() -> Result<[u32; 2], OsError> {
+pub(super) fn get_device_luid() -> Result<Option<[u32; 2]>, OsError> {
     let interface = match dxgi::Interface::new(false) {
         Ok(i) => i,
         Err(e) => return Err(OsError::Dxgi(e)),
     };
-    Ok(interface.get_luid())
+    Ok(Some(interface.get_luid()))
 }
 
 unsafe extern "system" fn os_window_callback(

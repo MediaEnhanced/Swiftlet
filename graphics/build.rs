@@ -115,6 +115,8 @@ fn main() {
         }
     };
 
+    println!("cargo:rustc-link-search=bin/");
+    println!("cargo:rustc-link-arg=-Wl,-rpath,./");
     #[allow(unused_variables)]
     let cross_info_opt = CrossCompileInfo::new(host_string.as_str(), target_string.as_str());
 

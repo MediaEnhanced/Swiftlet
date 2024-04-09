@@ -48,7 +48,7 @@ fn main() -> std::io::Result<()> {
     Ok(())
 }
 
-fn signaler_thread(signaler: swiftlet_graphics::OsEventSignaler) {
+fn signaler_thread(mut signaler: swiftlet_graphics::OsEventSignaler) {
     loop {
         std::thread::sleep(Duration::from_secs(1));
         match signaler.signal() {

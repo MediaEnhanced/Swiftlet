@@ -952,7 +952,7 @@ impl Device {
     pub(super) fn run_input_callback_loop(
         &self,
         channels: u32,
-        mut closure: &mut InputClosure,
+        mut closure: &mut dyn crate::InputTrait,
     ) -> Result<(), Error> {
         // let mut data_size = size_of::<AudioStreamBasicDescription>() as u32;
         // let stream_data_result = AudioStreamBasicDescription::new_blank();
@@ -1143,7 +1143,6 @@ fn sync_send(sync_tx_ptr: *const c_void, callback_stop: CallbackStop) {
 }
 
 type OutputClosure = dyn FnMut(&mut [f32]) -> bool;
-type InputClosure = dyn FnMut(&[f32]) -> bool;
 
 extern "C" fn render_callback(
     callback_data: *mut RenderCallbackData,
@@ -1242,7 +1241,8 @@ extern "C" fn capture_callback(
 
         if cb_data.is_capture {
             if let Some(cb_fn) = unsafe { cb_data.closure_ptr.as_mut() } {
-                let closure: &mut &mut InputClosure = unsafe { std::mem::transmute(cb_fn) };
+                let closure: &mut &mut dyn crate::InputTrait =
+                    unsafe { std::mem::transmute(cb_fn) };
                 //println!("Action Flags: {}, Frame_count: {}", 0, frame_count);
 
                 let mut buffer_vec = vec![0; 480 * 4];
@@ -1284,7 +1284,7 @@ extern "C" fn capture_callback(
                         std::slice::from_raw_parts(local_buffer_list_data_ptr as *const f32, 480)
                     };
 
-                    if closure(float_data) {
+                    if closure.callback(float_data) {
                         sync_send(cb_data.sync_tx_ptr, CallbackStop::Normal);
                     }
                 } else {

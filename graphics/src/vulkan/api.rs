@@ -1228,6 +1228,7 @@ pub(super) enum MemoryMapFlagBit {
 pub(super) type MemoryMapFlags = u32;
 
 #[cfg_attr(windows, link(name = "vulkan-1", kind = "raw-dylib"))]
+#[cfg_attr(target_os = "macos", link(name = "MoltenVK", kind = "dylib"))]
 extern "C" {
     pub(super) fn vkCreateInstance(
         create_info: *const InstanceCreateInfo,

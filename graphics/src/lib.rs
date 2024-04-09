@@ -73,15 +73,18 @@ impl Window {
             Err(e) => return Err(Error::VulkanError(e)),
         };
 
-        let luid = match os::get_device_luid() {
-            Ok(l) => l,
+        let physical_device = match os::get_device_luid() {
+            Ok(Some(luid)) => match vulkan::PhysicalDevice::new_from_luid(instance, luid) {
+                Ok(Some(d)) => d,
+                Ok(None) => return Err(Error::CannotFindPhysicalDevice),
+                Err(e) => return Err(Error::VulkanError(e)),
+            },
+            Ok(None) => match vulkan::PhysicalDevice::new(instance) {
+                Ok(Some(d)) => d,
+                Ok(None) => return Err(Error::CannotFindPhysicalDevice),
+                Err(e) => return Err(Error::VulkanError(e)),
+            },
             Err(e) => return Err(Error::OsError(e)),
-        };
-
-        let physical_device = match vulkan::PhysicalDevice::new_from_luid(instance, luid) {
-            Ok(Some(d)) => d,
-            Ok(None) => return Err(Error::CannotFindPhysicalDevice),
-            Err(e) => return Err(Error::VulkanError(e)),
         };
 
         // let device = match vulkan::Device::new(physical_device) {

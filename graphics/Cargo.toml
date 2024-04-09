@@ -42,12 +42,13 @@ windows = { version = "0.54", features = [
 ]}
 
 [target.'cfg(target_os = "macos")'.dependencies]
-icrate = { version = "0.1", features = [
+icrate = { git = "https://github.com/madsmtm/objc2.git", features = [
     "apple",
     "AppKit_all",
     "Foundation_all",
-    "Metal_all",
+    #"Metal_all",
 ]}
+objc2 = { git = "https://github.com/madsmtm/objc2.git" }
 rustix = { version = "0.38", features = [
     "event",
 ]}

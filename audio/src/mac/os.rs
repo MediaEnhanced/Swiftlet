@@ -152,13 +152,14 @@ impl<'a> AudioInput<'a> {
         self.channels
     }
 
-    pub(super) fn run_callback_loop(
-        &self,
-        mut callback: impl crate::InputCallback + 'static,
-    ) -> bool {
-        let mut closure = move |samples: &[f32]| callback.input_callback(samples);
+    pub(super) fn run_callback_loop(&self, callback: &mut impl crate::InputTrait) -> bool {
         self.device
-            .run_input_callback_loop(self.channels, &mut closure)
+            .run_input_callback_loop(self.channels, callback)
             .is_ok()
+    }
+
+    pub(super) fn run_callback_loop2(&self, callback: &mut impl crate::InputTrait) -> bool {
+        // Need to implement logic here later
+        false
     }
 }
