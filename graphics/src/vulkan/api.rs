@@ -1,4 +1,4 @@
-//Media Enhanced Swiftlet Audio Rust Library for Low Latency Audio OS I/O
+//Media Enhanced Swiftlet Graphics Rust Library using Vulkan
 //MIT License
 //Copyright (c) 2024 Jared Loewenthal
 //

@@ -41,6 +41,17 @@ windows = { version = "0.54", features = [
 	"Win32_UI_WindowsAndMessaging"
 ]}
 
+[target.'cfg(target_os = "macos")'.dependencies]
+icrate = { version = "0.1", features = [
+    "apple",
+    "AppKit_all",
+    "Foundation_all",
+    "Metal_all",
+]}
+rustix = { version = "0.38", features = [
+    "event",
+]}
+
 #[features]
 #opus = []
 

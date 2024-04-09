@@ -1,4 +1,4 @@
-//Media Enhanced Swiftlet Cross-Compile Friendly Graphics Window Example
+//Media Enhanced Swiftlet Cross-Compile Friendly Graphics Color Flashing Window Example
 //MIT License
 //Copyright (c) 2024 Jared Loewenthal
 //
@@ -78,6 +78,7 @@ impl swiftlet_graphics::WindowCallbacks for SimpleDisplay {
             println!("Pixel Data Len: {}", pixel_data.len());
         }
 
+        // Draw Logic Here
         let pixel_color = match self.color {
             0 => 0xFF0000FF,
             1 => 0xFF00FF00,
@@ -86,13 +87,7 @@ impl swiftlet_graphics::WindowCallbacks for SimpleDisplay {
             _ => 0xFF000000,
         };
 
-        // Draw Logic Here
-        for d in pixel_data {
-            *d = pixel_color;
-        }
-        // for h in 0..height as usize {
-        //     pixel_data[h * width as usize] = pixel_color;
-        // }
+        pixel_data.fill(pixel_color);
 
         self.color += 1;
         if self.color >= 4 {
