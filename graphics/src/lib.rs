@@ -41,11 +41,63 @@ pub enum Error {
     CannotFindPhysicalDevice,
 }
 
-pub trait WindowCallbacks {
+pub struct BasicWindow {
+    window: os::OsWindow,
+    signal_watcher: os::OsEvent,
+}
+
+impl BasicWindow {
+    pub fn new(width: u32, height: u32) -> Result<(Self, os::OsEventSignaler), Error> {
+        let window = match os::OsWindow::new(width, height) {
+            Ok(w) => w,
+            Err(e) => return Err(Error::OsError(e)),
+        };
+
+        let signal_watcher = match os::OsEvent::new() {
+            Ok(t) => t,
+            Err(e) => return Err(Error::OsError(e)),
+        };
+        let signaler = signal_watcher.create_signaler();
+
+        Ok((
+            BasicWindow {
+                window,
+                signal_watcher,
+            },
+            signaler,
+        ))
+    }
+
+    pub fn run(&mut self) -> Result<(), Error> {
+        loop {
+            match self.window.process_messages() {
+                Ok(os::OsWindowState::Normal) => {}
+                Ok(os::OsWindowState::CloseAttempt) => {
+                    if let Err(e) = self.window.close_window() {
+                        return Err(Error::OsError(e));
+                    }
+                }
+                Ok(os::OsWindowState::ShouldDrop) => {
+                    break;
+                }
+                Ok(_) => {}
+                Err(e) => return Err(Error::OsError(e)),
+            }
+            match self.signal_watcher.check() {
+                Ok(false) => {}
+                Ok(true) => println!("Signaler Called!"),
+                Err(e) => return Err(Error::OsError(e)),
+            }
+        }
+        Ok(())
+    }
+}
+
+pub trait VulkanWindowCallbacks {
     fn draw(&mut self, pixel_data: &mut [u32], width: u32, height: u32);
 }
 
-pub struct Window {
+pub struct VulkanWindow {
     swapchain_cpu_render: vulkan::SwapchainCpuRender,
     window: os::OsWindow,
     draw_trigger_external: os::OsEvent,
@@ -53,9 +105,9 @@ pub struct Window {
     render_height: u32,
 }
 
-impl Window {
+impl VulkanWindow {
     pub fn new(width: u32, height: u32) -> Result<(Self, os::OsEventSignaler), Error> {
-        let layer_names = [vulkan::LAYER_NAME_VALIDATION, vulkan::LAYER_NAME_SYNC];
+        let layer_names = [vulkan::LAYER_NAME_VALIDATION];
 
         let extension_names = [
             vulkan::INSTANCE_EXTENSION_NAME_SURFACE,
@@ -115,7 +167,7 @@ impl Window {
         };
 
         Ok((
-            Window {
+            VulkanWindow {
                 swapchain_cpu_render,
                 window,
                 draw_trigger_external,
@@ -130,7 +182,7 @@ impl Window {
     //     // Maybe Something here in future
     // }
 
-    pub fn run(&mut self, mut callback: impl WindowCallbacks) -> Result<(), Error> {
+    pub fn run(&mut self, mut callback: impl VulkanWindowCallbacks) -> Result<(), Error> {
         // self.start();
 
         loop {

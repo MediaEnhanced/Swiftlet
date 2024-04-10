@@ -245,7 +245,7 @@ pub struct OsEventSignaler {
 }
 
 impl OsEventSignaler {
-    pub fn signal(&self) -> Result<(), OsError> {
+    pub fn signal(&mut self) -> Result<(), OsError> {
         if let Err(e) = unsafe { Threading::SetEvent(self.handle) } {
             Err(OsError::Event(e))
         } else {

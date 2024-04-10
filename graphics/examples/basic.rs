@@ -1,4 +1,4 @@
-//Media Enhanced Swiftlet Cross-Compile Friendly Graphics Color Flashing Window Example
+//Media Enhanced Swiftlet Cross-Compile Friendly Graphics Basic Window Example
 //MIT License
 //Copyright (c) 2024 Jared Loewenthal
 //
@@ -23,11 +23,9 @@
 use std::time::Duration;
 
 fn main() -> std::io::Result<()> {
-    println!("Graphics Window Starting!");
+    println!("Basic Window Starting!");
 
-    let simple_display = SimpleDisplay::new();
-
-    let (mut window, signaler) = match swiftlet_graphics::VulkanWindow::new(1440, 900) {
+    let (mut window, signaler) = match swiftlet_graphics::BasicWindow::new(1440, 900) {
         Ok((w, s)) => (w, s),
         Err(e) => {
             println!("Window Creation Error: {:?}", e);
@@ -37,7 +35,7 @@ fn main() -> std::io::Result<()> {
 
     let thread_handle = std::thread::spawn(|| signaler_thread(signaler));
 
-    if let Err(e) = window.run(simple_display) {
+    if let Err(e) = window.run() {
         println!("Window Run Error: {:?}", e);
     }
     drop(window);
@@ -54,44 +52,6 @@ fn signaler_thread(mut signaler: swiftlet_graphics::OsEventSignaler) {
         match signaler.signal() {
             Ok(_) => {}
             Err(_e) => break,
-        }
-    }
-}
-
-struct SimpleDisplay {
-    color: u64,
-    //font: Vec<u8>,
-}
-
-impl SimpleDisplay {
-    fn new() -> Self {
-        SimpleDisplay {
-            color: 0,
-            //font: Vec::new(),
-        }
-    }
-}
-
-impl swiftlet_graphics::VulkanWindowCallbacks for SimpleDisplay {
-    fn draw(&mut self, pixel_data: &mut [u32], width: u32, height: u32) {
-        if pixel_data.len() != (width * height) as usize {
-            println!("Pixel Data Len: {}", pixel_data.len());
-        }
-
-        // Draw Logic Here
-        let pixel_color = match self.color {
-            0 => 0xFF0000FF,
-            1 => 0xFF00FF00,
-            2 => 0xFFFF0000,
-            3 => 0xFFFFFFFF,
-            _ => 0xFF000000,
-        };
-
-        pixel_data.fill(pixel_color);
-
-        self.color += 1;
-        if self.color >= 4 {
-            self.color = 0;
         }
     }
 }

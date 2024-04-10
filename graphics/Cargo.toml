@@ -46,7 +46,7 @@ icrate = { git = "https://github.com/madsmtm/objc2.git", features = [
     "apple",
     "AppKit_all",
     "Foundation_all",
-    #"Metal_all",
+    "Metal_all",
 ]}
 objc2 = { git = "https://github.com/madsmtm/objc2.git" }
 rustix = { version = "0.38", features = [
@@ -71,6 +71,15 @@ doctest = false
 bench = false
 # Not a proc-macro library
 proc-macro = false
+
+[[example]]
+name = "basic"
+path = "examples/basic.rs"
+crate-type = ["bin"]
+doc = false
+test = false
+harness = false
+bench = false
 
 [[example]]
 name = "color"
