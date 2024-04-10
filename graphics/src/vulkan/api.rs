@@ -103,6 +103,7 @@ pub(super) enum StructureType {
     MemoryRequirements2 = 1000146003,
     BindBufferMemoryInfo = 1000157000,
     BindImageMemoryInfo = 1000157001,
+    SurfaceCreateInfoMetal = 1000217000,
     MemoryBarrier2 = 1000314000,
     BufferMemoryBarrier2 = 1000314001,
     ImageMemoryBarrier2 = 1000314002,
@@ -448,13 +449,21 @@ pub(super) struct PhysicalDeviceMemoryProperties {
     pub(super) memory_heaps: [MemoryHeap; 16],
 }
 
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 #[repr(C)]
 pub(super) struct SurfaceCreateInfoWin32 {
     pub(super) header: StructureHeader,
     pub(super) flags: u32,
     pub(super) hinstance: windows::Win32::Foundation::HINSTANCE,
     pub(super) hwnd: windows::Win32::Foundation::HWND,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+pub(super) struct SurfaceCreateInfoMetal {
+    pub(super) header: StructureHeader,
+    pub(super) flags: u32,
+    pub(super) layer: CAMetalLayer,
 }
 
 #[repr(C)]
@@ -1227,7 +1236,7 @@ pub(super) enum MemoryMapFlagBit {
 }
 pub(super) type MemoryMapFlags = u32;
 
-#[cfg_attr(windows, link(name = "vulkan-1", kind = "raw-dylib"))]
+#[cfg_attr(target_os = "windows", link(name = "vulkan-1", kind = "raw-dylib"))]
 #[cfg_attr(target_os = "macos", link(name = "MoltenVK", kind = "dylib"))]
 extern "C" {
     pub(super) fn vkCreateInstance(
@@ -1258,10 +1267,18 @@ extern "C" {
         memory_properties: *const PhysicalDeviceMemoryProperties,
     );
 
-    #[cfg(windows)]
+    #[cfg(target_os = "windows")]
     pub(super) fn vkCreateWin32SurfaceKHR(
         instance: OpaqueHandle,
         create_info: *const SurfaceCreateInfoWin32,
+        allocator: *const AllocationCallbacks,
+        surface_ptr: *const OpaqueHandle,
+    ) -> i32;
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn vkCreateMetalSurfaceEXT(
+        instance: OpaqueHandle,
+        create_info: *const SurfaceCreateInfoMetal,
         allocator: *const AllocationCallbacks,
         surface_ptr: *const OpaqueHandle,
     ) -> i32;

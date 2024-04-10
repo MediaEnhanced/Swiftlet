@@ -877,27 +877,26 @@ impl Swapchain {
 
     #[cfg(target_os = "macos")]
     pub fn new(physical_device: PhysicalDevice, surface_parameters: ()) -> Result<Self, Error> {
-        // let surface_create_info = api::SurfaceCreateInfoWin32 {
-        //     header: StructureHeader::new(StructureType::SurfaceCreateInfoWin32),
-        //     flags: 0,
-        //     hinstance: surface_parameters.0,
-        //     hwnd: surface_parameters.1,
-        // };
+        let surface_create_info = api::SurfaceCreateInfoMetal {
+            header: StructureHeader::new(StructureType::SurfaceCreateInfoMetal),
+            flags: 0,
+            layer: surface_parameters.0,
+        };
 
-        // let surface_handle = ptr::null();
-        // let result = unsafe {
-        //     api::vkCreateWin32SurfaceKHR(
-        //         physical_device.instance.handle,
-        //         &surface_create_info,
-        //         ptr::null(),
-        //         &surface_handle,
-        //     )
-        // };
-        // if result != 0 {
-        //     return Err(Error::VkResult(result));
-        // }
+        let surface_handle = ptr::null();
+        let result = unsafe {
+            api::vkCreateMetalSurfaceEXT(
+                physical_device.instance.handle,
+                &surface_create_info,
+                ptr::null(),
+                &surface_handle,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
 
-        // println!("Got Surface!");
+        println!("Got Surface!");
 
         // Swapchain::create(physical_device, surface_handle)
         Err(Error::SurfaceNoTransfer)
