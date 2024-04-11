@@ -42,13 +42,11 @@ windows = { version = "0.54", features = [
 ]}
 
 [target.'cfg(target_os = "macos")'.dependencies]
-icrate = { git = "https://github.com/madsmtm/objc2.git", features = [
-    "apple",
-    "AppKit_all",
-    "Foundation_all",
-    "Metal_all",
-]}
-objc2 = { git = "https://github.com/madsmtm/objc2.git" }
+objc2 = { path = "src/icrate/crates/objc2" }
+objc2-foundation = { path = "src/icrate/framework-crates/objc2-foundation" }
+objc2-app-kit = { path = "src/icrate/framework-crates/objc2-app-kit" }
+objc2-quartz-core = { path = "src/icrate/framework-crates/objc2-quartz-core" }
+
 rustix = { version = "0.38", features = [
     "event",
 ]}
