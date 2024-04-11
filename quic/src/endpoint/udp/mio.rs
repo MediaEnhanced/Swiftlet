@@ -24,8 +24,8 @@ use crate::endpoint::SocketAddr;
 
 // UDP Socket Manager (Using the mio crate)
 pub(super) struct UdpSocket {
-    is_ipv6: bool,
-    is_server: bool,
+    _is_ipv6: bool,
+    _is_server: bool,
     socket: mio::net::UdpSocket,
     poll: mio::Poll,
     events: mio::Events,
@@ -68,8 +68,8 @@ impl UdpSocket {
         }
 
         let socket_state = UdpSocket {
-            is_ipv6: ipv6_mode,
-            is_server: bind_port != 0,
+            _is_ipv6: ipv6_mode,
+            _is_server: bind_port != 0,
             socket,
             poll,
             events: mio::Events::with_capacity(1024),

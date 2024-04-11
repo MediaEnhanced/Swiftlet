@@ -43,8 +43,25 @@ windows = { version = "0.54", features = [
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { path = "src/icrate/crates/objc2" }
-objc2-foundation = { path = "src/icrate/framework-crates/objc2-foundation" }
-objc2-app-kit = { path = "src/icrate/framework-crates/objc2-app-kit" }
+objc2-foundation = { path = "src/icrate/framework-crates/objc2-foundation", features = [
+	"Foundation_NSString",
+	"Foundation_NSGeometry",
+	"Foundation_NSNotification",
+	"Foundation_NSObject",
+	"Foundation_NSDate",
+	"Foundation_NSThread",
+	"Foundation_NSRunLoop",
+	"Foundation_NSObjCRuntime",
+	] }
+objc2-app-kit = { path = "src/icrate/framework-crates/objc2-app-kit", features = [
+	"AppKit_NSApplication",
+	"AppKit_NSRunningApplication",
+	"AppKit_NSGraphics",
+	"AppKit_NSGraphicsContext",
+	"AppKit_NSEvent",
+	"AppKit_NSWindow",
+	"AppKit_NSResponder",
+	] }
 objc2-quartz-core = { path = "src/icrate/framework-crates/objc2-quartz-core" }
 
 rustix = { version = "0.38", features = [

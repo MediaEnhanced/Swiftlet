@@ -20,17 +20,13 @@
 //OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //SOFTWARE.
 
+use objc2::ffi::NSInteger;
 use rustix::event::kqueue;
 use rustix::{event::kqueue::kqueue, fd::AsRawFd};
 
 #[derive(Debug)]
 pub enum OsError {
-    // Dxgi(Error),
-    // Window(Error),
-    // WindowAlreadyDisplayed,
-    // UnknownMsgHandle,
-    // Event(Error),
-    // UnexpectedEventCheckResult,
+    NotMainThread,
     EventSetup,
     EventCheck,
     EventSignal,
@@ -41,26 +37,30 @@ pub(super) fn get_device_luid() -> Result<Option<[u32; 2]>, OsError> {
     Ok(None)
 }
 
-use icrate::AppKit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSEventMask,
+use objc2_app_kit::{
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
+    NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSWindow, NSWindowDelegate,
+    NSWindowStyleMask,
 };
-use icrate::Foundation::{
-    ns_string, MainThreadMarker, NSCopying, NSDefaultRunLoopMode, NSNotification, NSObject,
-    NSObjectProtocol, NSString,
+use objc2_foundation::{
+    ns_string, CGFloat, MainThreadMarker, NSDefaultRunLoopMode, NSNotification, NSObject,
+    NSObjectProtocol, NSPoint, NSRect, NSSize,
 };
 use objc2::rc::Id;
 use objc2::runtime::ProtocolObject;
 use objc2::{declare_class, msg_send_id, mutability, ClassType, DeclaredClass};
 
-#[derive(Debug)]
-#[allow(unused)]
-struct Ivars {
-    ivar: u8,
-    another_ivar: bool,
-    box_ivar: Box<i32>,
-    maybe_box_ivar: Option<Box<i32>>,
-    id_ivar: Id<NSString>,
-    maybe_id_ivar: Option<Id<NSString>>,
+struct AppVars {
+    width: CGFloat,
+    height: CGFloat,
+}
+
+impl AppDelegate {
+    fn new(mtm: MainThreadMarker, width: CGFloat, height: CGFloat) -> Id<Self> {
+        let this = mtm.alloc();
+        let this = this.set_ivars(AppVars { width, height });
+        unsafe { msg_send_id![super(this), init] }
+    }
 }
 
 declare_class!(
@@ -77,43 +77,77 @@ declare_class!(
     }
 
     impl DeclaredClass for AppDelegate {
-        type Ivars = Ivars;
+        type Ivars = AppVars;
     }
 
     unsafe impl NSObjectProtocol for AppDelegate {}
 
     unsafe impl NSApplicationDelegate for AppDelegate {
         #[method(applicationDidFinishLaunching:)]
-        fn did_finish_launching(&self, notification: &NSNotification) {
-            println!("Did finish launching!");
-            // Do something with the notification
-            dbg!(notification);
-        }
-
-        #[method(applicationWillTerminate:)]
-        fn will_terminate(&self, _notification: &NSNotification) {
-            println!("Will terminate!");
+        fn did_finish_launching(&self, _notification: &NSNotification) {
+            //println!("Finished Launching!");
         }
     }
 );
 
-impl AppDelegate {
-    fn new(ivar: u8, another_ivar: bool, mtm: MainThreadMarker) -> Id<Self> {
+struct WindowVars {
+    app: Id<NSApplication>,
+}
+
+impl WindowDelegate {
+    fn new(mtm: MainThreadMarker) -> Id<Self> {
         let this = mtm.alloc();
-        let this = this.set_ivars(Ivars {
-            ivar,
-            another_ivar,
-            box_ivar: Box::new(2),
-            maybe_box_ivar: None,
-            id_ivar: NSString::from_str("abc"),
-            maybe_id_ivar: Some(ns_string!("def").copy()),
+        let this = this.set_ivars(WindowVars {
+            app: NSApplication::sharedApplication(mtm),
         });
         unsafe { msg_send_id![super(this), init] }
     }
+
+    fn post_event(&self, data: NSInteger) {
+        if let Some(post_event) = unsafe {
+            NSEvent::otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2(NSEventType::ApplicationDefined, NSPoint::ZERO, NSEventModifierFlags(0), 
+            0.0, 0, None, 0, data, 0)
+        } {
+            self.ivars().app.postEvent_atStart(&post_event, false);
+        }
+    }
 }
 
+declare_class!(
+    struct WindowDelegate;
+
+    unsafe impl ClassType for WindowDelegate {
+        type Super = NSObject;
+        type Mutability = mutability::MainThreadOnly;
+        const NAME: &'static str = "MyWindowDelegate";
+    }
+
+    impl DeclaredClass for WindowDelegate {
+        type Ivars = WindowVars;
+    }
+
+    unsafe impl NSObjectProtocol for WindowDelegate {}
+
+    unsafe impl NSWindowDelegate for WindowDelegate {
+        #[method(windowWillClose:)]
+        fn window_will_close(&self, _notification: &NSNotification) {
+            println!("Window Closing!");
+            self.post_event(0);
+        }
+
+        #[method(windowShouldClose:)]
+        fn window_should_close(&self, _sender: &NSWindow) -> bool {
+            println!("Trying to close!");
+            self.post_event(1);
+            false
+        }
+    }
+);
+
 pub(super) struct OsWindow {
+    mtm: MainThreadMarker,
     app: Id<NSApplication>,
+    window: Id<NSWindow>,
 }
 
 pub(super) enum OsWindowState {
@@ -125,20 +159,56 @@ pub(super) enum OsWindowState {
 
 impl OsWindow {
     pub(super) fn new(width: u32, height: u32) -> Result<Self, OsError> {
-        let mtm: MainThreadMarker = MainThreadMarker::new().unwrap();
+        let mtm = match MainThreadMarker::new() {
+            Some(m) => m,
+            None => return Err(OsError::NotMainThread),
+        };
 
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
 
-        // configure the application delegate
-        let delegate = AppDelegate::new(42, true, mtm);
+        let delegate = AppDelegate::new(mtm, width as f64, height as f64);
         let object = ProtocolObject::from_ref(&*delegate);
         app.setDelegate(Some(object));
 
-        // run the app
-        //unsafe { app.run() };
+        unsafe { app.finishLaunching() };
 
-        Ok(OsWindow { app })
+        let window = {
+            let content_rect = NSRect::new(
+                NSPoint::new(0., 0.),
+                NSSize::new(width as f64, height as f64),
+            );
+            let style = NSWindowStyleMask(
+                NSWindowStyleMask::Closable.0
+                    | NSWindowStyleMask::Resizable.0
+                    | NSWindowStyleMask::Titled.0,
+            );
+            unsafe {
+                NSWindow::initWithContentRect_styleMask_backing_defer(
+                    mtm.alloc(),
+                    content_rect,
+                    style,
+                    NSBackingStoreType::NSBackingStoreBuffered,
+                    false,
+                )
+            }
+        };
+
+        let delegate = WindowDelegate::new(mtm);
+        let object = ProtocolObject::from_ref(&*delegate);
+        window.setDelegate(Some(object));
+
+        window.center();
+        window.setTitle(ns_string!("Window Title"));
+        window.makeKeyAndOrderFront(None);
+
+        // if let Some(cv) = window.contentView() {
+        //     println!("Content View: {:?}", cv);
+        //     cv.setWantsLayer(true);
+        //     //let l = cv.make
+        // }
+
+        Ok(OsWindow { mtm, app, window })
     }
 
     pub(super) fn get_surface_parameters(&self) { // -> (HINSTANCE, HWND) {
@@ -156,18 +226,15 @@ impl OsWindow {
                     true,
                 )
             } {
-                println!("Application Event: {:?}", next_event);
-                unsafe { self.app.sendEvent(&next_event) };
-                // if self.msg.message != WindowsAndMessaging::WM_USER {
-                //     if self.msg.message != WindowsAndMessaging::WM_QUIT {
-                //         let _res = unsafe { WindowsAndMessaging::DispatchMessageW(&self.msg) };
-                //     } else {
-                //         println!("Msg Info: {:?}", self.msg);
-                //         return Ok(OsWindowState::ShouldDrop);
-                //     }
-                // } else {
-                //     return Ok(OsWindowState::CloseAttempt);
-                // }
+                if unsafe { next_event.r#type() } != NSEventType::ApplicationDefined {
+                    unsafe { self.app.sendEvent(&next_event) };
+                    // unsafe { self.app.updateWindows() };
+                } else {
+                    match unsafe { next_event.data1() } {
+                        1 => return Ok(OsWindowState::CloseAttempt),
+                        _ => return Ok(OsWindowState::ShouldDrop),
+                    }
+                }
             } else {
                 return Ok(OsWindowState::Normal);
             }
@@ -175,11 +242,8 @@ impl OsWindow {
     }
 
     pub(super) fn close_window(&mut self) -> Result<(), OsError> {
-        // if let Err(e) = unsafe { WindowsAndMessaging::DestroyWindow(self.handle) } {
-        //     Err(OsError::Window(e))
-        // } else {
-        //     Ok(())
-        // }
+        //unsafe { self.app.terminate(None) };
+        self.window.close();
         Ok(())
     }
 }
@@ -194,13 +258,13 @@ impl OsEventSignaler {
         let signaler_event = [kqueue::Event::new(
             kqueue::EventFilter::User {
                 ident: self.event_id,
-                flags: kqueue::UserFlags::TRIGGER,
+                flags: kqueue::UserFlags::TRIGGER | kqueue::UserFlags::COPY,
                 user_flags: kqueue::UserDefinedFlags::new(0),
             },
             kqueue::EventFlags::empty(),
             0,
         )];
-        let mut eventlist = Vec::with_capacity(1);
+        let mut eventlist = Vec::with_capacity(0);
         match unsafe {
             kqueue::kevent(
                 self.kqueue_borrowed,
@@ -209,7 +273,7 @@ impl OsEventSignaler {
                 Some(std::time::Duration::from_millis(0)),
             )
         } {
-            Ok(_n) => Ok(println!("Signaled: {}", _n)),
+            Ok(_n) => Ok(()),
             Err(_e) => Err(OsError::EventSignal),
         }
     }
@@ -228,19 +292,40 @@ impl OsEvent {
             Err(_e) => return Err(OsError::EventSetup),
         };
 
-        let check_event = kqueue::Event::new(
+        let add_event = [kqueue::Event::new(
             kqueue::EventFilter::User {
                 ident: 42,
-                flags: kqueue::UserFlags::empty(),
+                flags: kqueue::UserFlags::COPY,
                 user_flags: kqueue::UserDefinedFlags::new(0),
             },
             kqueue::EventFlags::ADD | kqueue::EventFlags::CLEAR,
+            0,
+        )];
+        let mut eventlist = Vec::with_capacity(1);
+        if let Err(_e) = unsafe {
+            kqueue::kevent(
+                &kqueue_fd,
+                &add_event,
+                &mut eventlist,
+                Some(std::time::Duration::from_millis(0)),
+            )
+        } {
+            return Err(OsError::EventSetup);
+        }
+
+        let check_event = kqueue::Event::new(
+            kqueue::EventFilter::User {
+                ident: 42,
+                flags: kqueue::UserFlags::COPY,
+                user_flags: kqueue::UserDefinedFlags::new(0),
+            },
+            kqueue::EventFlags::CLEAR,
             0,
         );
         Ok(OsEvent {
             kqueue_fd,
             event: [check_event],
-            eventlist: Vec::with_capacity(1),
+            eventlist,
         })
     }
 
@@ -254,6 +339,7 @@ impl OsEvent {
     }
 
     pub(super) fn check(&mut self) -> Result<bool, OsError> {
+        //let start_instant = Instant::now();
         match unsafe {
             kqueue::kevent(
                 &self.kqueue_fd,
@@ -268,11 +354,3 @@ impl OsEvent {
         }
     }
 }
-
-// impl Drop for OsEvent {
-//     fn drop(&mut self) {
-//         unsafe {
-//             let _ = CloseHandle(self.handle);
-//         }
-//     }
-// }

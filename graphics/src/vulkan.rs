@@ -880,7 +880,7 @@ impl Swapchain {
         let surface_create_info = api::SurfaceCreateInfoMetal {
             header: StructureHeader::new(StructureType::SurfaceCreateInfoMetal),
             flags: 0,
-            layer: surface_parameters.0,
+            //layer: surface_parameters.0,
         };
 
         let surface_handle = ptr::null();

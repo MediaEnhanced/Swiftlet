@@ -463,7 +463,7 @@ pub(super) struct SurfaceCreateInfoWin32 {
 pub(super) struct SurfaceCreateInfoMetal {
     pub(super) header: StructureHeader,
     pub(super) flags: u32,
-    pub(super) layer: CAMetalLayer,
+    //pub(super) layer: CAMetalLayer,
 }
 
 #[repr(C)]
