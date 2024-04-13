@@ -901,8 +901,7 @@ impl Swapchain {
 
         println!("Got Surface!");
 
-        // Swapchain::create(physical_device, surface_handle)
-        Err(Error::SurfaceNoTransfer)
+        Swapchain::create(physical_device, surface_handle)
     }
 
     fn render_next_image(&mut self, fence: OpaqueHandle) -> Result<(), Error> {

@@ -216,7 +216,8 @@ impl OsWindow {
     }
 
     pub(super) fn get_surface_parameters(&self) -> super::vulkan::api::CAMetalLayerPtr {
-        std::ptr::addr_of!(self.layer) as super::vulkan::api::CAMetalLayerPtr
+        let layer_ptr = self.layer.as_ref() as *const CAMetalLayer;
+        layer_ptr as super::vulkan::api::CAMetalLayerPtr
     }
 
     pub(super) fn process_messages(&mut self) -> Result<OsWindowState, OsError> {
