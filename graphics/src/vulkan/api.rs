@@ -459,11 +459,14 @@ pub(super) struct SurfaceCreateInfoWin32 {
 }
 
 #[cfg(target_os = "macos")]
+pub type CAMetalLayerPtr = *const c_void;
+
+#[cfg(target_os = "macos")]
 #[repr(C)]
 pub(super) struct SurfaceCreateInfoMetal {
     pub(super) header: StructureHeader,
     pub(super) flags: u32,
-    //pub(super) layer: CAMetalLayer,
+    pub(super) layer: CAMetalLayerPtr,
 }
 
 #[repr(C)]

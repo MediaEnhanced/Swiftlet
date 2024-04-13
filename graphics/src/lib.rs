@@ -107,7 +107,8 @@ pub struct VulkanWindow {
 
 impl VulkanWindow {
     pub fn new(width: u32, height: u32) -> Result<(Self, os::OsEventSignaler), Error> {
-        let layer_names = [vulkan::LAYER_NAME_VALIDATION];
+        let layer_names = [];
+        //let layer_names = [vulkan::LAYER_NAME_VALIDATION];
 
         let extension_names = [
             vulkan::INSTANCE_EXTENSION_NAME_SURFACE,
@@ -138,11 +139,6 @@ impl VulkanWindow {
             },
             Err(e) => return Err(Error::OsError(e)),
         };
-
-        // let device = match vulkan::Device::new(physical_device) {
-        //     Ok(d) => d,
-        //     Err(e) => return Err(Error::VulkanError(e)),
-        // };
 
         let window = match os::OsWindow::new(width, height) {
             Ok(w) => w,
@@ -178,13 +174,8 @@ impl VulkanWindow {
         ))
     }
 
-    // fn start(&mut self) {
-    //     // Maybe Something here in future
-    // }
-
     pub fn run(&mut self, mut callback: impl VulkanWindowCallbacks) -> Result<(), Error> {
-        // self.start();
-
+        // Maybe one-time setup/start code here in future
         loop {
             match self.window.process_messages() {
                 Ok(os::OsWindowState::Normal) => {}

@@ -21,7 +21,7 @@
 //SOFTWARE.
 
 #[macro_use]
-mod api;
+pub mod api;
 use api::{
     c_void, ptr, ApplicationInfo, CString, Format, FormatFeatureFlagBit, FormatFeatureFlags,
     InstanceCreateInfo, OpaqueHandle, PhysicalDeviceIdProperties, PhysicalDeviceProperties2,
@@ -876,11 +876,14 @@ impl Swapchain {
     }
 
     #[cfg(target_os = "macos")]
-    pub fn new(physical_device: PhysicalDevice, surface_parameters: ()) -> Result<Self, Error> {
+    pub fn new(
+        physical_device: PhysicalDevice,
+        surface_parameters: api::CAMetalLayerPtr,
+    ) -> Result<Self, Error> {
         let surface_create_info = api::SurfaceCreateInfoMetal {
             header: StructureHeader::new(StructureType::SurfaceCreateInfoMetal),
             flags: 0,
-            //layer: surface_parameters.0,
+            layer: surface_parameters,
         };
 
         let surface_handle = ptr::null();

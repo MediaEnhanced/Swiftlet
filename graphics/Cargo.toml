@@ -51,7 +51,6 @@ objc2-foundation = { path = "src/icrate/framework-crates/objc2-foundation", feat
 	"Foundation_NSDate",
 	"Foundation_NSThread",
 	"Foundation_NSRunLoop",
-	"Foundation_NSObjCRuntime",
 	] }
 objc2-app-kit = { path = "src/icrate/framework-crates/objc2-app-kit", features = [
 	"AppKit_NSApplication",
@@ -60,9 +59,10 @@ objc2-app-kit = { path = "src/icrate/framework-crates/objc2-app-kit", features =
 	"AppKit_NSGraphicsContext",
 	"AppKit_NSEvent",
 	"AppKit_NSWindow",
+	"AppKit_NSView",
 	"AppKit_NSResponder",
 	] }
-objc2-quartz-core = { path = "src/icrate/framework-crates/objc2-quartz-core" }
+#objc2-quartz-core = { path = "src/icrate/framework-crates/objc2-quartz-core", features = ["QuartzCore_CALayer", "QuartzCore_CAMediaTiming"] }
 
 rustix = { version = "0.38", features = [
     "event",
