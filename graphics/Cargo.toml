@@ -30,6 +30,9 @@ build = "build.rs"
 [build-dependencies]
 cc = { version = "1" }
 
+[dependencies]
+ttf-parser = { version = "0.20" }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.54", features = [
 	"Win32_Foundation",
@@ -63,7 +66,6 @@ objc2-app-kit = { path = "src/icrate/framework-crates/objc2-app-kit", features =
 	"AppKit_NSResponder",
 	] }
 #objc2-quartz-core = { path = "src/icrate/framework-crates/objc2-quartz-core", features = ["QuartzCore_CALayer", "QuartzCore_CAMediaTiming"] }
-
 rustix = { version = "0.38", features = [
     "event",
 ]}
@@ -73,7 +75,7 @@ rustix = { version = "0.38", features = [
 
 [lib]
 # Unnecessary Name since it matches the package name
-#name = "swiftlet_audio"
+#name = "swiftlet_graphics"
 path = "src/lib.rs"
 # Rust Static Library:
 crate-type = ["rlib"]
@@ -99,6 +101,15 @@ bench = false
 [[example]]
 name = "color"
 path = "examples/color.rs"
+crate-type = ["bin"]
+doc = false
+test = false
+harness = false
+bench = false
+
+[[example]]
+name = "font"
+path = "examples/font.rs"
 crate-type = ["bin"]
 doc = false
 test = false

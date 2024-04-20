@@ -12,6 +12,7 @@ bin/*
 !bin/*.sh
 !bin/audio/
 !bin/security/
+!bin/font/
 
 # Cargo Install Files
 .crates.toml

@@ -30,6 +30,7 @@ use windows::Win32::System::{LibraryLoader, Threading};
 use windows::Win32::UI::WindowsAndMessaging;
 
 mod dxgi;
+mod manifest;
 
 #[derive(Debug)]
 pub enum OsError {

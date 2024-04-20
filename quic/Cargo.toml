@@ -23,9 +23,7 @@ autoexamples = false
 autotests = false
 autobenches = false
 
-
 [dependencies]
-#mio = { version = "0.8", features = ["os-poll", "net"]}
 quiche = { version = "0.20" } # features = ["boringssl-boring-crate"]
 ring = { version = "0.17" }
 
@@ -39,9 +37,11 @@ windows = { version = "0.54", features = [
 ]}
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# rustix instead of mio in future
 mio = { version = "0.8", features = ["os-poll", "net"]}
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# rustix instead of mio in future
 mio = { version = "0.8", features = ["os-poll", "net"]}
 
 [lib]

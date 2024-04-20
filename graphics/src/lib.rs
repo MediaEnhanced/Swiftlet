@@ -31,6 +31,8 @@ mod os;
 pub use os::OsEventSignaler;
 //use os::{AudioInput, AudioOutput, AudioOwner};
 
+pub mod font;
+
 // #[cfg(feature = "opus")]
 // pub mod opus;
 
