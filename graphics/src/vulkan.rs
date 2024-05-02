@@ -22,6 +22,8 @@
 
 #[macro_use]
 pub mod api;
+use std::mem;
+
 use api::{
     c_void, ptr, ApplicationInfo, CString, Format, FormatFeatureFlagBit, FormatFeatureFlags,
     InstanceCreateInfo, OpaqueHandle, PhysicalDeviceIdProperties, PhysicalDeviceProperties2,
@@ -29,6 +31,8 @@ use api::{
 };
 
 use self::api::vkUnmapMemory;
+
+mod spirv;
 
 // #[derive(Debug)]
 // #[repr(i32)]
@@ -645,7 +649,8 @@ impl Swapchain {
                 height: surface_capabilities.current_extent.height,
             },
             image_array_layers: 1,
-            image_usage: api::ImageUsageFlagBit::TransferDst as api::ImageUsageFlags,
+            image_usage: (api::ImageUsageFlagBit::TransferDst as api::ImageUsageFlags)
+                | (api::ImageUsageFlagBit::ColorAttachment as api::ImageUsageFlags),
             image_sharing_mode: api::SharingMode::Exclusive,
             queue_family_index_count: 0,
             p_queue_family_indices: ptr::null(),
@@ -703,7 +708,8 @@ impl Swapchain {
 
         let command_pool_create_info = api::CommandPoolCreateInfo {
             header: StructureHeader::new(StructureType::CommandPoolCreateInfo),
-            flags: 0,
+            flags: api::CommandPoolCreateFlagBit::ResetCommandBufferBit
+                as api::CommandPoolCreateFlags,
             queue_family_index,
         };
         let command_pool = ptr::null();
@@ -904,6 +910,25 @@ impl Swapchain {
         Swapchain::create(physical_device, surface_handle)
     }
 
+    fn get_current_size(&self) -> Result<(u32, u32), Error> {
+        let surface_capabilities = api::SurfaceCapabilities::default();
+        let result = unsafe {
+            api::vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+                self.device.physical_device.handle,
+                self.swapchain_create_info.surface,
+                &surface_capabilities,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        Ok((
+            surface_capabilities.current_extent.width,
+            surface_capabilities.current_extent.height,
+        ))
+    }
+
     fn render_next_image(&mut self, fence: OpaqueHandle) -> Result<(), Error> {
         let timeout = 1000000000;
         let next_image_index = 0;
@@ -937,6 +962,52 @@ impl Swapchain {
         //     return Err(Error::VkResult(result));
         // }
         // self.present_info.wait_semaphore_count = 0;
+
+        self.present_info.wait_semaphores = &self.signal_semaphore_submit_info.semaphore;
+        self.present_info.swapchains = &self.handle;
+        self.present_info.image_indicies = &next_image_index;
+        let result = unsafe { api::vkQueuePresentKHR(self.queue, &self.present_info) };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        Ok(())
+    }
+
+    fn get_next_image_index(&self) -> Result<u32, Error> {
+        let timeout = 1000000000;
+        let next_image_index = 0;
+
+        let result = unsafe {
+            api::vkAcquireNextImageKHR(
+                self.device.handle,
+                self.handle,
+                timeout,
+                self.wait_semaphore_submit_info.semaphore,
+                ptr::null(),
+                &next_image_index,
+            )
+        };
+        if result == 0 {
+            Ok(next_image_index)
+        } else {
+            Err(Error::VkResult(result))
+        }
+    }
+
+    fn submit_queue_and_present(
+        &mut self,
+        next_image_index: u32,
+        fence: OpaqueHandle,
+    ) -> Result<(), Error> {
+        self.submit_info.wait_semaphore_infos = &self.wait_semaphore_submit_info;
+        self.submit_info.command_buffer_infos =
+            &(self.cmd_buffer_submit_infos[next_image_index as usize]);
+        self.submit_info.signal_semaphore_infos = &self.signal_semaphore_submit_info;
+        let result = unsafe { api::vkQueueSubmit2(self.queue, 1, &self.submit_info, fence) };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
 
         self.present_info.wait_semaphores = &self.signal_semaphore_submit_info.semaphore;
         self.present_info.swapchains = &self.handle;
@@ -1550,6 +1621,1113 @@ impl SwapchainCpuRender {
         }
 
         unsafe { vkUnmapMemory(self.swapchain.device.handle, self.img_buffer_mem) };
+        Ok(())
+    }
+}
+
+const MAIN_DATA: [i8; 5] = [109, 97, 105, 110, 0];
+
+fn create_shader_stage_from_bytes(
+    device: OpaqueHandle,
+    data: &[u8],
+    stage_bit: api::ShaderStageFlagBit,
+) -> Result<api::PipelineShaderStageCreateInfo, Error> {
+    //let code_size = data.len() & !0x3;
+    let num_words = data.len() >> 2;
+    let code_size = num_words * 4;
+    let mut code_data = Vec::with_capacity(num_words);
+    for ind in (0..code_size).step_by(4) {
+        code_data.push(u32::from_ne_bytes([
+            data[ind],
+            data[ind + 1],
+            data[ind + 2],
+            data[ind + 3],
+        ]))
+    }
+
+    let shader_module_create_info = api::ShaderModuleCreateInfo {
+        header: StructureHeader::new(StructureType::ShaderModuleCreateInfo),
+        flags: 0,
+        code_size,
+        code: code_data.as_ptr(),
+    };
+
+    let shader_module = ptr::null();
+    let result = unsafe {
+        api::vkCreateShaderModule(
+            device,
+            &shader_module_create_info,
+            ptr::null(),
+            &shader_module,
+        )
+    };
+    if result != 0 {
+        return Err(Error::VkResult(result));
+    }
+
+    Ok(api::PipelineShaderStageCreateInfo {
+        header: StructureHeader::new(StructureType::PipelineShaderStageCreateInfo),
+        flags: 0,
+        stage: stage_bit as api::ShaderStageFlags,
+        module: shader_module,
+        name: MAIN_DATA.as_ptr(),
+        specialization_info: ptr::null(),
+    })
+}
+
+const BASIC_VERTEX_SHADER_DATA: [u8; 824] = [
+    0x03, 0x02, 0x23, 0x07, 0x00, 0x06, 0x01, 0x00, 0x0b, 0x00, 0x08, 0x00, 0x1b, 0x00, 0x00,
+    0x00, // ..#.............
+    0x00, 0x00, 0x00, 0x00, 0x11, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x06,
+    0x00, // ................
+    0x01, 0x00, 0x00, 0x00, 0x47, 0x4c, 0x53, 0x4c, 0x2e, 0x73, 0x74, 0x64, 0x2e, 0x34, 0x35,
+    0x30, // ....GLSL.std.450
+    0x00, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, // ................
+    0x0f, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x6d, 0x61, 0x69,
+    0x6e, // ............main
+    0x00, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x03, 0x00, 0x03,
+    0x00, // ................
+    0x02, 0x00, 0x00, 0x00, 0xc2, 0x01, 0x00, 0x00, 0x05, 0x00, 0x04, 0x00, 0x04, 0x00, 0x00,
+    0x00, // ................
+    0x6d, 0x61, 0x69, 0x6e, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x06, 0x00, 0x0b, 0x00, 0x00,
+    0x00, // main............
+    0x67, 0x6c, 0x5f, 0x50, 0x65, 0x72, 0x56, 0x65, 0x72, 0x74, 0x65, 0x78, 0x00, 0x00, 0x00,
+    0x00, // gl_PerVertex....
+    0x06, 0x00, 0x06, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x67, 0x6c, 0x5f,
+    0x50, // ............gl_P
+    0x6f, 0x73, 0x69, 0x74, 0x69, 0x6f, 0x6e, 0x00, 0x06, 0x00, 0x07, 0x00, 0x0b, 0x00, 0x00,
+    0x00, // osition.........
+    0x01, 0x00, 0x00, 0x00, 0x67, 0x6c, 0x5f, 0x50, 0x6f, 0x69, 0x6e, 0x74, 0x53, 0x69, 0x7a,
+    0x65, // ....gl_PointSize
+    0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x07, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+    0x00, // ................
+    0x67, 0x6c, 0x5f, 0x43, 0x6c, 0x69, 0x70, 0x44, 0x69, 0x73, 0x74, 0x61, 0x6e, 0x63, 0x65,
+    0x00, // gl_ClipDistance.
+    0x06, 0x00, 0x07, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x67, 0x6c, 0x5f,
+    0x43, // ............gl_C
+    0x75, 0x6c, 0x6c, 0x44, 0x69, 0x73, 0x74, 0x61, 0x6e, 0x63, 0x65, 0x00, 0x05, 0x00, 0x03,
+    0x00, // ullDistance.....
+    0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x05, 0x00, 0x12, 0x00, 0x00,
+    0x00, // ................
+    0x69, 0x6e, 0x50, 0x6f, 0x73, 0x69, 0x74, 0x69, 0x6f, 0x6e, 0x00, 0x00, 0x48, 0x00, 0x05,
+    0x00, // inPosition..H...
+    0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, // ................
+    0x48, 0x00, 0x05, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00,
+    0x00, // H...............
+    0x01, 0x00, 0x00, 0x00, 0x48, 0x00, 0x05, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+    0x00, // ....H...........
+    0x0b, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x48, 0x00, 0x05, 0x00, 0x0b, 0x00, 0x00,
+    0x00, // ........H.......
+    0x03, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x47, 0x00, 0x03,
+    0x00, // ............G...
+    0x0b, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x47, 0x00, 0x04, 0x00, 0x12, 0x00, 0x00,
+    0x00, // ........G.......
+    0x1e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x13, 0x00, 0x02, 0x00, 0x02, 0x00, 0x00,
+    0x00, // ................
+    0x21, 0x00, 0x03, 0x00, 0x03, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x16, 0x00, 0x03,
+    0x00, // !...............
+    0x06, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x17, 0x00, 0x04, 0x00, 0x07, 0x00, 0x00,
+    0x00, // .... ...........
+    0x06, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x15, 0x00, 0x04, 0x00, 0x08, 0x00, 0x00,
+    0x00, // ................
+    0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2b, 0x00, 0x04, 0x00, 0x08, 0x00, 0x00,
+    0x00, //  .......+.......
+    0x09, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1c, 0x00, 0x04, 0x00, 0x0a, 0x00, 0x00,
+    0x00, // ................
+    0x06, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x1e, 0x00, 0x06, 0x00, 0x0b, 0x00, 0x00,
+    0x00, // ................
+    0x07, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00,
+    0x00, // ................
+    0x20, 0x00, 0x04, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00,
+    0x00, //  ...............
+    0x3b, 0x00, 0x04, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00,
+    0x00, // ;...............
+    0x15, 0x00, 0x04, 0x00, 0x0e, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, // ........ .......
+    0x2b, 0x00, 0x04, 0x00, 0x0e, 0x00, 0x00, 0x00, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, // +...............
+    0x17, 0x00, 0x04, 0x00, 0x10, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
+    0x00, // ................
+    0x20, 0x00, 0x04, 0x00, 0x11, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00,
+    0x00, //  ...............
+    0x3b, 0x00, 0x04, 0x00, 0x11, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, // ;...............
+    0x2b, 0x00, 0x04, 0x00, 0x06, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, // +...............
+    0x2b, 0x00, 0x04, 0x00, 0x06, 0x00, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
+    0x3f, // +..............?
+    0x20, 0x00, 0x04, 0x00, 0x19, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00,
+    0x00, //  ...............
+    0x36, 0x00, 0x05, 0x00, 0x02, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, // 6...............
+    0x03, 0x00, 0x00, 0x00, 0xf8, 0x00, 0x02, 0x00, 0x05, 0x00, 0x00, 0x00, 0x3d, 0x00, 0x04,
+    0x00, // ............=...
+    0x10, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x51, 0x00, 0x05,
+    0x00, // ............Q...
+    0x06, 0x00, 0x00, 0x00, 0x16, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, // ................
+    0x51, 0x00, 0x05, 0x00, 0x06, 0x00, 0x00, 0x00, 0x17, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00,
+    0x00, // Q...............
+    0x01, 0x00, 0x00, 0x00, 0x50, 0x00, 0x07, 0x00, 0x07, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00,
+    0x00, // ....P...........
+    0x16, 0x00, 0x00, 0x00, 0x17, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x15, 0x00, 0x00,
+    0x00, // ................
+    0x41, 0x00, 0x05, 0x00, 0x19, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00,
+    0x00, // A...............
+    0x0f, 0x00, 0x00, 0x00, 0x3e, 0x00, 0x03, 0x00, 0x1a, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00,
+    0x00, // ....>...........
+    0xfd, 0x00, 0x01, 0x00, 0x38, 0x00, 0x01, 0x00, // ....8...
+];
+
+const BASIC_FRAGMENT_SHADER_DATA: [u8; 336] = [
+    0x03, 0x02, 0x23, 0x07, 0x00, 0x06, 0x01, 0x00, 0x0b, 0x00, 0x08, 0x00, 0x0c, 0x00, 0x00,
+    0x00, // ..#.............
+    0x00, 0x00, 0x00, 0x00, 0x11, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x06,
+    0x00, // ................
+    0x01, 0x00, 0x00, 0x00, 0x47, 0x4c, 0x53, 0x4c, 0x2e, 0x73, 0x74, 0x64, 0x2e, 0x34, 0x35,
+    0x30, // ....GLSL.std.450
+    0x00, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+    0x00, // ................
+    0x0f, 0x00, 0x06, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x6d, 0x61, 0x69,
+    0x6e, // ............main
+    0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x10, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00,
+    0x00, // ................
+    0x07, 0x00, 0x00, 0x00, 0x03, 0x00, 0x03, 0x00, 0x02, 0x00, 0x00, 0x00, 0xc2, 0x01, 0x00,
+    0x00, // ................
+    0x05, 0x00, 0x04, 0x00, 0x04, 0x00, 0x00, 0x00, 0x6d, 0x61, 0x69, 0x6e, 0x00, 0x00, 0x00,
+    0x00, // ........main....
+    0x05, 0x00, 0x05, 0x00, 0x09, 0x00, 0x00, 0x00, 0x6f, 0x75, 0x74, 0x43, 0x6f, 0x6c, 0x6f,
+    0x72, // ........outColor
+    0x00, 0x00, 0x00, 0x00, 0x47, 0x00, 0x04, 0x00, 0x09, 0x00, 0x00, 0x00, 0x1e, 0x00, 0x00,
+    0x00, // ....G...........
+    0x00, 0x00, 0x00, 0x00, 0x13, 0x00, 0x02, 0x00, 0x02, 0x00, 0x00, 0x00, 0x21, 0x00, 0x03,
+    0x00, // ............!...
+    0x03, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x16, 0x00, 0x03, 0x00, 0x06, 0x00, 0x00,
+    0x00, // ................
+    0x20, 0x00, 0x00, 0x00, 0x17, 0x00, 0x04, 0x00, 0x07, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00,
+    0x00, //  ...............
+    0x04, 0x00, 0x00, 0x00, 0x20, 0x00, 0x04, 0x00, 0x08, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00,
+    0x00, // .... ...........
+    0x07, 0x00, 0x00, 0x00, 0x3b, 0x00, 0x04, 0x00, 0x08, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00,
+    0x00, // ....;...........
+    0x03, 0x00, 0x00, 0x00, 0x2b, 0x00, 0x04, 0x00, 0x06, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00,
+    0x00, // ....+...........
+    0x00, 0x00, 0x80, 0x3f, 0x2c, 0x00, 0x07, 0x00, 0x07, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00,
+    0x00, // ...?,...........
+    0x0a, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00,
+    0x00, // ................
+    0x36, 0x00, 0x05, 0x00, 0x02, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, // 6...............
+    0x03, 0x00, 0x00, 0x00, 0xf8, 0x00, 0x02, 0x00, 0x05, 0x00, 0x00, 0x00, 0x3e, 0x00, 0x03,
+    0x00, // ............>...
+    0x09, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00, 0xfd, 0x00, 0x01, 0x00, 0x38, 0x00, 0x01,
+    0x00, // ............8...
+];
+
+#[repr(C)]
+pub struct TriangleVertex {
+    pub x: f32,
+    pub y: f32,
+}
+
+#[repr(C)]
+pub struct TriangleIndicies {
+    //Maybe add color in future
+    pub p0: u16,
+    pub p1: u16,
+    pub p2: u16,
+}
+
+pub struct SwapchainTriangleRender {
+    fence: OpaqueHandle,
+    graphics_pipeline: OpaqueHandle,
+    pipeline_layout: OpaqueHandle,
+    descriptor_set_layout: OpaqueHandle,
+    shader_stages: [api::PipelineShaderStageCreateInfo; 2],
+    gpu_triangle_buffer_mem: OpaqueHandle,
+    gpu_index_buffer: OpaqueHandle,
+    gpu_vertex_buffer: OpaqueHandle,
+    cpu_triangle_buffer_mem: OpaqueHandle,
+    cpu_triangle_buffer_mem_size: u64,
+    cpu_index_buffer: OpaqueHandle,
+    cpu_vertex_buffer: OpaqueHandle,
+    max_triangles: u32,
+    framebuffers: [OpaqueHandle; SWAPCHAIN_IMAGE_COUNT as usize],
+    swapchain_image_views: [OpaqueHandle; SWAPCHAIN_IMAGE_COUNT as usize],
+    render_pass: OpaqueHandle,
+    swapchain: Swapchain,
+}
+
+impl SwapchainTriangleRender {
+    fn write_initial_command_buffers(&mut self, width: u32, height: u32) -> Result<(), Error> {
+        let cmd_buffer_begin_info = api::CommandBufferBeginInfo {
+            header: StructureHeader::new(StructureType::CommandBufferBeginInfo),
+            flags: api::CommandBufferUsageFlagBit::None as api::CommandBufferUsageFlags,
+            inheritance_info: ptr::null(),
+        };
+
+        let clear_value = api::ClearValue {
+            color: api::ClearColorValue {
+                float32: [0.0, 0.0, 0.0, 0.0],
+            },
+        };
+
+        let mut render_pass_begin_info = api::RenderPassBeginInfo {
+            header: StructureHeader::new(StructureType::RenderPassBeginInfo),
+            render_pass: self.render_pass,
+            framebuffer: ptr::null(),
+            render_area: api::Rect2D {
+                offset: api::Offset2d::default(),
+                extent: api::Extent2d { width, height },
+            },
+            clear_value_count: 1,
+            clear_values: &clear_value,
+        };
+
+        let vertex_buffers = [self.gpu_vertex_buffer];
+        let vertex_offsets = [0];
+
+        for (ind, cmd_buffer) in self.swapchain.cmd_buffer_submit_infos.iter().enumerate() {
+            let result = unsafe {
+                api::vkBeginCommandBuffer(cmd_buffer.command_buffer, &cmd_buffer_begin_info)
+            };
+            if result != 0 {
+                return Err(Error::VkResult(result));
+            }
+
+            render_pass_begin_info.framebuffer = self.framebuffers[ind];
+            unsafe {
+                api::vkCmdBeginRenderPass(
+                    cmd_buffer.command_buffer,
+                    &render_pass_begin_info,
+                    api::SubpassContents::Inline,
+                )
+            };
+
+            unsafe {
+                api::vkCmdBindPipeline(
+                    cmd_buffer.command_buffer,
+                    api::PipelineBindPoint::Graphics,
+                    self.graphics_pipeline,
+                )
+            };
+            unsafe {
+                api::vkCmdBindVertexBuffers(
+                    cmd_buffer.command_buffer,
+                    0,
+                    1,
+                    vertex_buffers.as_ptr(),
+                    vertex_offsets.as_ptr(),
+                )
+            };
+            unsafe {
+                api::vkCmdBindIndexBuffer(
+                    cmd_buffer.command_buffer,
+                    self.gpu_index_buffer,
+                    0,
+                    api::IndexType::Uint16,
+                )
+            };
+            unsafe { api::vkCmdDrawIndexed(cmd_buffer.command_buffer, 0, 0, 0, 0, 0) };
+
+            unsafe { api::vkCmdEndRenderPass(cmd_buffer.command_buffer) };
+
+            let result = unsafe { api::vkEndCommandBuffer(cmd_buffer.command_buffer) };
+            if result != 0 {
+                return Err(Error::VkResult(result));
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn new(swapchain: Swapchain, max_triangles: u32) -> Result<Self, Error> {
+        let (swapchain_width, swapchain_height) = swapchain.get_current_size()?;
+        let swapchain_format = swapchain.swapchain_create_info.image_format;
+
+        // Create Renderpass:
+        let color_attachment_description = api::AttachmentDescription2 {
+            header: StructureHeader::new(StructureType::AttachmentDescription2),
+            flags: 0,
+            format: swapchain_format,
+            samples: 1,
+            load_op: api::AttachmentLoadOp::Clear,
+            store_op: api::AttachmentStoreOp::Store,
+            stencil_load_op: api::AttachmentLoadOp::DontCare,
+            stencil_store_op: api::AttachmentStoreOp::DontCare,
+            initial_layout: api::ImageLayout::Undefined,
+            final_layout: api::ImageLayout::PresentSrc,
+        };
+
+        let color_attachment_reference = api::AttachmentReference2 {
+            header: StructureHeader::new(StructureType::AttachmentReference2),
+            attachment: 0,
+            layout: api::ImageLayout::ColorAttachmentOptimal,
+            aspect_mask: 0,
+        };
+
+        let subpass = api::SubpassDescription2 {
+            header: StructureHeader::new(StructureType::SubpassDescription2),
+            flags: 0,
+            pipeline_bind_point: api::PipelineBindPoint::Graphics,
+            view_mask: 0,
+            input_attachment_count: 0,
+            input_attachments: ptr::null(),
+            color_attachment_count: 1,
+            color_attachments: &color_attachment_reference,
+            resolve_attachments: ptr::null(),
+            depth_stencil_attachment: ptr::null(),
+            preserve_attachment_count: 0,
+            preserve_attachments: ptr::null(),
+        };
+
+        let dependency = api::SubpassDependency2 {
+            header: StructureHeader::new(StructureType::SubpassDependency2),
+            src_subpass: api::SUBPASS_EXTERNAL,
+            dst_subpass: 0,
+            src_stage_mask: api::PipelineStageFlagBit::ColorAttachmentOutput
+                as api::PipelineStageFlags, // | api::PipelineStageFlagBit::EarlyFragmentTests,
+            dst_stage_mask: api::PipelineStageFlagBit::ColorAttachmentOutput
+                as api::PipelineStageFlags, // | api::PipelineStageFlagBit::EarlyFragmentTests,
+            src_access_mask: 0,
+            dst_access_mask: api::AccessFlagBit::ColorAttachmentWrite as api::AccessFlags,
+            dependency_flags: 0, // Not sure
+            view_offset: 0,      // Not sure
+        };
+
+        let render_pass_create_info = api::RenderPassCreateInfo2 {
+            header: StructureHeader::new(StructureType::RenderPassCreateInfo2),
+            flags: 0,
+            attachment_count: 1,
+            attachments: &color_attachment_description,
+            subpass_count: 1,
+            subpasses: &subpass,
+            dependency_count: 1,
+            dependencies: &dependency,
+            correlated_view_mask_count: 0,
+            correlated_view_masks: ptr::null(),
+        };
+
+        let render_pass = ptr::null();
+        let result = unsafe {
+            api::vkCreateRenderPass2(
+                swapchain.device.handle,
+                &render_pass_create_info,
+                ptr::null(),
+                &render_pass,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        // Create Swapchain ImageViews and Corresponding Framebuffers
+        let swapchain_image_views = [ptr::null(); SWAPCHAIN_IMAGE_COUNT as usize];
+        let mut image_view_create_info = api::ImageViewCreateInfo {
+            header: StructureHeader::new(StructureType::ImageViewCreateInfo),
+            flags: 0,
+            image: ptr::null(),
+            view_type: api::ImageViewType::TwoDimensions,
+            format: swapchain_format,
+            components: api::ComponentMapping {
+                r: api::ComponentSwizzle::Identity,
+                g: api::ComponentSwizzle::Identity,
+                b: api::ComponentSwizzle::Identity,
+                a: api::ComponentSwizzle::Identity,
+            },
+            subresource_range: api::ImageSubresourceRange {
+                aspect_mask: api::ImageAspectFlagBit::Color as api::ImageAspectFlags,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            },
+        };
+        for (ind, iv) in swapchain_image_views.iter().enumerate() {
+            image_view_create_info.image = swapchain.image_handles[ind];
+            let result = unsafe {
+                api::vkCreateImageView(
+                    swapchain.device.handle,
+                    &image_view_create_info,
+                    ptr::null(),
+                    iv,
+                )
+            };
+            if result != 0 {
+                return Err(Error::VkResult(result));
+            }
+        }
+
+        let framebuffers: [*const _; 3] = [ptr::null(); SWAPCHAIN_IMAGE_COUNT as usize];
+        let mut framebuffer_create_info = api::FramebufferCreateInfo {
+            header: StructureHeader::new(StructureType::FramebufferCreateInfo),
+            flags: 0,
+            render_pass,
+            attachment_count: 1,
+            attachments: ptr::null(),
+            width: swapchain_width,
+            height: swapchain_height,
+            layers: 1,
+        };
+        for (ind, fb) in framebuffers.iter().enumerate() {
+            framebuffer_create_info.attachments = &swapchain_image_views[ind];
+            let result = unsafe {
+                api::vkCreateFramebuffer(
+                    swapchain.device.handle,
+                    &framebuffer_create_info,
+                    ptr::null(),
+                    fb,
+                )
+            };
+            if result != 0 {
+                return Err(Error::VkResult(result));
+            }
+        }
+
+        // Vertex Buffer and Index Buffer Create
+        let vertex_buffer_size = (mem::size_of::<TriangleVertex>() * (1 << 16)) as u64;
+        let mut vertex_buffer_create_info = api::BufferCreateInfo {
+            header: StructureHeader::new(StructureType::BufferCreateInfo),
+            flags: api::BufferCreateFlagBit::None as api::BufferCreateFlags,
+            size: vertex_buffer_size,
+            usage: api::BufferUsageFlagBit::TransferSrc as api::BufferUsageFlags,
+            sharing_mode: api::SharingMode::Exclusive,
+            queue_family_index_count: 0, // Exclusive to zero here
+            p_queue_family_indices: ptr::null(),
+        };
+
+        let cpu_vertex_buffer = ptr::null();
+        let result: i32 = unsafe {
+            api::vkCreateBuffer(
+                swapchain.device.handle,
+                &vertex_buffer_create_info,
+                ptr::null(),
+                &cpu_vertex_buffer,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        let index_buffer_size = (mem::size_of::<TriangleIndicies>() as u64) * max_triangles as u64;
+        let mut index_buffer_create_info = api::BufferCreateInfo {
+            header: StructureHeader::new(StructureType::BufferCreateInfo),
+            flags: api::BufferCreateFlagBit::None as api::BufferCreateFlags,
+            size: index_buffer_size,
+            usage: api::BufferUsageFlagBit::TransferSrc as api::BufferUsageFlags,
+            sharing_mode: api::SharingMode::Exclusive,
+            queue_family_index_count: 0, // Exclusive to zero here
+            p_queue_family_indices: ptr::null(),
+        };
+
+        let cpu_index_buffer = ptr::null();
+        let result: i32 = unsafe {
+            api::vkCreateBuffer(
+                swapchain.device.handle,
+                &index_buffer_create_info,
+                ptr::null(),
+                &cpu_index_buffer,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        let mem_reqs = api::MemoryRequirements2::default();
+        let buf_mem_reqs_info = api::BufferMemoryRequirementsInfo2 {
+            header: StructureHeader::new(StructureType::BufferMemoryRequirementsInfo2),
+            buffer: cpu_vertex_buffer,
+        };
+        unsafe {
+            api::vkGetBufferMemoryRequirements2(
+                swapchain.device.handle,
+                &buf_mem_reqs_info,
+                &mem_reqs,
+            )
+        };
+        let vertex_buffer_mem_reqs_size = mem_reqs.size;
+
+        let buf_mem_reqs_info = api::BufferMemoryRequirementsInfo2 {
+            header: StructureHeader::new(StructureType::BufferMemoryRequirementsInfo2),
+            buffer: cpu_index_buffer,
+        };
+        unsafe {
+            api::vkGetBufferMemoryRequirements2(
+                swapchain.device.handle,
+                &buf_mem_reqs_info,
+                &mem_reqs,
+            )
+        };
+        let index_buffer_mem_reqs_size = mem_reqs.size;
+
+        let cpu_triangle_buffer_mem_size = vertex_buffer_mem_reqs_size + index_buffer_mem_reqs_size;
+        let mem_alloc_info = api::MemoryAllocateInfo {
+            header: StructureHeader::new(StructureType::MemoryAllocateInfo),
+            allocation_size: cpu_triangle_buffer_mem_size,
+            memory_type_index: swapchain
+                .device
+                .physical_device
+                .basic_cpu_access_memory_type_index,
+        };
+        let cpu_triangle_buffer_mem = ptr::null();
+        let result = unsafe {
+            api::vkAllocateMemory(
+                swapchain.device.handle,
+                &mem_alloc_info,
+                ptr::null(),
+                &cpu_triangle_buffer_mem,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        let mut bind_buf_mem_info = api::BindBufferMemoryInfo {
+            header: StructureHeader::new(StructureType::BindBufferMemoryInfo),
+            buffer: cpu_vertex_buffer,
+            memory: cpu_triangle_buffer_mem,
+            memory_offset: 0,
+        };
+        let result =
+            unsafe { api::vkBindBufferMemory2(swapchain.device.handle, 1, &bind_buf_mem_info) };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+        bind_buf_mem_info.buffer = cpu_index_buffer;
+        bind_buf_mem_info.memory_offset = vertex_buffer_size;
+        let result =
+            unsafe { api::vkBindBufferMemory2(swapchain.device.handle, 1, &bind_buf_mem_info) };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        vertex_buffer_create_info.usage = (api::BufferUsageFlagBit::TransferDst
+            as api::BufferUsageFlags)
+            | (api::BufferUsageFlagBit::VertexBuffer as api::BufferUsageFlags);
+        let gpu_vertex_buffer = ptr::null();
+        let result: i32 = unsafe {
+            api::vkCreateBuffer(
+                swapchain.device.handle,
+                &vertex_buffer_create_info,
+                ptr::null(),
+                &gpu_vertex_buffer,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        index_buffer_create_info.usage = (api::BufferUsageFlagBit::TransferDst
+            as api::BufferUsageFlags)
+            | (api::BufferUsageFlagBit::IndexBuffer as api::BufferUsageFlags);
+        let gpu_index_buffer = ptr::null();
+        let result: i32 = unsafe {
+            api::vkCreateBuffer(
+                swapchain.device.handle,
+                &index_buffer_create_info,
+                ptr::null(),
+                &gpu_index_buffer,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        let buf_mem_reqs_info = api::BufferMemoryRequirementsInfo2 {
+            header: StructureHeader::new(StructureType::BufferMemoryRequirementsInfo2),
+            buffer: gpu_vertex_buffer,
+        };
+        unsafe {
+            api::vkGetBufferMemoryRequirements2(
+                swapchain.device.handle,
+                &buf_mem_reqs_info,
+                &mem_reqs,
+            )
+        };
+        let vertex_buffer_mem_reqs_size = mem_reqs.size;
+
+        let buf_mem_reqs_info = api::BufferMemoryRequirementsInfo2 {
+            header: StructureHeader::new(StructureType::BufferMemoryRequirementsInfo2),
+            buffer: gpu_index_buffer,
+        };
+        unsafe {
+            api::vkGetBufferMemoryRequirements2(
+                swapchain.device.handle,
+                &buf_mem_reqs_info,
+                &mem_reqs,
+            )
+        };
+        let index_buffer_mem_reqs_size = mem_reqs.size;
+
+        let mem_alloc_info = api::MemoryAllocateInfo {
+            header: StructureHeader::new(StructureType::MemoryAllocateInfo),
+            allocation_size: vertex_buffer_mem_reqs_size + index_buffer_mem_reqs_size,
+            memory_type_index: swapchain
+                .device
+                .physical_device
+                .local_only_memory_type_index,
+        };
+        let gpu_triangle_buffer_mem = ptr::null();
+        let result = unsafe {
+            api::vkAllocateMemory(
+                swapchain.device.handle,
+                &mem_alloc_info,
+                ptr::null(),
+                &gpu_triangle_buffer_mem,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        let mut bind_buf_mem_info = api::BindBufferMemoryInfo {
+            header: StructureHeader::new(StructureType::BindBufferMemoryInfo),
+            buffer: gpu_vertex_buffer,
+            memory: gpu_triangle_buffer_mem,
+            memory_offset: 0,
+        };
+        let result =
+            unsafe { api::vkBindBufferMemory2(swapchain.device.handle, 1, &bind_buf_mem_info) };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+        bind_buf_mem_info.buffer = gpu_index_buffer;
+        bind_buf_mem_info.memory_offset = vertex_buffer_size;
+        let result =
+            unsafe { api::vkBindBufferMemory2(swapchain.device.handle, 1, &bind_buf_mem_info) };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        // Shader Stage Create
+        let vertex_shader_stage = create_shader_stage_from_bytes(
+            swapchain.device.handle,
+            &BASIC_VERTEX_SHADER_DATA,
+            api::ShaderStageFlagBit::Vertex,
+        )?;
+        let fragment_shader_stage = create_shader_stage_from_bytes(
+            swapchain.device.handle,
+            &BASIC_FRAGMENT_SHADER_DATA,
+            api::ShaderStageFlagBit::Fragment,
+        )?;
+        let shader_stages = [vertex_shader_stage, fragment_shader_stage];
+
+        // Create Pipeline Layout
+        let descriptor_set_layout_binding = api::DescriptorSetLayoutBinding {
+            binding: 0,
+            descriptor_type: api::DescriptorType::UniformBuffer,
+            descriptor_count: 1,
+            stage_flags: api::ShaderStageFlagBit::Vertex as api::ShaderStageFlags,
+            immutable_samplers: ptr::null(),
+        };
+
+        let descriptor_set_layout_create_info = api::DescriptorSetLayoutCreateInfo {
+            header: StructureHeader::new(StructureType::DescriptorSetLayoutCreateInfo),
+            flags: 0,
+            binding_count: 1,
+            bindings: &descriptor_set_layout_binding,
+        };
+
+        let descriptor_set_layout = ptr::null();
+        let result = unsafe {
+            api::vkCreateDescriptorSetLayout(
+                swapchain.device.handle,
+                &descriptor_set_layout_create_info,
+                ptr::null(),
+                &descriptor_set_layout,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        let pipeline_layout_create_info = api::PipelineLayoutCreateInfo {
+            header: StructureHeader::new(StructureType::PipelineLayoutCreateInfo),
+            flags: 0,
+            set_layout_count: 1,
+            set_layouts: &descriptor_set_layout,
+            push_constant_range_count: 0,
+            push_constant_ranges: ptr::null(),
+        };
+
+        let pipeline_layout = ptr::null();
+        let result = unsafe {
+            api::vkCreatePipelineLayout(
+                swapchain.device.handle,
+                &pipeline_layout_create_info,
+                ptr::null(),
+                &pipeline_layout,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        // Create Graphics Pipeline
+        let vertex_input_binding_description = api::VertexInputBindingDescription {
+            binding: 0,
+            stride: mem::size_of::<TriangleVertex>() as u32,
+            input_rate: api::VertexInputRate::Vertex,
+        };
+        let vertex_input_attribute_description = api::VertexInputAttributeDescription {
+            location: 0,
+            binding: 0,
+            format: api::Format::R32G32sfloat,
+            offset: 0,
+        };
+        let vertex_input_create_info = api::PipelineVertexInputStateCreateInfo {
+            header: StructureHeader::new(StructureType::PipelineVertexInputStateCreateInfo),
+            flags: 0,
+            vertex_binding_description_count: 1,
+            vertex_binding_descriptions: &vertex_input_binding_description,
+            vertex_attribute_description_count: 1,
+            vertex_attribute_descriptions: &vertex_input_attribute_description,
+        };
+
+        let input_assembly_create_info = api::PipelineInputAssemblyStateCreateInfo {
+            header: StructureHeader::new(StructureType::PipelineInputAssemblyStateCreateInfo),
+            flags: 0,
+            topology: api::PrimitiveTopology::TriangleList,
+            primitive_restart_enable: BOOL_FALSE,
+        };
+
+        let tessilation_create_info = api::PipelineTessellationStateCreateInfo {
+            header: StructureHeader::new(StructureType::PipelineTessellationStateCreateInfo),
+            flags: 0,
+            patch_control_points: 0, // Not sure but probably valid
+        };
+
+        let viewport = api::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: swapchain_width as f32,
+            height: swapchain_height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        let scissor = api::Rect2D {
+            offset: api::Offset2d::default(),
+            extent: api::Extent2d {
+                width: swapchain_width,
+                height: swapchain_height,
+            },
+        };
+        let viewport_create_info = api::PipelineViewportStateCreateInfo {
+            header: StructureHeader::new(StructureType::PipelineViewportStateCreateInfo),
+            flags: 0,
+            viewport_count: 1,
+            viewports: &viewport,
+            scissor_count: 1,
+            scissors: &scissor,
+        };
+
+        let rasterization_create_info = api::PipelineRasterizationStateCreateInfo {
+            header: StructureHeader::new(StructureType::PipelineRasterizationStateCreateInfo),
+            flags: 0,
+            depth_clamp_enable: BOOL_FALSE,
+            rasterizer_discard_enable: BOOL_FALSE,
+            polygon_mode: api::PolygonMode::Fill,
+            cull_mode: api::CullModeFlagBit::None as api::CullModeFlags,
+            front_face: api::FrontFace::Clockwise,
+            depth_bias_enable: BOOL_FALSE,
+            depth_bias_constant_factor: 0.0, // Not used when depth_bias_enable is false...?
+            depth_bias_clamp: 0.0,           // Not used when depth_bias_enable is false...?
+            depth_bias_slope_factor: 0.0,    // Not used when depth_bias_enable is false...?
+            line_width: 1.0,
+        };
+
+        let multisampling_create_info = api::PipelineMultisampleStateCreateInfo {
+            header: StructureHeader::new(StructureType::PipelineMultisampleStateCreateInfo),
+            flags: 0,
+            rasterization_samples: 1,
+            sample_shading_enable: BOOL_FALSE,
+            min_sample_shading: 1.0,
+            sample_mask: ptr::null(),
+            alpha_to_coverage_enable: BOOL_FALSE,
+            alpha_to_one_enable: BOOL_FALSE,
+        };
+
+        let depth_stencil_create_info = api::PipelineDepthStencilStateCreateInfo {
+            header: StructureHeader::new(StructureType::PipelineDepthStencilStateCreateInfo),
+            flags: 0,
+            depth_test_enable: BOOL_FALSE,
+            depth_write_enable: BOOL_FALSE,
+            depth_compare_op: api::CompareOp::Less,
+            depth_bounds_test_enable: BOOL_FALSE,
+            stencil_test_enable: BOOL_FALSE,
+            front: api::StencilOpState::default(),
+            back: api::StencilOpState::default(),
+            min_depth_bounds: 0.0,
+            max_depth_bounds: 1.0,
+        };
+
+        let color_blend_attachment = api::PipelineColorBlendAttachmentState {
+            blend_enable: BOOL_FALSE,
+            src_color_blend_factor: api::BlendFactor::One,
+            dst_color_blend_factor: api::BlendFactor::Zero,
+            color_blend_op: api::BlendOp::Add,
+            src_alpha_blend_factor: api::BlendFactor::One,
+            dst_alpha_blend_factor: api::BlendFactor::Zero,
+            alpha_blend_op: api::BlendOp::Add,
+            color_write_mask: api::ColorComponentFlagBit::All as api::ColorComponentFlags,
+        };
+        let color_blend_create_info = api::PipelineColorBlendStateCreateInfo {
+            header: StructureHeader::new(StructureType::PipelineColorBlendStateCreateInfo),
+            flags: 0,
+            logic_op_enable: BOOL_FALSE,
+            logic_op: api::LogicOp::Copy,
+            attachment_count: 1,
+            attachments: &color_blend_attachment,
+            blend_constants: [0.0, 0.0, 0.0, 0.0],
+        };
+
+        let graphics_pipeline_create_info = api::GraphicsPipelineCreateInfo {
+            header: StructureHeader::new(StructureType::GraphicsPipelineCreateInfo),
+            flags: 0,
+            stage_count: 2,
+            stages: shader_stages.as_ptr(),
+            vertex_input_state: &vertex_input_create_info,
+            input_assembly_state: &input_assembly_create_info,
+            tessellation_state: &tessilation_create_info,
+            viewport_state: &viewport_create_info,
+            rasterization_state: &rasterization_create_info,
+            multisample_state: &multisampling_create_info,
+            depth_stencil_state: &depth_stencil_create_info,
+            color_blend_state: &color_blend_create_info,
+            dynamic_state: ptr::null(),
+            layout: pipeline_layout,
+            render_pass,
+            subpass: 0,
+            base_pipeline_handle: ptr::null(),
+            base_pipeline_index: -1,
+        };
+        let graphics_pipeline = ptr::null();
+        let result = unsafe {
+            api::vkCreateGraphicsPipelines(
+                swapchain.device.handle,
+                ptr::null(),
+                1,
+                &graphics_pipeline_create_info,
+                ptr::null(),
+                &graphics_pipeline,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        // Fence Create
+        let fence_create_info = api::FenceCreateInfo {
+            header: StructureHeader::new(StructureType::FenceCreateInfo),
+            flags: 0,
+        };
+        let fence = ptr::null();
+        let result = unsafe {
+            api::vkCreateFence(
+                swapchain.device.handle,
+                &fence_create_info,
+                ptr::null(),
+                &fence,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        let mut scr = SwapchainTriangleRender {
+            fence,
+            graphics_pipeline,
+            pipeline_layout,
+            descriptor_set_layout,
+            shader_stages,
+            gpu_triangle_buffer_mem,
+            gpu_index_buffer,
+            gpu_vertex_buffer,
+            cpu_triangle_buffer_mem_size,
+            cpu_triangle_buffer_mem,
+            cpu_index_buffer,
+            cpu_vertex_buffer,
+            max_triangles,
+            framebuffers,
+            swapchain_image_views,
+            render_pass,
+            swapchain,
+        };
+        scr.write_initial_command_buffers(swapchain_width, swapchain_height)?;
+        scr.swapchain.render_next_image(scr.fence)?; // Render once for a test and to allow the fence to be signalled
+
+        Ok(scr)
+    }
+
+    pub fn get_verticies_and_indicies(
+        &mut self,
+    ) -> Result<(&mut [TriangleVertex], &mut [TriangleIndicies]), Error> {
+        let result = unsafe {
+            api::vkWaitForFences(
+                self.swapchain.device.handle,
+                1,
+                &self.fence,
+                BOOL_FALSE,
+                100000000, // 100 ms in nanoseconds
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+        let result = unsafe { api::vkResetFences(self.swapchain.device.handle, 1, &self.fence) };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        let data_ptr = ptr::null_mut();
+        let result = unsafe {
+            api::vkMapMemory(
+                self.swapchain.device.handle,
+                self.cpu_triangle_buffer_mem,
+                0,
+                self.cpu_triangle_buffer_mem_size,
+                api::MemoryMapFlagBit::None as api::MemoryMapFlags,
+                &data_ptr,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+        if !data_ptr.is_null() {
+            let index_offset =
+                unsafe { data_ptr.offset((mem::size_of::<TriangleVertex>() as isize) * (1 << 16)) };
+            Ok((
+                unsafe { std::slice::from_raw_parts_mut(data_ptr as *mut TriangleVertex, 1 << 16) },
+                unsafe {
+                    std::slice::from_raw_parts_mut(
+                        index_offset as *mut TriangleIndicies,
+                        self.max_triangles as usize,
+                    )
+                },
+            ))
+        } else {
+            Err(Error::InvalidMapPtr)
+        }
+    }
+
+    pub fn render(
+        &mut self,
+        num_verticies: u32,
+        num_triangles: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), Error> {
+        unsafe { vkUnmapMemory(self.swapchain.device.handle, self.cpu_triangle_buffer_mem) };
+
+        // Resize if necessarry here in future based on next image index results
+        let next_image_index = self.swapchain.get_next_image_index()? as usize;
+
+        let vertex_buffer_copy_region = api::BufferCopy2 {
+            header: StructureHeader::new(StructureType::BufferCopy2),
+            src_offset: 0,
+            dst_offset: 0,
+            size: (num_verticies as u64) * (mem::size_of::<TriangleVertex>() as u64),
+        };
+        let vertex_buffer_copy_info = api::CopyBufferInfo2 {
+            header: StructureHeader::new(StructureType::CopyBufferInfo2),
+            src_buffer: self.cpu_vertex_buffer,
+            dst_buffer: self.gpu_vertex_buffer,
+            region_count: 1,
+            regions: &vertex_buffer_copy_region,
+        };
+
+        let index_buffer_copy_region = api::BufferCopy2 {
+            header: StructureHeader::new(StructureType::BufferCopy2),
+            src_offset: 0,
+            dst_offset: 0,
+            size: (num_triangles as u64) * (mem::size_of::<TriangleIndicies>() as u64),
+        };
+        let index_buffer_copy_info = api::CopyBufferInfo2 {
+            header: StructureHeader::new(StructureType::CopyBufferInfo2),
+            src_buffer: self.cpu_index_buffer,
+            dst_buffer: self.gpu_index_buffer,
+            region_count: 1,
+            regions: &index_buffer_copy_region,
+        };
+
+        let cmd_buffer_begin_info = api::CommandBufferBeginInfo {
+            header: StructureHeader::new(StructureType::CommandBufferBeginInfo),
+            flags: api::CommandBufferUsageFlagBit::None as api::CommandBufferUsageFlags,
+            inheritance_info: ptr::null(),
+        };
+
+        let clear_value = api::ClearValue {
+            color: api::ClearColorValue {
+                float32: [0.0, 0.0, 0.0, 0.0],
+            },
+        };
+
+        let render_pass_begin_info = api::RenderPassBeginInfo {
+            header: StructureHeader::new(StructureType::RenderPassBeginInfo),
+            render_pass: self.render_pass,
+            framebuffer: self.framebuffers[next_image_index],
+            render_area: api::Rect2D {
+                offset: api::Offset2d::default(),
+                extent: api::Extent2d { width, height },
+            },
+            clear_value_count: 1,
+            clear_values: &clear_value,
+        };
+
+        let vertex_buffers = [self.gpu_vertex_buffer];
+        let vertex_offsets = [0];
+
+        let cmd_buffer = self.swapchain.cmd_buffer_submit_infos[next_image_index].command_buffer;
+
+        let result = unsafe { api::vkBeginCommandBuffer(cmd_buffer, &cmd_buffer_begin_info) };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        unsafe { api::vkCmdCopyBuffer2(cmd_buffer, &vertex_buffer_copy_info) };
+
+        unsafe { api::vkCmdCopyBuffer2(cmd_buffer, &index_buffer_copy_info) };
+
+        unsafe {
+            api::vkCmdBeginRenderPass(
+                cmd_buffer,
+                &render_pass_begin_info,
+                api::SubpassContents::Inline,
+            )
+        };
+
+        unsafe {
+            api::vkCmdBindPipeline(
+                cmd_buffer,
+                api::PipelineBindPoint::Graphics,
+                self.graphics_pipeline,
+            )
+        };
+        unsafe {
+            api::vkCmdBindVertexBuffers(
+                cmd_buffer,
+                0,
+                1,
+                vertex_buffers.as_ptr(),
+                vertex_offsets.as_ptr(),
+            )
+        };
+        unsafe {
+            api::vkCmdBindIndexBuffer(cmd_buffer, self.gpu_index_buffer, 0, api::IndexType::Uint16)
+        };
+        unsafe { api::vkCmdDrawIndexed(cmd_buffer, num_verticies, num_triangles, 0, 0, 0) };
+
+        unsafe { api::vkCmdEndRenderPass(cmd_buffer) };
+
+        let result = unsafe { api::vkEndCommandBuffer(cmd_buffer) };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        self.swapchain
+            .submit_queue_and_present(next_image_index as u32, self.fence)?;
         Ok(())
     }
 }

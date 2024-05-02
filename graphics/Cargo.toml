@@ -115,3 +115,12 @@ doc = false
 test = false
 harness = false
 bench = false
+
+[[example]]
+name = "triangle"
+path = "examples/triangle.rs"
+crate-type = ["bin"]
+doc = false
+test = false
+harness = false
+bench = false

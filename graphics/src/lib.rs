@@ -22,7 +22,7 @@
 
 #![allow(dead_code)] // Temporary
 
-mod vulkan;
+pub mod vulkan;
 
 #[cfg_attr(target_os = "windows", path = "windows/os.rs")]
 #[cfg_attr(target_os = "linux", path = "linux/os.rs")]
@@ -208,6 +208,143 @@ impl VulkanWindow {
                                 // }
                             }
                             Err(e) => return Err(Error::VulkanError(e)),
+                        }
+                    }
+                    Err(e) => return Err(Error::VulkanError(e)),
+                },
+                Err(e) => return Err(Error::OsError(e)),
+            }
+        }
+
+        Ok(())
+    }
+}
+
+pub trait VulkanTriangleCallbacks {
+    fn draw_triangles(
+        &mut self,
+        verticies: &mut [vulkan::TriangleVertex],
+        indicies: &mut [vulkan::TriangleIndicies],
+        width: u32,
+        height: u32,
+    ) -> (u32, u32);
+}
+
+pub struct VulkanTriangle {
+    swapchain_triangle_render: vulkan::SwapchainTriangleRender,
+    window: os::OsWindow,
+    draw_trigger_external: os::OsEvent,
+    render_width: u32,
+    render_height: u32,
+}
+
+impl VulkanTriangle {
+    pub fn new(
+        width: u32,
+        height: u32,
+        max_triangles: u32,
+    ) -> Result<(Self, os::OsEventSignaler), Error> {
+        //let layer_names = [];
+        let layer_names = [vulkan::LAYER_NAME_VALIDATION];
+
+        let extension_names = [
+            vulkan::INSTANCE_EXTENSION_NAME_SURFACE,
+            vulkan::INSTANCE_EXTENSION_NAME_OS_SURFACE,
+            vulkan::INSTANCE_EXTENSION_NAME_DEBUG,
+        ];
+
+        let instance = match vulkan::Instance::new(
+            "App Name",
+            "Engine Name",
+            &layer_names,
+            &extension_names,
+        ) {
+            Ok(i) => i,
+            Err(e) => return Err(Error::VulkanError(e)),
+        };
+
+        let physical_device = match os::get_device_luid() {
+            Ok(Some(luid)) => match vulkan::PhysicalDevice::new_from_luid(instance, luid) {
+                Ok(Some(d)) => d,
+                Ok(None) => return Err(Error::CannotFindPhysicalDevice),
+                Err(e) => return Err(Error::VulkanError(e)),
+            },
+            Ok(None) => match vulkan::PhysicalDevice::new(instance) {
+                Ok(Some(d)) => d,
+                Ok(None) => return Err(Error::CannotFindPhysicalDevice),
+                Err(e) => return Err(Error::VulkanError(e)),
+            },
+            Err(e) => return Err(Error::OsError(e)),
+        };
+
+        let window = match os::OsWindow::new(width, height) {
+            Ok(w) => w,
+            Err(e) => return Err(Error::OsError(e)),
+        };
+
+        let draw_trigger_external = match os::OsEvent::new() {
+            Ok(t) => t,
+            Err(e) => return Err(Error::OsError(e)),
+        };
+        let signaler = draw_trigger_external.create_signaler();
+
+        let surface_parameters = window.get_surface_parameters();
+        let swapchain = match vulkan::Swapchain::new(physical_device, surface_parameters) {
+            Ok(s) => s,
+            Err(e) => return Err(Error::VulkanError(e)),
+        };
+
+        let swapchain_triangle_render =
+            match vulkan::SwapchainTriangleRender::new(swapchain, max_triangles) {
+                Ok(s) => s,
+                Err(e) => return Err(Error::VulkanError(e)),
+            };
+
+        Ok((
+            VulkanTriangle {
+                swapchain_triangle_render,
+                window,
+                draw_trigger_external,
+                render_width: width,
+                render_height: height,
+            },
+            signaler,
+        ))
+    }
+
+    pub fn run(&mut self, mut callback: impl VulkanTriangleCallbacks) -> Result<(), Error> {
+        // Maybe one-time setup/start code here in future
+        loop {
+            match self.window.process_messages() {
+                Ok(os::OsWindowState::Normal) => {}
+                Ok(os::OsWindowState::CloseAttempt) => {
+                    if let Err(e) = self.window.close_window() {
+                        return Err(Error::OsError(e));
+                    }
+                }
+                Ok(os::OsWindowState::ShouldDrop) => {
+                    break;
+                }
+                Ok(_) => {}
+                Err(e) => return Err(Error::OsError(e)),
+            }
+            match self.draw_trigger_external.check() {
+                Ok(false) => {}
+                Ok(true) => match self.swapchain_triangle_render.get_verticies_and_indicies() {
+                    Ok((verticies, indicies)) => {
+                        let (num_verticies, num_triangles) = callback.draw_triangles(
+                            verticies,
+                            indicies,
+                            self.render_width,
+                            self.render_height,
+                        );
+                        if let Err(e) = self.swapchain_triangle_render.render(
+                            num_verticies,
+                            num_triangles,
+                            self.render_width,
+                            self.render_height,
+                        ) {
+                            return Err(Error::VulkanError(e));
                         }
                     }
                     Err(e) => return Err(Error::VulkanError(e)),

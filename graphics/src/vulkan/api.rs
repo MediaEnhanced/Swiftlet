@@ -28,6 +28,7 @@ type MutableU32Ptr = *const u32;
 type Bool32 = u32;
 type DeviceSize = u64;
 type SampleCountFlags = u32;
+type ConstBytePtr = *const u8;
 
 pub(super) const BOOL_FALSE: u32 = 0;
 pub(super) const BOOL_TRUE: u32 = 1;
@@ -68,7 +69,18 @@ pub(super) enum StructureType {
     ImageCreateInfo,
     ImageViewCreateInfo,
     ShaderModuleCreateInfo,
-    GraphicsPipelineCreateInfo = 28,
+    PipelineCacheCreateInfo,
+    PipelineShaderStageCreateInfo,
+    PipelineVertexInputStateCreateInfo,
+    PipelineInputAssemblyStateCreateInfo,
+    PipelineTessellationStateCreateInfo,
+    PipelineViewportStateCreateInfo,
+    PipelineRasterizationStateCreateInfo,
+    PipelineMultisampleStateCreateInfo,
+    PipelineDepthStencilStateCreateInfo,
+    PipelineColorBlendStateCreateInfo,
+    PipelineDynamicStateCreateInfo,
+    GraphicsPipelineCreateInfo,
     ComputePipelineCreateInfo,
     PipelineLayoutCreateInfo,
     SamplerCreateInfo,
@@ -97,6 +109,11 @@ pub(super) enum StructureType {
     PhysicalDeviceProperties2 = 1000059001,
     QueueFamilyProperties2 = 1000059005,
     PhysicalDeviceIdProperties = 1000071004,
+    AttachmentDescription2 = 1000109000,
+    AttachmentReference2 = 1000109001,
+    SubpassDescription2 = 1000109002,
+    SubpassDependency2 = 1000109003,
+    RenderPassCreateInfo2 = 1000109004,
     MemoryDedicatedRequirements = 1000127000,
     BufferMemoryRequirementsInfo2 = 1000146000,
     ImageMemoryRequirementsInfo2 = 1000146001,
@@ -123,6 +140,7 @@ pub(super) enum StructureType {
     ImageBlit2 = 1000337008,
     BufferImageCopy2 = 1000337009,
     ImageResolve2 = 1000337010,
+    // Unsorted:
 }
 
 #[repr(C)]
@@ -374,10 +392,12 @@ impl Default for PhysicalDeviceProperties2 {
     }
 }
 
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub(super) enum Format {
     Undefined = 0,
     B8G8R8A8unorm = 44,
+    R32G32sfloat = 103,
 }
 
 impl Format {
@@ -771,10 +791,19 @@ pub(super) struct SwapchainCreateInfo {
     pub(super) old_swapchain: OpaqueHandle,
 }
 
+#[repr(u32)]
+pub(super) enum CommandPoolCreateFlagBit {
+    None = 0,
+    TransientBit = 0x1,
+    ResetCommandBufferBit = 0x2,
+    ProtectedBit = 0x4,
+}
+pub(super) type CommandPoolCreateFlags = u32;
+
 #[repr(C)]
 pub(super) struct CommandPoolCreateInfo {
     pub(super) header: StructureHeader,
-    pub(super) flags: u32,
+    pub(super) flags: CommandPoolCreateFlags,
     pub(super) queue_family_index: u32,
 }
 
@@ -1239,6 +1268,698 @@ pub(super) enum MemoryMapFlagBit {
 }
 pub(super) type MemoryMapFlags = u32;
 
+#[repr(u32)]
+pub(super) enum ImageViewCreateFlagBit {
+    None = 0x0,
+    FragmentDensityMapDynamic = 0x1,
+    FragmentDensityMapDeferred = 0x2,
+    DescriptorBufferCaptureReplay = 0x4,
+}
+pub(super) type ImageViewCreateFlags = u32;
+
+#[repr(C)]
+pub(super) enum ImageViewType {
+    OneDimension = 0,
+    TwoDimensions = 1,
+    ThreeDimensions = 2,
+    Cube = 3,
+    OneDimensionArray = 4,
+    TwoDimensionArray = 5,
+    CubeArray = 6,
+}
+
+#[repr(C)]
+pub(super) enum ComponentSwizzle {
+    Identity = 0,
+    Zero = 1,
+    One = 2,
+    R = 3,
+    G = 4,
+    B = 5,
+    A = 6,
+}
+
+#[repr(C)]
+pub(super) struct ComponentMapping {
+    pub(super) r: ComponentSwizzle,
+    pub(super) g: ComponentSwizzle,
+    pub(super) b: ComponentSwizzle,
+    pub(super) a: ComponentSwizzle,
+}
+
+#[repr(C)]
+pub(super) struct ImageViewCreateInfo {
+    pub(super) header: StructureHeader,
+    pub(super) flags: ImageViewCreateFlags,
+    pub(super) image: OpaqueHandle,
+    pub(super) view_type: ImageViewType,
+    pub(super) format: Format,
+    pub(super) components: ComponentMapping,
+    pub(super) subresource_range: ImageSubresourceRange,
+}
+
+#[repr(u32)]
+pub(super) enum AttachmentDescriptionFlagBit {
+    None = 0,
+    MayAlias = 0x1,
+}
+pub(super) type AttachmentDescriptionFlags = u32;
+
+#[repr(C)]
+pub(super) enum AttachmentLoadOp {
+    Load = 0,
+    Clear = 1,
+    DontCare = 2,
+}
+
+#[repr(C)]
+pub(super) enum AttachmentStoreOp {
+    Store = 0,
+    DontCare = 1,
+}
+
+#[repr(C)]
+pub(super) struct AttachmentDescription2 {
+    pub(super) header: StructureHeader,
+    pub(super) flags: AttachmentDescriptionFlags,
+    pub(super) format: Format,
+    pub(super) samples: SampleCountFlags,
+    pub(super) load_op: AttachmentLoadOp,
+    pub(super) store_op: AttachmentStoreOp,
+    pub(super) stencil_load_op: AttachmentLoadOp,
+    pub(super) stencil_store_op: AttachmentStoreOp,
+    pub(super) initial_layout: ImageLayout,
+    pub(super) final_layout: ImageLayout,
+}
+
+#[repr(C)]
+pub(super) enum PipelineBindPoint {
+    Graphics = 0,
+    Compute = 1,
+}
+
+#[repr(C)]
+pub(super) struct AttachmentReference2 {
+    pub(super) header: StructureHeader,
+    pub(super) attachment: u32,
+    pub(super) layout: ImageLayout,
+    pub(super) aspect_mask: ImageAspectFlags,
+}
+
+#[repr(C)]
+pub(super) struct SubpassDescription2 {
+    pub(super) header: StructureHeader,
+    pub(super) flags: u32,
+    pub(super) pipeline_bind_point: PipelineBindPoint,
+    pub(super) view_mask: u32,
+    pub(super) input_attachment_count: u32,
+    pub(super) input_attachments: *const AttachmentReference2,
+    pub(super) color_attachment_count: u32,
+    pub(super) color_attachments: *const AttachmentReference2,
+    pub(super) resolve_attachments: *const AttachmentReference2,
+    pub(super) depth_stencil_attachment: *const AttachmentReference2,
+    pub(super) preserve_attachment_count: u32,
+    pub(super) preserve_attachments: *const u32,
+}
+
+#[repr(u32)]
+pub(super) enum PipelineStageFlagBit {
+    None = 0x00,
+    TopOfPipe = 0x01,
+    DrawIndirect = 0x02,
+    VertexInput = 0x04,
+    VertexShader = 0x08,
+    TessellationControlShader = 0x10,
+    TessellationEvaluationShader = 0x20,
+    GeometryShader = 0x40,
+    FragmentShader = 0x80,
+    EarlyFragmentTests = 0x00000100,
+    LateFragmentTests = 0x00000200,
+    ColorAttachmentOutput = 0x00000400,
+    AllCommands = 0x00010000,
+}
+pub(super) type PipelineStageFlags = u32;
+
+#[repr(u32)]
+pub(super) enum AccessFlagBit {
+    None = 0,
+    IndirectCommandRead = 0x1,
+    IndexRead = 0x2,
+    VertexAttributeRead = 0x4,
+    UniformRead = 0x8,
+    InputAttachmentRead = 0x10,
+    ShaderReadBit = 0x20,
+    ShaderWriteBit = 0x40,
+    ColorAttachmentRead = 0x80,
+    ColorAttachmentWrite = 0x100,
+    DepthStencilAttachmentRead = 0x200,
+    DepthStencilAttachmentWrite = 0x400,
+    TransferRead = 0x800,
+    TransferWrite = 0x1000,
+    HostRead = 0x2000,
+    HostWrite = 0x4000,
+    MemoryRead = 0x8000,
+    MemoryWrite = 0x10000,
+}
+pub(super) type AccessFlags = u32;
+
+pub(super) const SUBPASS_EXTERNAL: u32 = 0xFFFFFFFF;
+
+#[repr(C)]
+pub(super) struct SubpassDependency2 {
+    pub(super) header: StructureHeader,
+    pub(super) src_subpass: u32,
+    pub(super) dst_subpass: u32,
+    pub(super) src_stage_mask: PipelineStageFlags,
+    pub(super) dst_stage_mask: PipelineStageFlags,
+    pub(super) src_access_mask: AccessFlags,
+    pub(super) dst_access_mask: AccessFlags,
+    pub(super) dependency_flags: DependencyFlags,
+    pub(super) view_offset: i32,
+}
+
+#[repr(C)]
+pub(super) struct RenderPassCreateInfo2 {
+    pub(super) header: StructureHeader,
+    pub(super) flags: u32,
+    pub(super) attachment_count: u32,
+    pub(super) attachments: *const AttachmentDescription2,
+    pub(super) subpass_count: u32,
+    pub(super) subpasses: *const SubpassDescription2,
+    pub(super) dependency_count: u32,
+    pub(super) dependencies: *const SubpassDependency2,
+    pub(super) correlated_view_mask_count: u32,
+    pub(super) correlated_view_masks: *const u32,
+}
+
+#[repr(C)]
+pub(super) struct FramebufferCreateInfo {
+    pub(super) header: StructureHeader,
+    pub(super) flags: u32,
+    pub(super) render_pass: OpaqueHandle,
+    pub(super) attachment_count: u32,
+    pub(super) attachments: *const OpaqueHandle,
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) layers: u32,
+}
+
+#[repr(u32)]
+pub(super) enum PipelineCreateFlagBit {
+    None = 0x0,
+    DisableOptimization = 0x1,
+    AllowDerivatives = 0x2,
+    Derivative = 0x4,
+}
+pub(super) type PipelineCreateFlags = u32;
+
+#[repr(u32)]
+pub(super) enum ShaderStageFlagBit {
+    Vertex = 0x1,
+    TessellationControl = 0x2,
+    TessellationEvaluation = 0x4,
+    Geometry = 0x8,
+    Fragment = 0x10,
+    Compute = 0x20,
+    AllGraphics = 0x1F,
+    All = 0x7FFFFFFF,
+}
+pub(super) type ShaderStageFlags = u32;
+
+#[repr(C)]
+pub(super) struct ShaderModuleCreateInfo {
+    pub(super) header: StructureHeader,
+    pub(super) flags: u32,
+    pub(super) code_size: usize,
+    pub(super) code: *const u32,
+}
+
+#[repr(C)]
+pub(super) struct SpecializationMapEntry {
+    pub(super) constant_id: u32,
+    pub(super) offset: u32,
+    pub(super) size: usize,
+}
+
+#[repr(C)]
+pub(super) struct SpecializationInfo {
+    pub(super) map_entry_count: u32,
+    pub(super) map_entries: *const SpecializationMapEntry,
+    pub(super) data_size: usize,
+    pub(super) data: ConstBytePtr,
+}
+
+#[repr(C)]
+pub(super) struct PipelineShaderStageCreateInfo {
+    pub(super) header: StructureHeader,
+    pub(super) flags: u32,
+    pub(super) stage: ShaderStageFlags,
+    pub(super) module: OpaqueHandle,
+    pub(super) name: NullTerminatedUTF8,
+    pub(super) specialization_info: *const SpecializationInfo,
+}
+
+#[repr(C)]
+pub(super) enum VertexInputRate {
+    Vertex = 0,
+    Instance = 1,
+}
+
+#[repr(C)]
+pub(super) struct VertexInputBindingDescription {
+    pub(super) binding: u32,
+    pub(super) stride: u32,
+    pub(super) input_rate: VertexInputRate,
+}
+
+#[repr(C)]
+pub(super) struct VertexInputAttributeDescription {
+    pub(super) location: u32,
+    pub(super) binding: u32,
+    pub(super) format: Format,
+    pub(super) offset: u32,
+}
+
+#[repr(C)]
+pub(super) struct PipelineVertexInputStateCreateInfo {
+    pub(super) header: StructureHeader,
+    pub(super) flags: u32,
+    pub(super) vertex_binding_description_count: u32,
+    pub(super) vertex_binding_descriptions: *const VertexInputBindingDescription,
+    pub(super) vertex_attribute_description_count: u32,
+    pub(super) vertex_attribute_descriptions: *const VertexInputAttributeDescription,
+}
+
+#[repr(C)]
+pub(super) enum PrimitiveTopology {
+    PointList = 0,
+    LineList = 1,
+    LineStrip = 2,
+    TriangleList = 3,
+    TriangleStrip = 4,
+    TriangleFan = 5,
+    LineListWithAdjacency = 6,
+    LineStripWithAdjacency = 7,
+    TriangleListWithAdjacency = 8,
+    TriangleStripWithAdjacency = 9,
+    PatchList = 10,
+}
+
+#[repr(C)]
+pub(super) struct PipelineInputAssemblyStateCreateInfo {
+    pub(super) header: StructureHeader,
+    pub(super) flags: u32,
+    pub(super) topology: PrimitiveTopology,
+    pub(super) primitive_restart_enable: Bool32,
+}
+
+#[repr(C)]
+pub(super) struct PipelineTessellationStateCreateInfo {
+    pub(super) header: StructureHeader,
+    pub(super) flags: u32,
+    pub(super) patch_control_points: u32,
+}
+
+#[repr(C)]
+pub(super) struct Viewport {
+    pub(super) x: f32,
+    pub(super) y: f32,
+    pub(super) width: f32,
+    pub(super) height: f32,
+    pub(super) min_depth: f32,
+    pub(super) max_depth: f32,
+}
+
+#[derive(Default)]
+#[repr(C)]
+pub(super) struct Offset2d {
+    pub(super) x: i32,
+    pub(super) y: i32,
+}
+
+#[repr(C)]
+pub(super) struct Rect2D {
+    pub(super) offset: Offset2d,
+    pub(super) extent: Extent2d,
+}
+
+#[repr(C)]
+pub(super) struct PipelineViewportStateCreateInfo {
+    pub(super) header: StructureHeader,
+    pub(super) flags: u32,
+    pub(super) viewport_count: u32,
+    pub(super) viewports: *const Viewport,
+    pub(super) scissor_count: u32,
+    pub(super) scissors: *const Rect2D,
+}
+
+#[repr(C)]
+pub(super) enum PolygonMode {
+    Fill = 0,
+    Line = 1,
+    Point = 2,
+}
+
+#[repr(u32)]
+pub(super) enum CullModeFlagBit {
+    None = 0x0,
+    Front = 0x1,
+    Back = 0x2,
+}
+pub(super) type CullModeFlags = u32;
+
+#[repr(C)]
+pub(super) enum FrontFace {
+    CounterClockwise = 0,
+    Clockwise = 1,
+}
+
+#[repr(C)]
+pub(super) struct PipelineRasterizationStateCreateInfo {
+    pub(super) header: StructureHeader,
+    pub(super) flags: u32,
+    pub(super) depth_clamp_enable: Bool32,
+    pub(super) rasterizer_discard_enable: Bool32,
+    pub(super) polygon_mode: PolygonMode,
+    pub(super) cull_mode: CullModeFlags,
+    pub(super) front_face: FrontFace,
+    pub(super) depth_bias_enable: Bool32,
+    pub(super) depth_bias_constant_factor: f32,
+    pub(super) depth_bias_clamp: f32,
+    pub(super) depth_bias_slope_factor: f32,
+    pub(super) line_width: f32,
+}
+
+// #[repr(u32)]
+// pub(super) enum SampleCountFlagBit {
+//     One = 0x01,
+//     Two = 0x02,
+//     Four = 0x04,
+//     Eight = 0x08,
+//     Sixteen = 0x10,
+//     ThirtyTwo = 0x20,
+//     SixtyFour = 0x40,
+// }
+// pub(super) type SampleCountFlags = u32;
+
+#[repr(C)]
+pub(super) struct PipelineMultisampleStateCreateInfo {
+    pub(super) header: StructureHeader,
+    pub(super) flags: u32,
+    pub(super) rasterization_samples: SampleCountFlags,
+    pub(super) sample_shading_enable: Bool32,
+    pub(super) min_sample_shading: f32,
+    pub(super) sample_mask: *const u32,
+    pub(super) alpha_to_coverage_enable: Bool32,
+    pub(super) alpha_to_one_enable: Bool32,
+}
+
+#[repr(C)]
+pub(super) enum CompareOp {
+    Never = 0,
+    Less = 1,
+    Equal = 2,
+    LessOrEqual = 3,
+    Greater = 4,
+    NotEqual = 5,
+    GreaterOrEqual = 6,
+    Always = 7,
+}
+
+#[repr(C)]
+pub(super) enum StencilOp {
+    Keep = 0,
+    Zero = 1,
+    Replace = 2,
+    IncrementAndClamp = 3,
+    DecrementAndClamp = 4,
+    Invert = 5,
+    IncrementAndWrap = 6,
+    DecrementAndWrap = 7,
+}
+
+#[repr(C)]
+pub(super) struct StencilOpState {
+    pub(super) fail_op: StencilOp,
+    pub(super) pass_op: StencilOp,
+    pub(super) depth_fail_op: StencilOp,
+    pub(super) compare_op: CompareOp,
+    pub(super) compare_mask: u32,
+    pub(super) write_mask: u32,
+    pub(super) reference: u32,
+}
+
+impl Default for StencilOpState {
+    fn default() -> Self {
+        Self {
+            fail_op: StencilOp::Keep,
+            pass_op: StencilOp::Keep,
+            depth_fail_op: StencilOp::Keep,
+            compare_op: CompareOp::Never,
+            compare_mask: 0,
+            write_mask: 0,
+            reference: 0,
+        }
+    }
+}
+
+#[repr(C)]
+pub(super) struct PipelineDepthStencilStateCreateInfo {
+    pub(super) header: StructureHeader,
+    pub(super) flags: u32,
+    pub(super) depth_test_enable: Bool32,
+    pub(super) depth_write_enable: Bool32,
+    pub(super) depth_compare_op: CompareOp,
+    pub(super) depth_bounds_test_enable: Bool32,
+    pub(super) stencil_test_enable: Bool32,
+    pub(super) front: StencilOpState,
+    pub(super) back: StencilOpState,
+    pub(super) min_depth_bounds: f32,
+    pub(super) max_depth_bounds: f32,
+}
+
+#[repr(C)]
+pub(super) enum LogicOp {
+    Clear = 0,
+    And = 1,
+    AndReverse = 2,
+    Copy = 3,
+    AndInverted = 4,
+    NoOp = 5,
+    Xor = 6,
+    Or = 7,
+    Nor = 8,
+    Equivalent = 9,
+    Invert = 10,
+    OrReverse = 11,
+    CopyInverted = 12,
+    OrInverted = 13,
+    Nand = 14,
+    Set = 15,
+}
+
+#[repr(C)]
+pub(super) enum BlendFactor {
+    Zero = 0,
+    One = 1,
+    //More in Future
+}
+
+#[repr(C)]
+pub(super) enum BlendOp {
+    Add = 0,
+    Subtract = 1,
+    ReverseSubtract = 2,
+    Min = 3,
+    Max = 4,
+}
+
+#[repr(u32)]
+pub(super) enum ColorComponentFlagBit {
+    None = 0x0,
+    R = 0x1,
+    G = 0x2,
+    B = 0x4,
+    A = 0x8,
+    All = 0xF,
+}
+pub(super) type ColorComponentFlags = u32;
+
+#[repr(C)]
+pub(super) struct PipelineColorBlendAttachmentState {
+    pub(super) blend_enable: Bool32,
+    pub(super) src_color_blend_factor: BlendFactor,
+    pub(super) dst_color_blend_factor: BlendFactor,
+    pub(super) color_blend_op: BlendOp,
+    pub(super) src_alpha_blend_factor: BlendFactor,
+    pub(super) dst_alpha_blend_factor: BlendFactor,
+    pub(super) alpha_blend_op: BlendOp,
+    pub(super) color_write_mask: ColorComponentFlags,
+}
+
+#[repr(C)]
+pub(super) struct PipelineColorBlendStateCreateInfo {
+    pub(super) header: StructureHeader,
+    pub(super) flags: u32,
+    pub(super) logic_op_enable: Bool32,
+    pub(super) logic_op: LogicOp,
+    pub(super) attachment_count: u32,
+    pub(super) attachments: *const PipelineColorBlendAttachmentState,
+    pub(super) blend_constants: [f32; 4],
+}
+
+#[repr(C)]
+pub(super) enum DynamicState {
+    Viewport = 0,
+    Scissor = 1,
+    LineWidth = 2,
+    DepthBias = 3,
+    BlendConstants = 4,
+    DepthBounds = 5,
+    StencilCompareMask = 6,
+    StencilWriteMask = 7,
+    StencilReference = 8,
+}
+
+#[repr(C)]
+pub(super) struct PipelineDynamicStateCreateInfo {
+    pub(super) header: StructureHeader,
+    pub(super) flags: u32,
+    pub(super) dynamic_state_count: u32,
+    pub(super) dynamic_states: *const DynamicState,
+}
+
+#[repr(C)]
+pub(super) enum DescriptorType {
+    Sampler = 0,
+    CombinedImageSampler = 1,
+    SampledImage = 2,
+    StorageImage = 3,
+    UniformTexelBuffer = 4,
+    StorageTexelBuffer = 5,
+    UniformBuffer = 6,
+    StorageBuffer = 7,
+    UniformBufferDynamic = 8,
+    StorageBufferDynamic = 9,
+    InputAttachment = 10,
+}
+
+#[repr(C)]
+pub(super) struct DescriptorSetLayoutBinding {
+    pub(super) binding: u32,
+    pub(super) descriptor_type: DescriptorType,
+    pub(super) descriptor_count: u32,
+    pub(super) stage_flags: ShaderStageFlags,
+    pub(super) immutable_samplers: *const OpaqueHandle,
+}
+
+#[repr(C)]
+pub(super) struct DescriptorSetLayoutCreateInfo {
+    pub(super) header: StructureHeader,
+    pub(super) flags: u32,
+    pub(super) binding_count: u32,
+    pub(super) bindings: *const DescriptorSetLayoutBinding,
+}
+
+#[repr(C)]
+pub(super) struct PushConstantRange {
+    pub(super) stage_flags: ShaderStageFlags,
+    pub(super) offset: u32,
+    pub(super) size: u32,
+}
+
+#[repr(C)]
+pub(super) struct PipelineLayoutCreateInfo {
+    pub(super) header: StructureHeader,
+    pub(super) flags: u32,
+    pub(super) set_layout_count: u32,
+    pub(super) set_layouts: *const OpaqueHandle,
+    pub(super) push_constant_range_count: u32,
+    pub(super) push_constant_ranges: *const PushConstantRange,
+}
+
+#[repr(C)]
+pub(super) struct GraphicsPipelineCreateInfo {
+    pub(super) header: StructureHeader,
+    pub(super) flags: PipelineCreateFlags,
+    pub(super) stage_count: u32,
+    pub(super) stages: *const PipelineShaderStageCreateInfo,
+    pub(super) vertex_input_state: *const PipelineVertexInputStateCreateInfo,
+    pub(super) input_assembly_state: *const PipelineInputAssemblyStateCreateInfo,
+    pub(super) tessellation_state: *const PipelineTessellationStateCreateInfo,
+    pub(super) viewport_state: *const PipelineViewportStateCreateInfo,
+    pub(super) rasterization_state: *const PipelineRasterizationStateCreateInfo,
+    pub(super) multisample_state: *const PipelineMultisampleStateCreateInfo,
+    pub(super) depth_stencil_state: *const PipelineDepthStencilStateCreateInfo,
+    pub(super) color_blend_state: *const PipelineColorBlendStateCreateInfo,
+    pub(super) dynamic_state: *const PipelineDynamicStateCreateInfo,
+    pub(super) layout: OpaqueHandle,
+    pub(super) render_pass: OpaqueHandle,
+    pub(super) subpass: u32,
+    pub(super) base_pipeline_handle: OpaqueHandle,
+    pub(super) base_pipeline_index: i32,
+}
+
+#[repr(C)]
+pub(super) struct BufferCopy2 {
+    pub(super) header: StructureHeader,
+    pub(super) src_offset: DeviceSize,
+    pub(super) dst_offset: DeviceSize,
+    pub(super) size: DeviceSize,
+}
+
+#[repr(C)]
+pub(super) struct CopyBufferInfo2 {
+    pub(super) header: StructureHeader,
+    pub(super) src_buffer: OpaqueHandle,
+    pub(super) dst_buffer: OpaqueHandle,
+    pub(super) region_count: u32,
+    pub(super) regions: *const BufferCopy2,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub(super) union ClearColorValue {
+    pub(super) float32: [f32; 4],
+    pub(super) int32: [i32; 4],
+    pub(super) uint32: [u32; 4],
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub(super) struct ClearDepthStencilValue {
+    pub(super) depth: f32,
+    pub(super) stencil: u32,
+}
+
+#[repr(C)]
+pub(super) union ClearValue {
+    pub(super) color: ClearColorValue,
+    pub(super) depth_stencil: ClearDepthStencilValue,
+}
+
+#[repr(C)]
+pub(super) struct RenderPassBeginInfo {
+    pub(super) header: StructureHeader,
+    pub(super) render_pass: OpaqueHandle,
+    pub(super) framebuffer: OpaqueHandle,
+    pub(super) render_area: Rect2D,
+    pub(super) clear_value_count: u32,
+    pub(super) clear_values: *const ClearValue,
+}
+
+#[repr(C)]
+pub(super) enum SubpassContents {
+    Inline = 0,
+    SecondaryCommandBuffers = 1,
+}
+
+#[repr(C)]
+pub(super) enum IndexType {
+    Uint16 = 0,
+    Uint32 = 1,
+}
+
 #[cfg_attr(target_os = "windows", link(name = "vulkan-1", kind = "raw-dylib"))]
 #[cfg_attr(target_os = "macos", link(name = "MoltenVK", kind = "dylib"))]
 extern "C" {
@@ -1501,4 +2222,98 @@ extern "C" {
     ) -> i32;
 
     pub(super) fn vkUnmapMemory(device: OpaqueHandle, memory: OpaqueHandle);
+
+    pub(super) fn vkCreateImageView(
+        device: OpaqueHandle,
+        create_info: *const ImageViewCreateInfo,
+        allocator: *const AllocationCallbacks,
+        image_view_ptr: *const OpaqueHandle,
+    ) -> i32;
+
+    pub(super) fn vkCreateRenderPass2(
+        device: OpaqueHandle,
+        create_info: *const RenderPassCreateInfo2,
+        allocator: *const AllocationCallbacks,
+        render_pass_ptr: *const OpaqueHandle,
+    ) -> i32;
+
+    pub(super) fn vkCreateFramebuffer(
+        device: OpaqueHandle,
+        create_info: *const FramebufferCreateInfo,
+        allocator: *const AllocationCallbacks,
+        framebuffer_ptr: *const OpaqueHandle,
+    ) -> i32;
+
+    pub(super) fn vkCreateShaderModule(
+        device: OpaqueHandle,
+        create_info: *const ShaderModuleCreateInfo,
+        allocator: *const AllocationCallbacks,
+        shader_module_ptr: *const OpaqueHandle,
+    ) -> i32;
+
+    pub(super) fn vkCreateDescriptorSetLayout(
+        device: OpaqueHandle,
+        create_info: *const DescriptorSetLayoutCreateInfo,
+        allocator: *const AllocationCallbacks,
+        descriptor_set_layout_ptr: *const OpaqueHandle,
+    ) -> i32;
+
+    pub(super) fn vkCreatePipelineLayout(
+        device: OpaqueHandle,
+        create_info: *const PipelineLayoutCreateInfo,
+        allocator: *const AllocationCallbacks,
+        pipeline_layout_ptr: *const OpaqueHandle,
+    ) -> i32;
+
+    pub(super) fn vkCreateGraphicsPipelines(
+        device: OpaqueHandle,
+        pipeline_cache: OpaqueHandle,
+        create_info_count: u32,
+        create_infos: *const GraphicsPipelineCreateInfo,
+        allocator: *const AllocationCallbacks,
+        pipelines_ptr: *const OpaqueHandle,
+    ) -> i32;
+
+    pub(super) fn vkCmdCopyBuffer2(
+        cmd_buffer: OpaqueHandle,
+        copy_buffer_info: *const CopyBufferInfo2,
+    );
+
+    pub(super) fn vkCmdBeginRenderPass(
+        cmd_buffer: OpaqueHandle,
+        begin_info: *const RenderPassBeginInfo,
+        contents: SubpassContents,
+    );
+
+    pub(super) fn vkCmdEndRenderPass(cmd_buffer: OpaqueHandle);
+
+    pub(super) fn vkCmdBindPipeline(
+        cmd_buffer: OpaqueHandle,
+        pipeline_bind_point: PipelineBindPoint,
+        pipeline: OpaqueHandle,
+    );
+
+    pub(super) fn vkCmdBindVertexBuffers(
+        cmd_buffer: OpaqueHandle,
+        first_binding: u32,
+        binding_count: u32,
+        buffers: *const OpaqueHandle,
+        offsets: *const DeviceSize,
+    );
+
+    pub(super) fn vkCmdBindIndexBuffer(
+        cmd_buffer: OpaqueHandle,
+        buffer: OpaqueHandle,
+        offset: DeviceSize,
+        index_type: IndexType,
+    );
+
+    pub(super) fn vkCmdDrawIndexed(
+        cmd_buffer: OpaqueHandle,
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        vertex_offset: i32,
+        first_instance: u32,
+    );
 }
