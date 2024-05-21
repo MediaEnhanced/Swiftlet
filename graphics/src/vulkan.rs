@@ -22,15 +22,13 @@
 
 #[macro_use]
 pub mod api;
-use std::mem;
+use std::{fs::File, io::Write, mem};
 
 use api::{
-    c_void, ptr, ApplicationInfo, CString, Format, FormatFeatureFlagBit, FormatFeatureFlags,
+    c_void, ptr, ApplicationInfo, CStr, CString, Format, FormatFeatureFlagBit, FormatFeatureFlags,
     InstanceCreateInfo, OpaqueHandle, PhysicalDeviceIdProperties, PhysicalDeviceProperties2,
     StructureHeader, StructureType, BOOL_FALSE, BOOL_TRUE,
 };
-
-use self::api::vkUnmapMemory;
 
 mod spirv;
 
@@ -63,6 +61,7 @@ mod spirv;
 #[derive(Debug)]
 pub enum Error {
     StringConversion,
+    Testing,
     VkResult(i32),
     //CannotFindPhysicalDevice,
     BadOptimalFeatures,
@@ -76,6 +75,7 @@ pub enum Error {
     SurfaceNoTransfer,
     BadSwapchainImageCount,
     InvalidMapPtr,
+    Spirv(spirv::Error),
 }
 
 pub const LAYER_NAME_VALIDATION: &str = "VK_LAYER_KHRONOS_validation";
@@ -88,7 +88,22 @@ pub const INSTANCE_EXTENSION_NAME_OS_SURFACE: &str = "VK_KHR_win32_surface";
 pub const INSTANCE_EXTENSION_NAME_OS_SURFACE: &str = "VK_EXT_metal_surface";
 pub const INSTANCE_EXTENSION_NAME_DEBUG: &str = "VK_EXT_debug_utils";
 
+pub const FUNCTION_EXTENSION_NAME_CREATE_DEBUG: &str = "vkCreateDebugUtilsMessengerEXT";
+
+fn debug_print(
+    _message_severity: api::DebugUtilsMessageSeverityFlags,
+    _message_types: api::DebugUtilsMessageTypeFlags,
+    p_callback_data: *const api::DebugUtilsMessengerCallbackData,
+    _user_data: *const c_void,
+) -> api::Bool32 {
+    let message_cstr = unsafe { CStr::from_ptr((*p_callback_data).p_message) };
+    println!("Debug Msg: {:?}\n", message_cstr);
+
+    BOOL_FALSE
+}
+
 pub struct Instance {
+    debug_create: Option<OpaqueHandle>,
     handle: OpaqueHandle,
 }
 
@@ -154,7 +169,35 @@ impl Instance {
             return Err(Error::VkResult(result));
         }
 
-        Ok(Instance { handle })
+        println!("Instance Function!");
+        let fn_name_cstr = match CString::new(FUNCTION_EXTENSION_NAME_CREATE_DEBUG) {
+            Ok(s) => s,
+            Err(_e) => return Err(Error::StringConversion),
+        };
+        let void_fn = unsafe { api::vkGetInstanceProcAddr(handle, fn_name_cstr.as_ptr()) };
+        let create_debug_fn: api::CreateDebugUtilsMessenger = unsafe { mem::transmute(void_fn) };
+
+        let debug_create_info = api::DebugUtilsMessengerCreateInfo {
+            header: StructureHeader::new(StructureType::DebugUtilsMessengerCreateInfo),
+            flags: 0,
+            message_severity: api::DebugUtilsMessageSeverityFlagBit::All
+                as api::DebugUtilsMessageSeverityFlags,
+            message_type: api::DebugUtilsMessageTypeFlagBit::All as api::DebugUtilsMessageTypeFlags,
+            pfn_user_callback: debug_print as *const api::DebugUtilsMessengerCallback,
+            user_data: ptr::null(),
+        };
+
+        let debug_create = ptr::null();
+        let result =
+            unsafe { create_debug_fn(handle, &debug_create_info, ptr::null(), &debug_create) };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        Ok(Instance {
+            debug_create: Some(debug_create),
+            handle,
+        })
     }
 }
 
@@ -474,7 +517,7 @@ impl Swapchain {
 
         let mut found_format = false;
         for sf in surface_formats {
-            if let api::Format::B8G8R8A8unorm = sf.format {
+            if let api::Format::B8G8R8A8srgb = sf.format {
                 if let api::ColorSpace::SrgbNonlinear = sf.color_space {
                     found_format = true;
                     break;
@@ -642,7 +685,7 @@ impl Swapchain {
             flags: 0,
             surface: surface_handle,
             min_image_count: SWAPCHAIN_IMAGE_COUNT,
-            image_format: api::Format::B8G8R8A8unorm,
+            image_format: api::Format::B8G8R8A8srgb,
             image_color_space: api::ColorSpace::SrgbNonlinear,
             image_extent: api::Extent2d {
                 width: surface_capabilities.current_extent.width,
@@ -1016,6 +1059,45 @@ impl Swapchain {
         if result != 0 {
             return Err(Error::VkResult(result));
         }
+
+        Ok(())
+    }
+
+    fn stage_buffer_copy(&mut self, copy_buffer_info: &api::CopyBufferInfo2) -> Result<(), Error> {
+        let cmd_buffer_begin_info = api::CommandBufferBeginInfo {
+            header: StructureHeader::new(StructureType::CommandBufferBeginInfo),
+            flags: api::CommandBufferUsageFlagBit::None as api::CommandBufferUsageFlags,
+            inheritance_info: ptr::null(),
+        };
+
+        let cmd_buffer = &self.cmd_buffer_submit_infos[0];
+        let result =
+            unsafe { api::vkBeginCommandBuffer(cmd_buffer.command_buffer, &cmd_buffer_begin_info) };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        unsafe { api::vkCmdCopyBuffer2(cmd_buffer.command_buffer, copy_buffer_info) };
+
+        let result = unsafe { api::vkEndCommandBuffer(cmd_buffer.command_buffer) };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        self.submit_info.wait_semaphore_info_count = 0;
+        self.submit_info.command_buffer_infos = cmd_buffer;
+        self.submit_info.signal_semaphore_info_count = 0;
+        let result = unsafe { api::vkQueueSubmit2(self.queue, 1, &self.submit_info, ptr::null()) };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        let result = unsafe { api::vkQueueWaitIdle(self.queue) };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+        self.submit_info.wait_semaphore_info_count = 1;
+        self.submit_info.signal_semaphore_info_count = 1;
 
         Ok(())
     }
@@ -1586,7 +1668,7 @@ impl SwapchainCpuRender {
     }
 
     pub fn render(&mut self) -> Result<(), Error> {
-        unsafe { vkUnmapMemory(self.swapchain.device.handle, self.cpu_buffer_img_mem) };
+        unsafe { api::vkUnmapMemory(self.swapchain.device.handle, self.cpu_buffer_img_mem) };
         //std::thread::sleep(std::time::Duration::from_millis(100));
 
         self.swapchain.render_next_image(self.fence)?;
@@ -1620,7 +1702,7 @@ impl SwapchainCpuRender {
             println!("{} @: {}", d, h);
         }
 
-        unsafe { vkUnmapMemory(self.swapchain.device.handle, self.img_buffer_mem) };
+        unsafe { api::vkUnmapMemory(self.swapchain.device.handle, self.img_buffer_mem) };
         Ok(())
     }
 }
@@ -1675,182 +1757,187 @@ fn create_shader_stage_from_bytes(
     })
 }
 
-const BASIC_VERTEX_SHADER_DATA: [u8; 824] = [
-    0x03, 0x02, 0x23, 0x07, 0x00, 0x06, 0x01, 0x00, 0x0b, 0x00, 0x08, 0x00, 0x1b, 0x00, 0x00,
-    0x00, // ..#.............
-    0x00, 0x00, 0x00, 0x00, 0x11, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x06,
-    0x00, // ................
-    0x01, 0x00, 0x00, 0x00, 0x47, 0x4c, 0x53, 0x4c, 0x2e, 0x73, 0x74, 0x64, 0x2e, 0x34, 0x35,
-    0x30, // ....GLSL.std.450
-    0x00, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
-    0x00, // ................
-    0x0f, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x6d, 0x61, 0x69,
-    0x6e, // ............main
-    0x00, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x03, 0x00, 0x03,
-    0x00, // ................
-    0x02, 0x00, 0x00, 0x00, 0xc2, 0x01, 0x00, 0x00, 0x05, 0x00, 0x04, 0x00, 0x04, 0x00, 0x00,
-    0x00, // ................
-    0x6d, 0x61, 0x69, 0x6e, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x06, 0x00, 0x0b, 0x00, 0x00,
-    0x00, // main............
-    0x67, 0x6c, 0x5f, 0x50, 0x65, 0x72, 0x56, 0x65, 0x72, 0x74, 0x65, 0x78, 0x00, 0x00, 0x00,
-    0x00, // gl_PerVertex....
-    0x06, 0x00, 0x06, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x67, 0x6c, 0x5f,
-    0x50, // ............gl_P
-    0x6f, 0x73, 0x69, 0x74, 0x69, 0x6f, 0x6e, 0x00, 0x06, 0x00, 0x07, 0x00, 0x0b, 0x00, 0x00,
-    0x00, // osition.........
-    0x01, 0x00, 0x00, 0x00, 0x67, 0x6c, 0x5f, 0x50, 0x6f, 0x69, 0x6e, 0x74, 0x53, 0x69, 0x7a,
-    0x65, // ....gl_PointSize
-    0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x07, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
-    0x00, // ................
-    0x67, 0x6c, 0x5f, 0x43, 0x6c, 0x69, 0x70, 0x44, 0x69, 0x73, 0x74, 0x61, 0x6e, 0x63, 0x65,
-    0x00, // gl_ClipDistance.
-    0x06, 0x00, 0x07, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x67, 0x6c, 0x5f,
-    0x43, // ............gl_C
-    0x75, 0x6c, 0x6c, 0x44, 0x69, 0x73, 0x74, 0x61, 0x6e, 0x63, 0x65, 0x00, 0x05, 0x00, 0x03,
-    0x00, // ullDistance.....
-    0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x05, 0x00, 0x12, 0x00, 0x00,
-    0x00, // ................
-    0x69, 0x6e, 0x50, 0x6f, 0x73, 0x69, 0x74, 0x69, 0x6f, 0x6e, 0x00, 0x00, 0x48, 0x00, 0x05,
-    0x00, // inPosition..H...
-    0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, // ................
-    0x48, 0x00, 0x05, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00,
-    0x00, // H...............
-    0x01, 0x00, 0x00, 0x00, 0x48, 0x00, 0x05, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
-    0x00, // ....H...........
-    0x0b, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x48, 0x00, 0x05, 0x00, 0x0b, 0x00, 0x00,
-    0x00, // ........H.......
-    0x03, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x47, 0x00, 0x03,
-    0x00, // ............G...
-    0x0b, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x47, 0x00, 0x04, 0x00, 0x12, 0x00, 0x00,
-    0x00, // ........G.......
-    0x1e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x13, 0x00, 0x02, 0x00, 0x02, 0x00, 0x00,
-    0x00, // ................
-    0x21, 0x00, 0x03, 0x00, 0x03, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x16, 0x00, 0x03,
-    0x00, // !...............
-    0x06, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x17, 0x00, 0x04, 0x00, 0x07, 0x00, 0x00,
-    0x00, // .... ...........
-    0x06, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x15, 0x00, 0x04, 0x00, 0x08, 0x00, 0x00,
-    0x00, // ................
-    0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2b, 0x00, 0x04, 0x00, 0x08, 0x00, 0x00,
-    0x00, //  .......+.......
-    0x09, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1c, 0x00, 0x04, 0x00, 0x0a, 0x00, 0x00,
-    0x00, // ................
-    0x06, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x1e, 0x00, 0x06, 0x00, 0x0b, 0x00, 0x00,
-    0x00, // ................
-    0x07, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00,
-    0x00, // ................
-    0x20, 0x00, 0x04, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00,
-    0x00, //  ...............
-    0x3b, 0x00, 0x04, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00,
-    0x00, // ;...............
-    0x15, 0x00, 0x04, 0x00, 0x0e, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
-    0x00, // ........ .......
-    0x2b, 0x00, 0x04, 0x00, 0x0e, 0x00, 0x00, 0x00, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, // +...............
-    0x17, 0x00, 0x04, 0x00, 0x10, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00,
-    0x00, // ................
-    0x20, 0x00, 0x04, 0x00, 0x11, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00,
-    0x00, //  ...............
-    0x3b, 0x00, 0x04, 0x00, 0x11, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
-    0x00, // ;...............
-    0x2b, 0x00, 0x04, 0x00, 0x06, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, // +...............
-    0x2b, 0x00, 0x04, 0x00, 0x06, 0x00, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
-    0x3f, // +..............?
-    0x20, 0x00, 0x04, 0x00, 0x19, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00,
-    0x00, //  ...............
-    0x36, 0x00, 0x05, 0x00, 0x02, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, // 6...............
-    0x03, 0x00, 0x00, 0x00, 0xf8, 0x00, 0x02, 0x00, 0x05, 0x00, 0x00, 0x00, 0x3d, 0x00, 0x04,
-    0x00, // ............=...
-    0x10, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x51, 0x00, 0x05,
-    0x00, // ............Q...
-    0x06, 0x00, 0x00, 0x00, 0x16, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, // ................
-    0x51, 0x00, 0x05, 0x00, 0x06, 0x00, 0x00, 0x00, 0x17, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00,
-    0x00, // Q...............
-    0x01, 0x00, 0x00, 0x00, 0x50, 0x00, 0x07, 0x00, 0x07, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00,
-    0x00, // ....P...........
-    0x16, 0x00, 0x00, 0x00, 0x17, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x15, 0x00, 0x00,
-    0x00, // ................
-    0x41, 0x00, 0x05, 0x00, 0x19, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00,
-    0x00, // A...............
-    0x0f, 0x00, 0x00, 0x00, 0x3e, 0x00, 0x03, 0x00, 0x1a, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00,
-    0x00, // ....>...........
-    0xfd, 0x00, 0x01, 0x00, 0x38, 0x00, 0x01, 0x00, // ....8...
-];
+fn create_shader_stage_from_word_stream(
+    device: OpaqueHandle,
+    data: &[u32],
+    stage_bit: api::ShaderStageFlagBit,
+) -> Result<api::PipelineShaderStageCreateInfo, Error> {
+    //let code_size = data.len() & !0x3;
+    let num_words = data.len();
+    let code_size = num_words * 4;
+    let mut code_data = Vec::with_capacity(num_words);
+    for d in data {
+        code_data.push(*d);
+    }
 
-const BASIC_FRAGMENT_SHADER_DATA: [u8; 336] = [
-    0x03, 0x02, 0x23, 0x07, 0x00, 0x06, 0x01, 0x00, 0x0b, 0x00, 0x08, 0x00, 0x0c, 0x00, 0x00,
-    0x00, // ..#.............
-    0x00, 0x00, 0x00, 0x00, 0x11, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x06,
-    0x00, // ................
-    0x01, 0x00, 0x00, 0x00, 0x47, 0x4c, 0x53, 0x4c, 0x2e, 0x73, 0x74, 0x64, 0x2e, 0x34, 0x35,
-    0x30, // ....GLSL.std.450
-    0x00, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
-    0x00, // ................
-    0x0f, 0x00, 0x06, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x6d, 0x61, 0x69,
-    0x6e, // ............main
-    0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x10, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00,
-    0x00, // ................
-    0x07, 0x00, 0x00, 0x00, 0x03, 0x00, 0x03, 0x00, 0x02, 0x00, 0x00, 0x00, 0xc2, 0x01, 0x00,
-    0x00, // ................
-    0x05, 0x00, 0x04, 0x00, 0x04, 0x00, 0x00, 0x00, 0x6d, 0x61, 0x69, 0x6e, 0x00, 0x00, 0x00,
-    0x00, // ........main....
-    0x05, 0x00, 0x05, 0x00, 0x09, 0x00, 0x00, 0x00, 0x6f, 0x75, 0x74, 0x43, 0x6f, 0x6c, 0x6f,
-    0x72, // ........outColor
-    0x00, 0x00, 0x00, 0x00, 0x47, 0x00, 0x04, 0x00, 0x09, 0x00, 0x00, 0x00, 0x1e, 0x00, 0x00,
-    0x00, // ....G...........
-    0x00, 0x00, 0x00, 0x00, 0x13, 0x00, 0x02, 0x00, 0x02, 0x00, 0x00, 0x00, 0x21, 0x00, 0x03,
-    0x00, // ............!...
-    0x03, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x16, 0x00, 0x03, 0x00, 0x06, 0x00, 0x00,
-    0x00, // ................
-    0x20, 0x00, 0x00, 0x00, 0x17, 0x00, 0x04, 0x00, 0x07, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00,
-    0x00, //  ...............
-    0x04, 0x00, 0x00, 0x00, 0x20, 0x00, 0x04, 0x00, 0x08, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00,
-    0x00, // .... ...........
-    0x07, 0x00, 0x00, 0x00, 0x3b, 0x00, 0x04, 0x00, 0x08, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00,
-    0x00, // ....;...........
-    0x03, 0x00, 0x00, 0x00, 0x2b, 0x00, 0x04, 0x00, 0x06, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00,
-    0x00, // ....+...........
-    0x00, 0x00, 0x80, 0x3f, 0x2c, 0x00, 0x07, 0x00, 0x07, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00,
-    0x00, // ...?,...........
-    0x0a, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00,
-    0x00, // ................
-    0x36, 0x00, 0x05, 0x00, 0x02, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, // 6...............
-    0x03, 0x00, 0x00, 0x00, 0xf8, 0x00, 0x02, 0x00, 0x05, 0x00, 0x00, 0x00, 0x3e, 0x00, 0x03,
-    0x00, // ............>...
-    0x09, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x00, 0x00, 0xfd, 0x00, 0x01, 0x00, 0x38, 0x00, 0x01,
-    0x00, // ............8...
-];
+    let shader_module_create_info = api::ShaderModuleCreateInfo {
+        header: StructureHeader::new(StructureType::ShaderModuleCreateInfo),
+        flags: 0,
+        code_size,
+        code: code_data.as_ptr(),
+    };
 
+    let shader_module = ptr::null();
+    let result = unsafe {
+        api::vkCreateShaderModule(
+            device,
+            &shader_module_create_info,
+            ptr::null(),
+            &shader_module,
+        )
+    };
+    if result != 0 {
+        return Err(Error::VkResult(result));
+    }
+
+    Ok(api::PipelineShaderStageCreateInfo {
+        header: StructureHeader::new(StructureType::PipelineShaderStageCreateInfo),
+        flags: 0,
+        stage: stage_bit as api::ShaderStageFlags,
+        module: shader_module,
+        name: MAIN_DATA.as_ptr(),
+        specialization_info: ptr::null(),
+    })
+}
+
+fn create_basic_fragment_shader(
+    _device: OpaqueHandle,
+) -> Result<api::PipelineShaderStageCreateInfo, Error> {
+    let fragment_execution_modes = [spirv::def::FragmentExecutionMode::OriginUpperLeft];
+    let fragment_interface_vars = [
+        spirv::FragmentInterfaceVariable::Output(spirv::def::PointerType::Vector(
+            spirv::def::TypeVectorDetails {
+                scalar_type: spirv::def::ScalarType::Float(spirv::def::TypeFloatDetails {
+                    bit_width: 32,
+                }),
+                count: 4,
+            },
+        )),
+        //spirv::FragmentInterfaceVariable::BuiltIn(spirv::def::FragmentBuiltIn::InstanceIndex),
+    ];
+    let (module, _fn_id, _interface_ids) = match spirv::Module::new_fragment_shader(
+        false,
+        &fragment_execution_modes,
+        &fragment_interface_vars,
+    ) {
+        Ok(res) => res,
+        Err(e) => return Err(Error::Spirv(e)),
+    };
+
+    let word_stream = module.get_word_stream();
+
+    let mut byte_stream = Vec::with_capacity(word_stream.len() * 4);
+    for w in word_stream {
+        let bytes = w.to_le_bytes();
+        byte_stream.push(bytes[0]);
+        byte_stream.push(bytes[1]);
+        byte_stream.push(bytes[2]);
+        byte_stream.push(bytes[3]);
+    }
+    let mut f = File::create("frag.bin").unwrap();
+    f.write_all(&byte_stream).unwrap();
+
+    Err(Error::Testing)
+    //create_shader_stage_from_word_stream(device, &word_stream, api::ShaderStageFlagBit::Fragment)
+}
+
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct TriangleVertex {
     pub x: f32,
     pub y: f32,
+    pub tex_x: f32,
+    pub tex_y: f32,
 }
 
+impl TriangleVertex {
+    pub fn new(x: f32, y: f32) -> Self {
+        Self {
+            x,
+            y,
+            tex_x: 0.0,
+            tex_y: 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct TriangleIndicies {
-    //Maybe add color in future
     pub p0: u16,
     pub p1: u16,
     pub p2: u16,
 }
 
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct TriangleColorFont {
+    pub linear_rgb: [f32; 3],
+    pub linear_alpha: f32,
+    pub font_index: [u32; 4],
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct GlyphSegment {
+    is_quad: f32,
+    y0: f32,
+    y1: f32,
+    yq: f32,
+    xmax: f32,
+    x0: f32,
+    x1: f32,
+    xq: f32,
+}
+
+pub type Point = (f32, f32);
+
+impl GlyphSegment {
+    pub fn new(is_quadratic: bool, p0: Point, p1: Point, pq: Point) -> Self {
+        let (is_quad, xmax) = if is_quadratic {
+            (1.0, pq.0.max(p1.0.max(p0.0)))
+        } else {
+            (0.0, p1.0.max(p0.0))
+        };
+        Self {
+            is_quad,
+            y0: p0.1,
+            y1: p1.1,
+            yq: pq.1,
+            xmax,
+            x0: p0.0,
+            x1: p1.0,
+            xq: pq.0,
+        }
+    }
+}
+
+pub struct GlyphData {
+    pub num_glyphs: u32,
+    pub num_aliasing: u32,
+    pub segment_offsets: Vec<u32>,
+    pub segment_data: Vec<GlyphSegment>,
+}
+
 pub struct SwapchainTriangleRender {
     fence: OpaqueHandle,
+    descriptor_set: OpaqueHandle,
+    descriptor_pool: OpaqueHandle,
     graphics_pipeline: OpaqueHandle,
     pipeline_layout: OpaqueHandle,
     descriptor_set_layout: OpaqueHandle,
     shader_stages: [api::PipelineShaderStageCreateInfo; 2],
+    gpu_glyph_buffer_mem: OpaqueHandle,
+    gpu_glyph_buffer: OpaqueHandle,
+    cpu_staging_buffer_mem: OpaqueHandle,
+    cpu_staging_buffer: OpaqueHandle,
     gpu_triangle_buffer_mem: OpaqueHandle,
+    gpu_color_buffer: OpaqueHandle,
     gpu_index_buffer: OpaqueHandle,
     gpu_vertex_buffer: OpaqueHandle,
     cpu_triangle_buffer_mem: OpaqueHandle,
     cpu_triangle_buffer_mem_size: u64,
+    cpu_color_buffer: OpaqueHandle,
     cpu_index_buffer: OpaqueHandle,
     cpu_vertex_buffer: OpaqueHandle,
     max_triangles: u32,
@@ -1930,6 +2017,18 @@ impl SwapchainTriangleRender {
                     api::IndexType::Uint16,
                 )
             };
+            unsafe {
+                api::vkCmdBindDescriptorSets(
+                    cmd_buffer.command_buffer,
+                    api::PipelineBindPoint::Graphics,
+                    self.pipeline_layout,
+                    0,
+                    1,
+                    &self.descriptor_set,
+                    0,
+                    ptr::null(),
+                )
+            };
             unsafe { api::vkCmdDrawIndexed(cmd_buffer.command_buffer, 0, 0, 0, 0, 0) };
 
             unsafe { api::vkCmdEndRenderPass(cmd_buffer.command_buffer) };
@@ -1943,7 +2042,11 @@ impl SwapchainTriangleRender {
         Ok(())
     }
 
-    pub fn new(swapchain: Swapchain, max_triangles: u32) -> Result<Self, Error> {
+    pub fn new(
+        mut swapchain: Swapchain,
+        max_triangles: u32,
+        glyph_data: GlyphData,
+    ) -> Result<Self, Error> {
         let (swapchain_width, swapchain_height) = swapchain.get_current_size()?;
         let swapchain_format = swapchain.swapchain_create_info.image_format;
 
@@ -2086,7 +2189,7 @@ impl SwapchainTriangleRender {
             }
         }
 
-        // Vertex Buffer and Index Buffer Create
+        // Vertex Buffer, Index Buffer, and ColorFont Buffer Create
         let vertex_buffer_size = (mem::size_of::<TriangleVertex>() * (1 << 16)) as u64;
         let mut vertex_buffer_create_info = api::BufferCreateInfo {
             header: StructureHeader::new(StructureType::BufferCreateInfo),
@@ -2135,6 +2238,30 @@ impl SwapchainTriangleRender {
             return Err(Error::VkResult(result));
         }
 
+        let color_buffer_size = (mem::size_of::<TriangleColorFont>() as u64) * max_triangles as u64;
+        let mut color_buffer_create_info = api::BufferCreateInfo {
+            header: StructureHeader::new(StructureType::BufferCreateInfo),
+            flags: api::BufferCreateFlagBit::None as api::BufferCreateFlags,
+            size: color_buffer_size,
+            usage: api::BufferUsageFlagBit::TransferSrc as api::BufferUsageFlags,
+            sharing_mode: api::SharingMode::Exclusive,
+            queue_family_index_count: 0, // Exclusive to zero here
+            p_queue_family_indices: ptr::null(),
+        };
+
+        let cpu_color_buffer = ptr::null();
+        let result: i32 = unsafe {
+            api::vkCreateBuffer(
+                swapchain.device.handle,
+                &color_buffer_create_info,
+                ptr::null(),
+                &cpu_color_buffer,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
         let mem_reqs = api::MemoryRequirements2::default();
         let buf_mem_reqs_info = api::BufferMemoryRequirementsInfo2 {
             header: StructureHeader::new(StructureType::BufferMemoryRequirementsInfo2),
@@ -2162,7 +2289,21 @@ impl SwapchainTriangleRender {
         };
         let index_buffer_mem_reqs_size = mem_reqs.size;
 
-        let cpu_triangle_buffer_mem_size = vertex_buffer_mem_reqs_size + index_buffer_mem_reqs_size;
+        let buf_mem_reqs_info = api::BufferMemoryRequirementsInfo2 {
+            header: StructureHeader::new(StructureType::BufferMemoryRequirementsInfo2),
+            buffer: cpu_color_buffer,
+        };
+        unsafe {
+            api::vkGetBufferMemoryRequirements2(
+                swapchain.device.handle,
+                &buf_mem_reqs_info,
+                &mem_reqs,
+            )
+        };
+        let color_buffer_mem_reqs_size = mem_reqs.size;
+
+        let cpu_triangle_buffer_mem_size =
+            vertex_buffer_mem_reqs_size + index_buffer_mem_reqs_size + color_buffer_mem_reqs_size;
         let mem_alloc_info = api::MemoryAllocateInfo {
             header: StructureHeader::new(StructureType::MemoryAllocateInfo),
             allocation_size: cpu_triangle_buffer_mem_size,
@@ -2196,7 +2337,14 @@ impl SwapchainTriangleRender {
             return Err(Error::VkResult(result));
         }
         bind_buf_mem_info.buffer = cpu_index_buffer;
-        bind_buf_mem_info.memory_offset = vertex_buffer_size;
+        bind_buf_mem_info.memory_offset = vertex_buffer_mem_reqs_size;
+        let result =
+            unsafe { api::vkBindBufferMemory2(swapchain.device.handle, 1, &bind_buf_mem_info) };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+        bind_buf_mem_info.buffer = cpu_color_buffer;
+        bind_buf_mem_info.memory_offset = vertex_buffer_mem_reqs_size + index_buffer_mem_reqs_size;
         let result =
             unsafe { api::vkBindBufferMemory2(swapchain.device.handle, 1, &bind_buf_mem_info) };
         if result != 0 {
@@ -2235,6 +2383,22 @@ impl SwapchainTriangleRender {
             return Err(Error::VkResult(result));
         }
 
+        color_buffer_create_info.usage = (api::BufferUsageFlagBit::TransferDst
+            as api::BufferUsageFlags)
+            | (api::BufferUsageFlagBit::StorageBuffer as api::BufferUsageFlags);
+        let gpu_color_buffer = ptr::null();
+        let result: i32 = unsafe {
+            api::vkCreateBuffer(
+                swapchain.device.handle,
+                &color_buffer_create_info,
+                ptr::null(),
+                &gpu_color_buffer,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
         let buf_mem_reqs_info = api::BufferMemoryRequirementsInfo2 {
             header: StructureHeader::new(StructureType::BufferMemoryRequirementsInfo2),
             buffer: gpu_vertex_buffer,
@@ -2261,9 +2425,24 @@ impl SwapchainTriangleRender {
         };
         let index_buffer_mem_reqs_size = mem_reqs.size;
 
+        let buf_mem_reqs_info = api::BufferMemoryRequirementsInfo2 {
+            header: StructureHeader::new(StructureType::BufferMemoryRequirementsInfo2),
+            buffer: gpu_color_buffer,
+        };
+        unsafe {
+            api::vkGetBufferMemoryRequirements2(
+                swapchain.device.handle,
+                &buf_mem_reqs_info,
+                &mem_reqs,
+            )
+        };
+        let color_buffer_mem_reqs_size = mem_reqs.size;
+
         let mem_alloc_info = api::MemoryAllocateInfo {
             header: StructureHeader::new(StructureType::MemoryAllocateInfo),
-            allocation_size: vertex_buffer_mem_reqs_size + index_buffer_mem_reqs_size,
+            allocation_size: vertex_buffer_mem_reqs_size
+                + index_buffer_mem_reqs_size
+                + color_buffer_mem_reqs_size,
             memory_type_index: swapchain
                 .device
                 .physical_device
@@ -2294,40 +2473,269 @@ impl SwapchainTriangleRender {
             return Err(Error::VkResult(result));
         }
         bind_buf_mem_info.buffer = gpu_index_buffer;
-        bind_buf_mem_info.memory_offset = vertex_buffer_size;
+        bind_buf_mem_info.memory_offset = vertex_buffer_mem_reqs_size;
+        let result =
+            unsafe { api::vkBindBufferMemory2(swapchain.device.handle, 1, &bind_buf_mem_info) };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+        bind_buf_mem_info.buffer = gpu_color_buffer;
+        bind_buf_mem_info.memory_offset = vertex_buffer_mem_reqs_size + index_buffer_mem_reqs_size;
         let result =
             unsafe { api::vkBindBufferMemory2(swapchain.device.handle, 1, &bind_buf_mem_info) };
         if result != 0 {
             return Err(Error::VkResult(result));
         }
 
+        // Glyph Data Buffer Create (Including "Staging Buffer")
+        let glyph_info_offset_size = ((glyph_data.segment_offsets.len() + 4) << 2) as u64;
+        let glyph_segment_data_size =
+            (glyph_data.segment_data.len() * mem::size_of::<GlyphSegment>()) as u64;
+        let staging_buffer_size = glyph_info_offset_size + glyph_segment_data_size;
+        println!("Staging Buffer Size in Bytes: {}", staging_buffer_size);
+        let staging_buffer_create_info = api::BufferCreateInfo {
+            header: StructureHeader::new(StructureType::BufferCreateInfo),
+            flags: api::BufferCreateFlagBit::None as api::BufferCreateFlags,
+            size: staging_buffer_size,
+            usage: api::BufferUsageFlagBit::TransferSrc as api::BufferUsageFlags,
+            sharing_mode: api::SharingMode::Exclusive,
+            queue_family_index_count: 0, // Exclusive to zero here
+            p_queue_family_indices: ptr::null(),
+        };
+
+        let cpu_staging_buffer = ptr::null();
+        let result: i32 = unsafe {
+            api::vkCreateBuffer(
+                swapchain.device.handle,
+                &staging_buffer_create_info,
+                ptr::null(),
+                &cpu_staging_buffer,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        let buf_mem_reqs_info = api::BufferMemoryRequirementsInfo2 {
+            header: StructureHeader::new(StructureType::BufferMemoryRequirementsInfo2),
+            buffer: cpu_staging_buffer,
+        };
+        unsafe {
+            api::vkGetBufferMemoryRequirements2(
+                swapchain.device.handle,
+                &buf_mem_reqs_info,
+                &mem_reqs,
+            )
+        };
+        let staging_buffer_mem_reqs_size = mem_reqs.size;
+
+        let mem_alloc_info = api::MemoryAllocateInfo {
+            header: StructureHeader::new(StructureType::MemoryAllocateInfo),
+            allocation_size: staging_buffer_mem_reqs_size,
+            memory_type_index: swapchain
+                .device
+                .physical_device
+                .basic_cpu_access_memory_type_index,
+        };
+        let cpu_staging_buffer_mem = ptr::null();
+        let result = unsafe {
+            api::vkAllocateMemory(
+                swapchain.device.handle,
+                &mem_alloc_info,
+                ptr::null(),
+                &cpu_staging_buffer_mem,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+        let bind_buf_mem_info = api::BindBufferMemoryInfo {
+            header: StructureHeader::new(StructureType::BindBufferMemoryInfo),
+            buffer: cpu_staging_buffer,
+            memory: cpu_staging_buffer_mem,
+            memory_offset: 0,
+        };
+        let result =
+            unsafe { api::vkBindBufferMemory2(swapchain.device.handle, 1, &bind_buf_mem_info) };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        let glyph_buffer_size = staging_buffer_size;
+        let glyph_buffer_create_info = api::BufferCreateInfo {
+            header: StructureHeader::new(StructureType::BufferCreateInfo),
+            flags: api::BufferCreateFlagBit::None as api::BufferCreateFlags,
+            size: glyph_buffer_size,
+            usage: (api::BufferUsageFlagBit::TransferDst as api::BufferUsageFlags)
+                | (api::BufferUsageFlagBit::StorageBuffer as api::BufferUsageFlags),
+            sharing_mode: api::SharingMode::Exclusive,
+            queue_family_index_count: 0, // Exclusive to zero here
+            p_queue_family_indices: ptr::null(),
+        };
+
+        let gpu_glyph_buffer = ptr::null();
+        let result: i32 = unsafe {
+            api::vkCreateBuffer(
+                swapchain.device.handle,
+                &glyph_buffer_create_info,
+                ptr::null(),
+                &gpu_glyph_buffer,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        let buf_mem_reqs_info = api::BufferMemoryRequirementsInfo2 {
+            header: StructureHeader::new(StructureType::BufferMemoryRequirementsInfo2),
+            buffer: gpu_glyph_buffer,
+        };
+        unsafe {
+            api::vkGetBufferMemoryRequirements2(
+                swapchain.device.handle,
+                &buf_mem_reqs_info,
+                &mem_reqs,
+            )
+        };
+        let glyph_buffer_mem_reqs_size = mem_reqs.size;
+
+        let mem_alloc_info = api::MemoryAllocateInfo {
+            header: StructureHeader::new(StructureType::MemoryAllocateInfo),
+            allocation_size: glyph_buffer_mem_reqs_size,
+            memory_type_index: swapchain
+                .device
+                .physical_device
+                .local_only_memory_type_index,
+        };
+        let gpu_glyph_buffer_mem = ptr::null();
+        let result = unsafe {
+            api::vkAllocateMemory(
+                swapchain.device.handle,
+                &mem_alloc_info,
+                ptr::null(),
+                &gpu_glyph_buffer_mem,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+        let bind_buf_mem_info = api::BindBufferMemoryInfo {
+            header: StructureHeader::new(StructureType::BindBufferMemoryInfo),
+            buffer: gpu_glyph_buffer,
+            memory: gpu_glyph_buffer_mem,
+            memory_offset: 0,
+        };
+        let result =
+            unsafe { api::vkBindBufferMemory2(swapchain.device.handle, 1, &bind_buf_mem_info) };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        // Add glyph data to staging buffer
+        let data_ptr = ptr::null_mut();
+        let result = unsafe {
+            api::vkMapMemory(
+                swapchain.device.handle,
+                cpu_staging_buffer_mem,
+                0,
+                staging_buffer_mem_reqs_size,
+                api::MemoryMapFlagBit::None as api::MemoryMapFlags,
+                &data_ptr,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+        if data_ptr.is_null() {
+            return Err(Error::InvalidMapPtr);
+        }
+        let glyph_info_offsets_len = glyph_data.segment_offsets.len() + 4;
+        let glyph_info_offsets =
+            unsafe { std::slice::from_raw_parts_mut(data_ptr as *mut u32, glyph_info_offsets_len) };
+        let index_offset = unsafe { data_ptr.add(glyph_info_offsets_len * 4) };
+        let glyph_segments = unsafe {
+            std::slice::from_raw_parts_mut(
+                index_offset as *mut GlyphSegment,
+                glyph_data.segment_data.len(),
+            )
+        };
+
+        glyph_info_offsets[0] = glyph_data.num_glyphs;
+        glyph_info_offsets[1] = glyph_data.num_aliasing;
+        glyph_info_offsets[2] = 0;
+        glyph_info_offsets[3] = 0;
+        glyph_info_offsets[4..].copy_from_slice(&glyph_data.segment_offsets);
+        glyph_segments.copy_from_slice(&glyph_data.segment_data);
+        unsafe { api::vkUnmapMemory(swapchain.device.handle, cpu_staging_buffer_mem) };
+
+        let copy_buffer_region = api::BufferCopy2 {
+            header: StructureHeader::new(StructureType::BufferCopy2),
+            src_offset: 0,
+            dst_offset: 0,
+            size: staging_buffer_size,
+        };
+        let copy_buffer_info = api::CopyBufferInfo2 {
+            header: StructureHeader::new(StructureType::CopyBufferInfo2),
+            src_buffer: cpu_staging_buffer,
+            dst_buffer: gpu_glyph_buffer,
+            region_count: 1,
+            regions: &copy_buffer_region,
+        };
+
+        swapchain.stage_buffer_copy(&copy_buffer_info)?;
+
         // Shader Stage Create
+        let vertex_shader_bytes =
+            std::fs::read(std::path::Path::new("triangle-font-vert.spv")).unwrap();
         let vertex_shader_stage = create_shader_stage_from_bytes(
             swapchain.device.handle,
-            &BASIC_VERTEX_SHADER_DATA,
+            &vertex_shader_bytes,
             api::ShaderStageFlagBit::Vertex,
         )?;
+        let fragment_shader_bytes =
+            std::fs::read(std::path::Path::new("triangle-font-frag.spv")).unwrap();
         let fragment_shader_stage = create_shader_stage_from_bytes(
             swapchain.device.handle,
-            &BASIC_FRAGMENT_SHADER_DATA,
+            &fragment_shader_bytes,
             api::ShaderStageFlagBit::Fragment,
         )?;
+        // let fragment_shader_stage = create_shader_stage_from_word_stream(
+        //     swapchain.device.handle,
+        //     &COLOR_FRAGMENT_SHADER_DATA,
+        //     api::ShaderStageFlagBit::Fragment,
+        // )?;
+        //let _fragment_shader_stage_alt = create_basic_fragment_shader(swapchain.device.handle)?;
         let shader_stages = [vertex_shader_stage, fragment_shader_stage];
 
         // Create Pipeline Layout
-        let descriptor_set_layout_binding = api::DescriptorSetLayoutBinding {
-            binding: 0,
-            descriptor_type: api::DescriptorType::UniformBuffer,
-            descriptor_count: 1,
-            stage_flags: api::ShaderStageFlagBit::Vertex as api::ShaderStageFlags,
-            immutable_samplers: ptr::null(),
-        };
-
+        let descriptor_set_layout_binding = [
+            api::DescriptorSetLayoutBinding {
+                binding: 0, // Primitive Info
+                descriptor_type: api::DescriptorType::StorageBuffer,
+                descriptor_count: 1,
+                stage_flags: api::ShaderStageFlagBit::Fragment as api::ShaderStageFlags,
+                immutable_samplers: ptr::null(),
+            },
+            api::DescriptorSetLayoutBinding {
+                binding: 1, // Font Info
+                descriptor_type: api::DescriptorType::StorageBuffer,
+                descriptor_count: 1,
+                stage_flags: api::ShaderStageFlagBit::Fragment as api::ShaderStageFlags,
+                immutable_samplers: ptr::null(),
+            },
+            api::DescriptorSetLayoutBinding {
+                binding: 2, // Glyph Segments
+                descriptor_type: api::DescriptorType::StorageBuffer,
+                descriptor_count: 1,
+                stage_flags: api::ShaderStageFlagBit::Fragment as api::ShaderStageFlags,
+                immutable_samplers: ptr::null(),
+            },
+        ];
         let descriptor_set_layout_create_info = api::DescriptorSetLayoutCreateInfo {
             header: StructureHeader::new(StructureType::DescriptorSetLayoutCreateInfo),
             flags: 0,
-            binding_count: 1,
-            bindings: &descriptor_set_layout_binding,
+            binding_count: 3,
+            bindings: descriptor_set_layout_binding.as_ptr(),
         };
 
         let descriptor_set_layout = ptr::null();
@@ -2374,7 +2782,7 @@ impl SwapchainTriangleRender {
         let vertex_input_attribute_description = api::VertexInputAttributeDescription {
             location: 0,
             binding: 0,
-            format: api::Format::R32G32sfloat,
+            format: api::Format::R32G32B32A32sfloat,
             offset: 0,
         };
         let vertex_input_create_info = api::PipelineVertexInputStateCreateInfo {
@@ -2464,12 +2872,12 @@ impl SwapchainTriangleRender {
         };
 
         let color_blend_attachment = api::PipelineColorBlendAttachmentState {
-            blend_enable: BOOL_FALSE,
+            blend_enable: BOOL_TRUE,
             src_color_blend_factor: api::BlendFactor::One,
-            dst_color_blend_factor: api::BlendFactor::Zero,
+            dst_color_blend_factor: api::BlendFactor::OneMinusSrcAlpha,
             color_blend_op: api::BlendOp::Add,
             src_alpha_blend_factor: api::BlendFactor::One,
-            dst_alpha_blend_factor: api::BlendFactor::Zero,
+            dst_alpha_blend_factor: api::BlendFactor::OneMinusSrcAlpha,
             alpha_blend_op: api::BlendOp::Add,
             color_write_mask: api::ColorComponentFlagBit::All as api::ColorComponentFlags,
         };
@@ -2518,6 +2926,109 @@ impl SwapchainTriangleRender {
             return Err(Error::VkResult(result));
         }
 
+        // Descriptor{Pool, Set, etc} Create
+        let descriptor_pool_size = api::DescriptorPoolSize {
+            descriptor_type: api::DescriptorType::StorageBuffer,
+            descriptor_count: 3,
+        };
+        let descriptor_pool_create_info = api::DescriptorPoolCreateInfo {
+            header: StructureHeader::new(StructureType::DescriptorPoolCreateInfo),
+            flags: api::DescriptorPoolCreateFlagBit::None as api::DescriptorPoolCreateFlags,
+            max_sets: 1,
+            pool_size_count: 1,
+            pool_sizes: &descriptor_pool_size,
+        };
+        let descriptor_pool = ptr::null();
+        let result = unsafe {
+            api::vkCreateDescriptorPool(
+                swapchain.device.handle,
+                &descriptor_pool_create_info,
+                ptr::null(),
+                &descriptor_pool,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        let descriptor_set_allocate_info = api::DescriptorSetAllocateInfo {
+            header: StructureHeader::new(StructureType::DescriptorSetAllocateInfo),
+            descriptor_pool,
+            descriptor_set_count: 1,
+            set_layouts: &descriptor_set_layout,
+        };
+        let descriptor_set = ptr::null();
+        let result = unsafe {
+            api::vkAllocateDescriptorSets(
+                swapchain.device.handle,
+                &descriptor_set_allocate_info,
+                &descriptor_set,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        let primitive_descriptor_buffer_info = api::DescriptorBufferInfo {
+            buffer: gpu_color_buffer,
+            offset: 0,
+            range: color_buffer_mem_reqs_size,
+        };
+        let font_descriptor_buffer_info = api::DescriptorBufferInfo {
+            buffer: gpu_glyph_buffer,
+            offset: 0,
+            range: glyph_info_offset_size,
+        };
+        let segment_descriptor_buffer_info = api::DescriptorBufferInfo {
+            buffer: gpu_glyph_buffer,
+            offset: glyph_info_offset_size,
+            range: glyph_segment_data_size,
+        };
+        let write_descriptors = [
+            api::WriteDescriptorSet {
+                header: StructureHeader::new(StructureType::WriteDescriptorSet),
+                dst_set: descriptor_set,
+                dst_binding: 0,
+                dst_array_element: 0,
+                descriptor_type: api::DescriptorType::StorageBuffer,
+                descriptor_count: 1,
+                image_info: ptr::null(),
+                buffer_info: &primitive_descriptor_buffer_info,
+                texel_buffer_view: ptr::null(),
+            },
+            api::WriteDescriptorSet {
+                header: StructureHeader::new(StructureType::WriteDescriptorSet),
+                dst_set: descriptor_set,
+                dst_binding: 1,
+                dst_array_element: 0,
+                descriptor_type: api::DescriptorType::StorageBuffer,
+                descriptor_count: 1,
+                image_info: ptr::null(),
+                buffer_info: &font_descriptor_buffer_info,
+                texel_buffer_view: ptr::null(),
+            },
+            api::WriteDescriptorSet {
+                header: StructureHeader::new(StructureType::WriteDescriptorSet),
+                dst_set: descriptor_set,
+                dst_binding: 2,
+                dst_array_element: 0,
+                descriptor_type: api::DescriptorType::StorageBuffer,
+                descriptor_count: 1,
+                image_info: ptr::null(),
+                buffer_info: &segment_descriptor_buffer_info,
+                texel_buffer_view: ptr::null(),
+            },
+        ];
+        unsafe {
+            api::vkUpdateDescriptorSets(
+                swapchain.device.handle,
+                3,
+                write_descriptors.as_ptr(),
+                0,
+                ptr::null(),
+            )
+        };
+
         // Fence Create
         let fence_create_info = api::FenceCreateInfo {
             header: StructureHeader::new(StructureType::FenceCreateInfo),
@@ -2538,15 +3049,23 @@ impl SwapchainTriangleRender {
 
         let mut scr = SwapchainTriangleRender {
             fence,
+            descriptor_set,
+            descriptor_pool,
             graphics_pipeline,
             pipeline_layout,
             descriptor_set_layout,
             shader_stages,
+            gpu_glyph_buffer_mem,
+            gpu_glyph_buffer,
+            cpu_staging_buffer_mem,
+            cpu_staging_buffer,
             gpu_triangle_buffer_mem,
+            gpu_color_buffer,
             gpu_index_buffer,
             gpu_vertex_buffer,
             cpu_triangle_buffer_mem_size,
             cpu_triangle_buffer_mem,
+            cpu_color_buffer,
             cpu_index_buffer,
             cpu_vertex_buffer,
             max_triangles,
@@ -2563,7 +3082,14 @@ impl SwapchainTriangleRender {
 
     pub fn get_verticies_and_indicies(
         &mut self,
-    ) -> Result<(&mut [TriangleVertex], &mut [TriangleIndicies]), Error> {
+    ) -> Result<
+        (
+            &mut [TriangleVertex],
+            &mut [TriangleIndicies],
+            &mut [TriangleColorFont],
+        ),
+        Error,
+    > {
         let result = unsafe {
             api::vkWaitForFences(
                 self.swapchain.device.handle,
@@ -2598,11 +3124,24 @@ impl SwapchainTriangleRender {
         if !data_ptr.is_null() {
             let index_offset =
                 unsafe { data_ptr.offset((mem::size_of::<TriangleVertex>() as isize) * (1 << 16)) };
+            let index_offset_2 = unsafe {
+                data_ptr.offset(
+                    ((mem::size_of::<TriangleVertex>() as isize) * (1 << 16))
+                        + ((mem::size_of::<TriangleIndicies>() as isize)
+                            * (self.max_triangles as isize)),
+                )
+            };
             Ok((
                 unsafe { std::slice::from_raw_parts_mut(data_ptr as *mut TriangleVertex, 1 << 16) },
                 unsafe {
                     std::slice::from_raw_parts_mut(
                         index_offset as *mut TriangleIndicies,
+                        self.max_triangles as usize,
+                    )
+                },
+                unsafe {
+                    std::slice::from_raw_parts_mut(
+                        index_offset_2 as *mut TriangleColorFont,
                         self.max_triangles as usize,
                     )
                 },
@@ -2619,9 +3158,9 @@ impl SwapchainTriangleRender {
         width: u32,
         height: u32,
     ) -> Result<(), Error> {
-        unsafe { vkUnmapMemory(self.swapchain.device.handle, self.cpu_triangle_buffer_mem) };
+        unsafe { api::vkUnmapMemory(self.swapchain.device.handle, self.cpu_triangle_buffer_mem) };
 
-        // Resize if necessarry here in future based on next image index results
+        // Resize if necessary here in future based on next image index results
         let next_image_index = self.swapchain.get_next_image_index()? as usize;
 
         let vertex_buffer_copy_region = api::BufferCopy2 {
@@ -2650,6 +3189,20 @@ impl SwapchainTriangleRender {
             dst_buffer: self.gpu_index_buffer,
             region_count: 1,
             regions: &index_buffer_copy_region,
+        };
+
+        let color_buffer_copy_region = api::BufferCopy2 {
+            header: StructureHeader::new(StructureType::BufferCopy2),
+            src_offset: 0,
+            dst_offset: 0,
+            size: (num_triangles as u64) * (mem::size_of::<TriangleColorFont>() as u64),
+        };
+        let color_buffer_copy_info = api::CopyBufferInfo2 {
+            header: StructureHeader::new(StructureType::CopyBufferInfo2),
+            src_buffer: self.cpu_color_buffer,
+            dst_buffer: self.gpu_color_buffer,
+            region_count: 1,
+            regions: &color_buffer_copy_region,
         };
 
         let cmd_buffer_begin_info = api::CommandBufferBeginInfo {
@@ -2690,6 +3243,8 @@ impl SwapchainTriangleRender {
 
         unsafe { api::vkCmdCopyBuffer2(cmd_buffer, &index_buffer_copy_info) };
 
+        unsafe { api::vkCmdCopyBuffer2(cmd_buffer, &color_buffer_copy_info) };
+
         unsafe {
             api::vkCmdBeginRenderPass(
                 cmd_buffer,
@@ -2717,7 +3272,19 @@ impl SwapchainTriangleRender {
         unsafe {
             api::vkCmdBindIndexBuffer(cmd_buffer, self.gpu_index_buffer, 0, api::IndexType::Uint16)
         };
-        unsafe { api::vkCmdDrawIndexed(cmd_buffer, num_verticies, num_triangles, 0, 0, 0) };
+        unsafe {
+            api::vkCmdBindDescriptorSets(
+                cmd_buffer,
+                api::PipelineBindPoint::Graphics,
+                self.pipeline_layout,
+                0,
+                1,
+                &self.descriptor_set,
+                0,
+                ptr::null(),
+            )
+        };
+        unsafe { api::vkCmdDrawIndexed(cmd_buffer, num_triangles * 3, 1, 0, 0, 0) };
 
         unsafe { api::vkCmdEndRenderPass(cmd_buffer) };
 

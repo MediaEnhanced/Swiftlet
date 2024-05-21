@@ -20,15 +20,16 @@
 //OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //SOFTWARE.
 
-pub(super) use std::ffi::{c_char, c_void, CString};
+pub(super) use std::ffi::{c_char, c_void, CStr, CString};
 pub(super) use std::ptr;
 
 type NullTerminatedUTF8 = *const c_char;
 type MutableU32Ptr = *const u32;
-type Bool32 = u32;
+pub(super) type Bool32 = u32;
 type DeviceSize = u64;
 type SampleCountFlags = u32;
 type ConstBytePtr = *const u8;
+type VoidFunction = unsafe extern "C" fn();
 
 pub(super) const BOOL_FALSE: u32 = 0;
 pub(super) const BOOL_TRUE: u32 = 1;
@@ -141,6 +142,7 @@ pub(super) enum StructureType {
     BufferImageCopy2 = 1000337009,
     ImageResolve2 = 1000337010,
     // Unsorted:
+    DebugUtilsMessengerCreateInfo = 1000128004,
 }
 
 #[repr(C)]
@@ -195,6 +197,109 @@ pub(super) struct OpaqueStructure {
     _unused: [u8; 0],
 }
 pub(super) type OpaqueHandle = *const OpaqueStructure;
+
+#[repr(i32)]
+pub(super) enum ObjectType {
+    Unknown = 0,
+    Instance = 1,
+    PhysicalDevice = 2,
+    Device = 3,
+    Queue = 4,
+    // VK_OBJECT_TYPE_SEMAPHORE = 5,
+    // VK_OBJECT_TYPE_COMMAND_BUFFER = 6,
+    // VK_OBJECT_TYPE_FENCE = 7,
+    // VK_OBJECT_TYPE_DEVICE_MEMORY = 8,
+    // VK_OBJECT_TYPE_BUFFER = 9,
+    // VK_OBJECT_TYPE_IMAGE = 10,
+    // VK_OBJECT_TYPE_EVENT = 11,
+    // VK_OBJECT_TYPE_QUERY_POOL = 12,
+    // VK_OBJECT_TYPE_BUFFER_VIEW = 13,
+    // VK_OBJECT_TYPE_IMAGE_VIEW = 14,
+    // VK_OBJECT_TYPE_SHADER_MODULE = 15,
+    // VK_OBJECT_TYPE_PIPELINE_CACHE = 16,
+    // VK_OBJECT_TYPE_PIPELINE_LAYOUT = 17,
+    // VK_OBJECT_TYPE_RENDER_PASS = 18,
+    // VK_OBJECT_TYPE_PIPELINE = 19,
+    // VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT = 20,
+    // VK_OBJECT_TYPE_SAMPLER = 21,
+    // VK_OBJECT_TYPE_DESCRIPTOR_POOL = 22,
+    // VK_OBJECT_TYPE_DESCRIPTOR_SET = 23,
+    // VK_OBJECT_TYPE_FRAMEBUFFER = 24,
+    // VK_OBJECT_TYPE_COMMAND_POOL = 25,
+}
+
+#[repr(u32)]
+pub(super) enum DebugUtilsMessageSeverityFlagBit {
+    Verbose = 0x1,
+    Info = 0x10,
+    Warning = 0x100,
+    Error = 0x1000,
+    All = 0x1111,
+}
+pub(super) type DebugUtilsMessageSeverityFlags = u32;
+
+#[repr(u32)]
+pub(super) enum DebugUtilsMessageTypeFlagBit {
+    General = 0x1,
+    Validation = 0x2,
+    Performance = 0x4,
+    All = 0x7,
+}
+pub(super) type DebugUtilsMessageTypeFlags = u32;
+
+#[repr(C)]
+pub(super) struct DebugUtilsLabel {
+    pub(super) header: StructureHeader,
+    pub(super) p_label_name: NullTerminatedUTF8,
+    pub(super) color: [f32; 4],
+}
+
+#[repr(C)]
+pub(super) struct DebugUtilsObjectNameInfo {
+    pub(super) header: StructureHeader,
+    pub(super) object_type: ObjectType,
+    pub(super) object_handle: u64,
+    pub(super) p_object_name: NullTerminatedUTF8,
+}
+
+#[repr(C)]
+pub(super) struct DebugUtilsMessengerCallbackData {
+    pub(super) header: StructureHeader,
+    pub(super) flags: u32,
+    pub(super) p_message_id_name: NullTerminatedUTF8,
+    pub(super) message_id_number: i32,
+    pub(super) p_message: NullTerminatedUTF8,
+    pub(super) queue_label_count: u32,
+    pub(super) p_queue_labels: *const DebugUtilsLabel,
+    pub(super) cmd_buf_label_count: u32,
+    pub(super) p_cmd_buf_labels: *const DebugUtilsLabel,
+    pub(super) object_count: u32,
+    pub(super) p_objects: *const DebugUtilsObjectNameInfo,
+}
+
+pub(super) type DebugUtilsMessengerCallback = fn(
+    message_severity: DebugUtilsMessageSeverityFlags,
+    message_types: DebugUtilsMessageTypeFlags,
+    p_callback_data: *const DebugUtilsMessengerCallbackData,
+    user_data: *const c_void,
+) -> Bool32;
+
+#[repr(C)]
+pub(super) struct DebugUtilsMessengerCreateInfo {
+    pub(super) header: StructureHeader,
+    pub(super) flags: u32,
+    pub(super) message_severity: DebugUtilsMessageSeverityFlags,
+    pub(super) message_type: DebugUtilsMessageTypeFlags,
+    pub(super) pfn_user_callback: *const DebugUtilsMessengerCallback,
+    pub(super) user_data: *const c_void,
+}
+
+pub(super) type CreateDebugUtilsMessenger = unsafe extern "C" fn(
+    instance: OpaqueHandle,
+    create_info: *const DebugUtilsMessengerCreateInfo,
+    allocator: *const AllocationCallbacks,
+    messenger_ptr: *const OpaqueHandle,
+) -> i32;
 
 #[repr(C)]
 pub(super) struct PhysicalDeviceIdProperties {
@@ -397,7 +502,9 @@ impl Default for PhysicalDeviceProperties2 {
 pub(super) enum Format {
     Undefined = 0,
     B8G8R8A8unorm = 44,
+    B8G8R8A8srgb = 50,
     R32G32sfloat = 103,
+    R32G32B32A32sfloat = 109,
 }
 
 impl Format {
@@ -1762,7 +1869,23 @@ pub(super) enum LogicOp {
 pub(super) enum BlendFactor {
     Zero = 0,
     One = 1,
-    //More in Future
+    SrcColor = 2,
+    OneMinusSrcColor = 3,
+    DstColor = 4,
+    OneMinusDstColor = 5,
+    SrcAlpha = 6,
+    OneMinusSrcAlpha = 7,
+    DstAlpha = 8,
+    OneMinusDstAlpha = 9,
+    ConstantColor = 10,
+    OneMinusConstantColor = 11,
+    ConstantAlpha = 12,
+    OneMinusConstantAlpha = 13,
+    SrcAlphaSaturate = 14,
+    Src1Color = 15,
+    OneMinusSrc1Color = 16,
+    Src1Alpha = 17,
+    OneMinusSrc1Alpha = 18,
 }
 
 #[repr(C)]
@@ -1859,6 +1982,76 @@ pub(super) struct DescriptorSetLayoutCreateInfo {
     pub(super) flags: u32,
     pub(super) binding_count: u32,
     pub(super) bindings: *const DescriptorSetLayoutBinding,
+}
+
+#[repr(u32)]
+pub(super) enum DescriptorPoolCreateFlagBit {
+    None = 0x0,
+    FreeDescriptorSet = 0x00000001,
+    UpdateAfterBind = 0x00000002,
+}
+pub(super) type DescriptorPoolCreateFlags = u32;
+
+#[repr(C)]
+pub(super) struct DescriptorPoolSize {
+    pub(super) descriptor_type: DescriptorType,
+    pub(super) descriptor_count: u32,
+}
+
+#[repr(C)]
+pub(super) struct DescriptorPoolCreateInfo {
+    pub(super) header: StructureHeader,
+    pub(super) flags: DescriptorPoolCreateFlags,
+    pub(super) max_sets: u32,
+    pub(super) pool_size_count: u32,
+    pub(super) pool_sizes: *const DescriptorPoolSize,
+}
+
+#[repr(C)]
+pub(super) struct DescriptorSetAllocateInfo {
+    pub(super) header: StructureHeader,
+    pub(super) descriptor_pool: OpaqueHandle,
+    pub(super) descriptor_set_count: u32,
+    pub(super) set_layouts: *const OpaqueHandle,
+}
+
+#[repr(C)]
+pub(super) struct DescriptorImageInfo {
+    pub(super) sampler: OpaqueHandle,
+    pub(super) image_view: OpaqueHandle,
+    pub(super) image_layout: ImageLayout,
+}
+
+#[repr(C)]
+pub(super) struct DescriptorBufferInfo {
+    pub(super) buffer: OpaqueHandle,
+    pub(super) offset: DeviceSize,
+    pub(super) range: DeviceSize,
+}
+
+#[repr(C)]
+pub(super) struct WriteDescriptorSet {
+    pub(super) header: StructureHeader,
+    pub(super) dst_set: OpaqueHandle,
+    pub(super) dst_binding: u32,
+    pub(super) dst_array_element: u32,
+    pub(super) descriptor_count: u32,
+    pub(super) descriptor_type: DescriptorType,
+    pub(super) image_info: *const DescriptorImageInfo,
+    pub(super) buffer_info: *const DescriptorBufferInfo,
+    pub(super) texel_buffer_view: *const OpaqueHandle,
+}
+
+#[repr(C)]
+pub(super) struct CopyDescriptorSet {
+    pub(super) header: StructureHeader,
+    pub(super) src_set: OpaqueHandle,
+    pub(super) src_binding: u32,
+    pub(super) src_array_element: u32,
+    pub(super) dst_set: OpaqueHandle,
+    pub(super) dst_binding: u32,
+    pub(super) dst_array_element: u32,
+    pub(super) descriptor_count: u32,
 }
 
 #[repr(C)]
@@ -1968,6 +2161,8 @@ extern "C" {
         allocator: *const AllocationCallbacks,
         instance_ptr: *const OpaqueHandle,
     ) -> i32;
+
+    pub(super) fn vkGetInstanceProcAddr(instance: OpaqueHandle, name: *const i8) -> VoidFunction;
 
     pub(super) fn vkEnumeratePhysicalDevices(
         instance: OpaqueHandle,
@@ -2258,6 +2453,27 @@ extern "C" {
         descriptor_set_layout_ptr: *const OpaqueHandle,
     ) -> i32;
 
+    pub(super) fn vkCreateDescriptorPool(
+        device: OpaqueHandle,
+        create_info: *const DescriptorPoolCreateInfo,
+        allocator: *const AllocationCallbacks,
+        descriptor_pool_ptr: *const OpaqueHandle,
+    ) -> i32;
+
+    pub(super) fn vkAllocateDescriptorSets(
+        device: OpaqueHandle,
+        allocate_info: *const DescriptorSetAllocateInfo,
+        descriptor_sets_ptr: *const OpaqueHandle,
+    ) -> i32;
+
+    pub(super) fn vkUpdateDescriptorSets(
+        device: OpaqueHandle,
+        write_descriptor_count: u32,
+        write_descriptors: *const WriteDescriptorSet,
+        copy_descriptor_count: u32,
+        copy_descriptors: *const CopyDescriptorSet,
+    );
+
     pub(super) fn vkCreatePipelineLayout(
         device: OpaqueHandle,
         create_info: *const PipelineLayoutCreateInfo,
@@ -2306,6 +2522,17 @@ extern "C" {
         buffer: OpaqueHandle,
         offset: DeviceSize,
         index_type: IndexType,
+    );
+
+    pub(super) fn vkCmdBindDescriptorSets(
+        cmd_buffer: OpaqueHandle,
+        pipeline_bind_point: PipelineBindPoint,
+        pipeline_layout: OpaqueHandle,
+        first_set: u32,
+        descriptor_set_count: u32,
+        descriptor_sets: *const OpaqueHandle,
+        dynamic_offset_count: u32,
+        dynamic_offsets: *const u32,
     );
 
     pub(super) fn vkCmdDrawIndexed(

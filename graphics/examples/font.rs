@@ -22,7 +22,7 @@
 
 use std::time::Instant;
 
-const FONT_PATH: &str = "font/opensans/OpenSans-Regular.ttf"; // Location of the Opus Song in Ogg file format
+const FONT_PATH: &str = "font/opensans/OpenSans-Regular.ttf"; // Location of the Font
 
 fn main() -> std::io::Result<()> {
     println!("Graphics Render Font Example Starting!");

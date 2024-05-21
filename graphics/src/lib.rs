@@ -29,6 +29,7 @@ pub mod vulkan;
 #[cfg_attr(target_os = "macos", path = "mac/os.rs")]
 mod os;
 pub use os::OsEventSignaler;
+use vulkan::GlyphSegment;
 //use os::{AudioInput, AudioOutput, AudioOwner};
 
 pub mod font;
@@ -225,9 +226,34 @@ pub trait VulkanTriangleCallbacks {
         &mut self,
         verticies: &mut [vulkan::TriangleVertex],
         indicies: &mut [vulkan::TriangleIndicies],
+        colors: &mut [vulkan::TriangleColorFont],
         width: u32,
         height: u32,
     ) -> (u32, u32);
+}
+
+fn create_glyph_data_from_font_glyphs(font_glyphs: &font::FontGlyphs) -> vulkan::GlyphData {
+    let num_glyphs = font_glyphs.get_num_glyphs();
+    let segment_offsets = font_glyphs.get_segment_offsets();
+    let mut segment_data = Vec::with_capacity(segment_offsets[num_glyphs as usize] as usize);
+    for glyph_index in 0..num_glyphs {
+        let segments = font_glyphs.get_segment_data(glyph_index);
+        for s in segments {
+            segment_data.push(GlyphSegment::new(
+                s.is_quadratic,
+                (s.x0, s.y0),
+                (s.x1, s.y1),
+                (s.xq, s.yq),
+            ));
+        }
+    }
+
+    vulkan::GlyphData {
+        num_glyphs,
+        num_aliasing: 1,
+        segment_offsets,
+        segment_data,
+    }
 }
 
 pub struct VulkanTriangle {
@@ -239,10 +265,12 @@ pub struct VulkanTriangle {
 }
 
 impl VulkanTriangle {
+    /// max_triangles needs to be a multiple of 8
     pub fn new(
         width: u32,
         height: u32,
         max_triangles: u32,
+        font_glyphs: &font::FontGlyphs,
     ) -> Result<(Self, os::OsEventSignaler), Error> {
         //let layer_names = [];
         let layer_names = [vulkan::LAYER_NAME_VALIDATION];
@@ -294,8 +322,10 @@ impl VulkanTriangle {
             Err(e) => return Err(Error::VulkanError(e)),
         };
 
+        let glyph_data = create_glyph_data_from_font_glyphs(font_glyphs);
+
         let swapchain_triangle_render =
-            match vulkan::SwapchainTriangleRender::new(swapchain, max_triangles) {
+            match vulkan::SwapchainTriangleRender::new(swapchain, max_triangles, glyph_data) {
                 Ok(s) => s,
                 Err(e) => return Err(Error::VulkanError(e)),
             };
@@ -331,10 +361,11 @@ impl VulkanTriangle {
             match self.draw_trigger_external.check() {
                 Ok(false) => {}
                 Ok(true) => match self.swapchain_triangle_render.get_verticies_and_indicies() {
-                    Ok((verticies, indicies)) => {
+                    Ok((verticies, indicies, colors)) => {
                         let (num_verticies, num_triangles) = callback.draw_triangles(
                             verticies,
                             indicies,
+                            colors,
                             self.render_width,
                             self.render_height,
                         );

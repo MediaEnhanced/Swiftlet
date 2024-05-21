@@ -84,13 +84,14 @@ impl swiftlet_graphics::VulkanWindowCallbacks for SimpleDisplay {
             1 => 0xFF00FF00,
             2 => 0xFFFF0000,
             3 => 0xFFFFFFFF,
-            _ => 0xFF000000,
+            4 => 0xFF000000,
+            _ => 0xFF648712,
         };
 
         pixel_data.fill(pixel_color);
 
         self.color += 1;
-        if self.color >= 4 {
+        if self.color >= 6 {
             self.color = 0;
         }
     }

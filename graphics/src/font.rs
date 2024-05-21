@@ -23,14 +23,14 @@
 use std::fmt;
 
 #[derive(Clone)]
-struct OutlineSegment {
-    is_quadratic: bool,
-    x0: f32,
-    x1: f32,
-    xq: f32,
-    y0: f32,
-    y1: f32,
-    yq: f32,
+pub struct OutlineSegment {
+    pub is_quadratic: bool,
+    pub x0: f32,
+    pub x1: f32,
+    pub xq: f32,
+    pub y0: f32,
+    pub y1: f32,
+    pub yq: f32,
 }
 
 impl OutlineSegment {
@@ -485,6 +485,60 @@ impl FontGlyphs {
                 }
                 pixel_index += 1;
             }
+        }
+    }
+
+    pub fn get_num_glyphs(&self) -> u32 {
+        self.single_byte_data.len() as u32
+    }
+
+    pub fn get_segment_offsets(&self) -> Vec<u32> {
+        let num_offsets = self.single_byte_data.len() + 1;
+        let additional_len = (4 - (num_offsets & 0x3)) & 0x3;
+        let mut segment_offsets = Vec::with_capacity(num_offsets + additional_len);
+        let mut offset = 0;
+        segment_offsets.push(offset);
+        for g in &self.single_byte_data {
+            offset += g.segments.len() as u32;
+            segment_offsets.push(offset);
+        }
+        for _i in 0..additional_len {
+            segment_offsets.push(0);
+        }
+        segment_offsets
+    }
+
+    pub fn get_segment_data(&self, glyph_index: u32) -> &[OutlineSegment] {
+        &self.single_byte_data[glyph_index as usize].segments
+    }
+
+    pub fn get_character_info(
+        &self,
+        character: char,
+        pt_size: u32,
+    ) -> (u32, f32, f32, f32, f32, f32, f32) {
+        if (' '..='~').contains(&character) {
+            let index = (character as usize) - (' ' as usize);
+            let scale = (pt_size as f32) * self.dpi_scale * 92.36;
+            let bottom_left_x = self.single_byte_data[index].top_left_x as f32;
+            let bottom_left_y = self.single_byte_data[index].bottom_right_y as f32;
+            let top_right_x = self.single_byte_data[index].bottom_right_x as f32;
+            let top_right_y = self.single_byte_data[index].top_left_y as f32;
+            let pixel_width = ((top_right_x - bottom_left_x) * scale) + 2.0;
+            let pixel_height = ((top_right_y - bottom_left_y) * scale) + 2.0;
+            let dx = 1.0 / scale;
+            //println!("Scale: {}", scale);
+            (
+                index as u32,
+                pixel_width,
+                pixel_height,
+                bottom_left_x - dx,
+                bottom_left_y - dx,
+                top_right_x + dx,
+                top_right_y + dx,
+            )
+        } else {
+            (0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         }
     }
 }
