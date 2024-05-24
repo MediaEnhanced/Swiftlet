@@ -108,7 +108,7 @@ fn main() -> std::io::Result<()> {
                 let (audio_channels, network_audio_channels, terminal_audio_channels) =
                     communication::create_audio_channels();
 
-                let mut client_terminal = client::ClientTerminal::new(
+                let mut client_terminal = client::ClientRunner::new(
                     server_address,
                     terminal_network_channels,
                     terminal_audio_channels,
@@ -129,7 +129,7 @@ fn main() -> std::io::Result<()> {
                     thread::spawn(move || client::audio::audio_thread(audio_channels));
 
                 // Start Console
-                client_terminal.run_terminal()?;
+                client_terminal.run();
                 drop(client_terminal);
 
                 // Wait for Network Thread to Finish

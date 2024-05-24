@@ -1871,45 +1871,31 @@ pub struct TriangleIndicies {
 
 #[derive(Clone, Copy)]
 #[repr(C)]
-pub struct TriangleColorFont {
+pub struct TriangleColorGlyph {
     pub linear_rgb: [f32; 3],
     pub linear_alpha: f32,
-    pub font_index: [u32; 4],
+    pub glyph_index: u32,
+    pub rays_per_outline_po2: u32,
+    pub reserved: [u32; 2],
+}
+
+pub struct TriglyphInputData<'a> {
+    pub verticies: &'a mut [TriangleVertex],
+    pub indicies: &'a mut [TriangleIndicies],
+    pub info: &'a mut [TriangleColorGlyph],
 }
 
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct GlyphSegment {
-    is_quad: f32,
-    y0: f32,
-    y1: f32,
-    yq: f32,
-    xmax: f32,
-    x0: f32,
-    x1: f32,
-    xq: f32,
-}
-
-pub type Point = (f32, f32);
-
-impl GlyphSegment {
-    pub fn new(is_quadratic: bool, p0: Point, p1: Point, pq: Point) -> Self {
-        let (is_quad, xmax) = if is_quadratic {
-            (1.0, pq.0.max(p1.0.max(p0.0)))
-        } else {
-            (0.0, p1.0.max(p0.0))
-        };
-        Self {
-            is_quad,
-            y0: p0.1,
-            y1: p1.1,
-            yq: pq.1,
-            xmax,
-            x0: p0.0,
-            x1: p1.0,
-            xq: pq.0,
-        }
-    }
+    pub is_quad: f32,
+    pub y0: f32,
+    pub y1: f32,
+    pub yq: f32,
+    pub xmax: f32,
+    pub x0: f32,
+    pub x1: f32,
+    pub xq: f32,
 }
 
 pub struct GlyphData {
@@ -1919,7 +1905,7 @@ pub struct GlyphData {
     pub segment_data: Vec<GlyphSegment>,
 }
 
-pub struct SwapchainTriangleRender {
+pub struct SwapchainTriglyphRender {
     fence: OpaqueHandle,
     descriptor_set: OpaqueHandle,
     descriptor_pool: OpaqueHandle,
@@ -1947,7 +1933,7 @@ pub struct SwapchainTriangleRender {
     swapchain: Swapchain,
 }
 
-impl SwapchainTriangleRender {
+impl SwapchainTriglyphRender {
     fn write_initial_command_buffers(&mut self, width: u32, height: u32) -> Result<(), Error> {
         let cmd_buffer_begin_info = api::CommandBufferBeginInfo {
             header: StructureHeader::new(StructureType::CommandBufferBeginInfo),
@@ -2238,7 +2224,8 @@ impl SwapchainTriangleRender {
             return Err(Error::VkResult(result));
         }
 
-        let color_buffer_size = (mem::size_of::<TriangleColorFont>() as u64) * max_triangles as u64;
+        let color_buffer_size =
+            (mem::size_of::<TriangleColorGlyph>() as u64) * max_triangles as u64;
         let mut color_buffer_create_info = api::BufferCreateInfo {
             header: StructureHeader::new(StructureType::BufferCreateInfo),
             flags: api::BufferCreateFlagBit::None as api::BufferCreateFlags,
@@ -2686,14 +2673,14 @@ impl SwapchainTriangleRender {
 
         // Shader Stage Create
         let vertex_shader_bytes =
-            std::fs::read(std::path::Path::new("triangle-font-vert.spv")).unwrap();
+            std::fs::read(std::path::Path::new("shader/triglyph-vert.spv")).unwrap();
         let vertex_shader_stage = create_shader_stage_from_bytes(
             swapchain.device.handle,
             &vertex_shader_bytes,
             api::ShaderStageFlagBit::Vertex,
         )?;
         let fragment_shader_bytes =
-            std::fs::read(std::path::Path::new("triangle-font-frag.spv")).unwrap();
+            std::fs::read(std::path::Path::new("shader/triglyph-frag.spv")).unwrap();
         let fragment_shader_stage = create_shader_stage_from_bytes(
             swapchain.device.handle,
             &fragment_shader_bytes,
@@ -3047,7 +3034,7 @@ impl SwapchainTriangleRender {
             return Err(Error::VkResult(result));
         }
 
-        let mut scr = SwapchainTriangleRender {
+        let mut scr = SwapchainTriglyphRender {
             fence,
             descriptor_set,
             descriptor_pool,
@@ -3080,16 +3067,7 @@ impl SwapchainTriangleRender {
         Ok(scr)
     }
 
-    pub fn get_verticies_and_indicies(
-        &mut self,
-    ) -> Result<
-        (
-            &mut [TriangleVertex],
-            &mut [TriangleIndicies],
-            &mut [TriangleColorFont],
-        ),
-        Error,
-    > {
+    pub fn get_data(&mut self) -> Result<TriglyphInputData, Error> {
         let result = unsafe {
             api::vkWaitForFences(
                 self.swapchain.device.handle,
@@ -3131,21 +3109,23 @@ impl SwapchainTriangleRender {
                             * (self.max_triangles as isize)),
                 )
             };
-            Ok((
-                unsafe { std::slice::from_raw_parts_mut(data_ptr as *mut TriangleVertex, 1 << 16) },
-                unsafe {
+            Ok(TriglyphInputData {
+                verticies: unsafe {
+                    std::slice::from_raw_parts_mut(data_ptr as *mut TriangleVertex, 1 << 16)
+                },
+                indicies: unsafe {
                     std::slice::from_raw_parts_mut(
                         index_offset as *mut TriangleIndicies,
                         self.max_triangles as usize,
                     )
                 },
-                unsafe {
+                info: unsafe {
                     std::slice::from_raw_parts_mut(
-                        index_offset_2 as *mut TriangleColorFont,
+                        index_offset_2 as *mut TriangleColorGlyph,
                         self.max_triangles as usize,
                     )
                 },
-            ))
+            })
         } else {
             Err(Error::InvalidMapPtr)
         }
@@ -3195,7 +3175,7 @@ impl SwapchainTriangleRender {
             header: StructureHeader::new(StructureType::BufferCopy2),
             src_offset: 0,
             dst_offset: 0,
-            size: (num_triangles as u64) * (mem::size_of::<TriangleColorFont>() as u64),
+            size: (num_triangles as u64) * (mem::size_of::<TriangleColorGlyph>() as u64),
         };
         let color_buffer_copy_info = api::CopyBufferInfo2 {
             header: StructureHeader::new(StructureType::CopyBufferInfo2),

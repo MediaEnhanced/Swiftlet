@@ -273,7 +273,7 @@ pub enum Instruction {
     Load,
 }
 impl Instruction {
-    pub fn add_words(&self, word_stream: &mut Vec<Word>) {}
+    pub fn add_words(&self, _word_stream: &mut [Word]) {}
 }
 
 struct Function<'a> {
@@ -318,7 +318,7 @@ impl<'a> Function<'a> {
         word_stream.push(word0);
         word_stream.push(self.label0_id);
 
-        let word0 = OpcodeName::Variable.get_fixed_word0();
+        let _word0 = OpcodeName::Variable.get_fixed_word0();
         // for (g, id) in &self.local_vars {
 
         // }
@@ -560,7 +560,7 @@ impl<'a> Module<'a> {
         }
     }
 
-    pub fn add_local_var(&mut self, function_id: &Id) -> Result<(), Error> {
+    pub fn add_local_var(&mut self, _function_id: &Id) -> Result<(), Error> {
         Ok(())
     }
 

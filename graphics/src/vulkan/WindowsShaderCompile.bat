@@ -10,11 +10,11 @@ if [%1] EQU [] (
 )
 
 :Vertex
-glslang.exe --target-env vulkan1.3 -o ..\..\..\bin\triangle-font-vert.spv triangle-font.vert.glsl
+glslang.exe --target-env vulkan1.3 -o ..\..\..\bin\shader\triglyph-vert.spv triglyph.vert.glsl
 if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
 
 :Fragment
-glslang.exe --target-env vulkan1.3 -o ..\..\..\bin\triangle-font-frag.spv triangle-font.frag.glsl
+glslang.exe --target-env vulkan1.3 -o ..\..\..\bin\shader\triglyph-frag.spv triglyph.frag.glsl
 if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
 
 echo.

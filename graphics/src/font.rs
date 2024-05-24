@@ -20,250 +20,499 @@
 //OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //SOFTWARE.
 
-use std::fmt;
-
-#[derive(Clone)]
-pub struct OutlineSegment {
-    pub is_quadratic: bool,
-    pub x0: f32,
-    pub x1: f32,
-    pub xq: f32,
-    pub y0: f32,
-    pub y1: f32,
-    pub yq: f32,
+#[derive(Debug)]
+pub enum Error {
+    FileRead(std::io::Error),
+    CannotCreateFontFace,
+    InvalidFont(usize),
+    FontIndexAlreadyExists,
+    GlyphNotFoundInFonts(char),
+    GlyphOutlineError(char),
+    NoGlyphIdInOutlines(u32),
 }
 
-impl OutlineSegment {
-    fn get_x_max(&self) -> f32 {
-        if self.is_quadratic {
-            self.xq.max(self.x0.max(self.x1))
+struct FontInfo {
+    data_start_index: usize,
+    data_end_index: usize,
+    index: u32,
+    dpi_scale: f32,
+    outline_offset: usize,
+}
+
+pub struct Glyphs {
+    font_data: Vec<u8>,
+    outline_data: Vec<GlyphOutlineData>,
+    rays_per_outline_po2: u8,
+    font_infos: Vec<FontInfo>,
+    unicode_buffer_opt: Option<rustybuzz::UnicodeBuffer>,
+    shape_features: Vec<rustybuzz::Feature>,
+    line_render_info: Vec<GlyphLineRenderInfo>,
+}
+
+impl Glyphs {
+    pub fn new(
+        font_path: &str,
+        font_index: u32,
+        mut rays_per_outline_po2: u8,
+        _language: &str,
+    ) -> Result<Self, Error> {
+        let font_data = match std::fs::read(font_path) {
+            Ok(d) => d,
+            Err(e) => return Err(Error::FileRead(e)),
+        };
+        let face = match rustybuzz::Face::from_slice(&font_data, font_index) {
+            Some(f) => f,
+            None => return Err(Error::CannotCreateFontFace),
+        };
+        let font_infos = vec![FontInfo {
+            data_start_index: 0,
+            data_end_index: font_data.len(),
+            index: font_index,
+            dpi_scale: 1.0 / (72.0 * (face.units_per_em() as f32)),
+            outline_offset: 0,
+        }];
+        let mut unicode_buffer = rustybuzz::UnicodeBuffer::new();
+        //unicode_buffer.set_language(rustybuzz::Language(String::from(language)));
+        unicode_buffer.set_direction(rustybuzz::Direction::LeftToRight);
+        //unicode_buffer.set_cluster_level(rustybuzz::BufferClusterLevel::Characters);
+
+        if rays_per_outline_po2 > 3 {
+            rays_per_outline_po2 = 3;
+        }
+        Ok(Self {
+            font_data,
+            font_infos,
+            outline_data: Vec::new(),
+            rays_per_outline_po2,
+            unicode_buffer_opt: Some(unicode_buffer),
+            shape_features: Vec::new(),
+            line_render_info: Vec::new(),
+        })
+    }
+
+    pub fn add_new_font(&mut self, font_path: &str, font_index: u32) -> Result<(), Error> {
+        let font_data_offset = self.font_data.len();
+        match std::fs::read(font_path) {
+            Ok(d) => self.font_data.extend_from_slice(&d),
+            Err(e) => return Err(Error::FileRead(e)),
+        }
+        let face =
+            match rustybuzz::Face::from_slice(&self.font_data[font_data_offset..], font_index) {
+                Some(f) => f,
+                None => return Err(Error::CannotCreateFontFace),
+            };
+        self.font_infos.push(FontInfo {
+            data_start_index: font_data_offset,
+            data_end_index: self.font_data.len(),
+            index: font_index,
+            dpi_scale: 1.0 / (72.0 * (face.units_per_em() as f32)),
+            outline_offset: self.outline_data.len(),
+        });
+
+        Ok(())
+    }
+
+    fn does_font_exist(&self, font: usize) -> Result<(), Error> {
+        if font < self.font_infos.len() {
+            Ok(())
         } else {
-            self.x0.max(self.x1)
+            Err(Error::InvalidFont(self.font_infos.len()))
         }
     }
 
-    fn scale_new(&self, scaler: f32) -> Self {
-        OutlineSegment {
-            is_quadratic: self.is_quadratic,
-            x0: self.x0 * scaler,
-            x1: self.x1 * scaler,
-            xq: self.xq * scaler,
-            y0: self.y0 * scaler,
-            y1: self.y1 * scaler,
-            yq: self.yq * scaler,
+    pub fn add_new_font_index(&mut self, font: usize, font_index: u32) -> Result<(), Error> {
+        self.does_font_exist(font)?;
+
+        let font_info = &self.font_infos[font];
+        for fi in &self.font_infos {
+            if (fi.data_start_index == font_info.data_start_index)
+                && (fi.data_end_index == font_info.data_end_index)
+                && (fi.index == font_info.index)
+            {
+                return Err(Error::FontIndexAlreadyExists);
+            }
+        }
+
+        let _face = match rustybuzz::Face::from_slice(
+            &self.font_data[font_info.data_start_index..font_info.data_end_index],
+            font_index,
+        ) {
+            Some(f) => f,
+            None => return Err(Error::CannotCreateFontFace),
+        };
+        self.font_infos.push(FontInfo {
+            data_start_index: font_info.data_start_index,
+            data_end_index: font_info.data_end_index,
+            index: font_index,
+            dpi_scale: font_info.dpi_scale,
+            outline_offset: self.outline_data.len(),
+        });
+
+        Ok(())
+    }
+
+    pub fn get_font_face(&self, font: usize) -> Result<rustybuzz::Face, Error> {
+        self.does_font_exist(font)?;
+        let font_info = &self.font_infos[font];
+
+        match rustybuzz::Face::from_slice(
+            &self.font_data[font_info.data_start_index..font_info.data_end_index],
+            font_info.index,
+        ) {
+            Some(f) => Ok(f),
+            None => Err(Error::CannotCreateFontFace),
         }
     }
-}
 
-impl fmt::Debug for OutlineSegment {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.is_quadratic {
-            writeln!(
-                f,
-                "({}, {}) -> ({}, {}) -> ({}, {})",
-                self.x0, self.y0, self.xq, self.yq, self.x1, self.y1
-            )
+    pub fn add_glyph_outline_data(
+        &mut self,
+        font: usize,
+        code_point_start: char,
+        code_point_end: char,
+    ) -> Result<(), Error> {
+        let font_face = self.get_font_face(font)?;
+        let outline_index_start = if font == 0 {
+            0
         } else {
-            writeln!(
-                f,
-                "({}, {}) -> ({}, {})",
-                self.x0, self.y0, self.x1, self.y1
-            )
+            self.font_infos[font - 1].outline_offset
+        };
+        let outline_index_end = self.font_infos[font].outline_offset;
+
+        let num_code_points = (code_point_end as usize) - (code_point_start as usize);
+        let mut new_outline_data: Vec<GlyphOutlineData> = Vec::with_capacity(num_code_points);
+        for cp in code_point_start..=code_point_end {
+            if let Some(glyph_id) = font_face.glyph_index(cp) {
+                let glyph_id_value = glyph_id.0 as u32;
+                match self.outline_data[outline_index_start..outline_index_end]
+                    .binary_search_by(|od| od.glyph_id.cmp(&glyph_id_value))
+                {
+                    Ok(_found_ind) => {
+                        continue;
+                    }
+                    Err(_insert_ind) => {}
+                }
+                let mut found_glyph_id = false;
+                for od in &new_outline_data {
+                    if od.glyph_id == glyph_id_value {
+                        found_glyph_id = true;
+                        break;
+                    }
+                }
+                if found_glyph_id {
+                    continue;
+                }
+
+                let mut god = GlyphOutlineData::new(glyph_id_value);
+                let _bounding_box = match font_face.outline_glyph(glyph_id, &mut god) {
+                    Some(bb) => bb,
+                    None => {
+                        if cp != ' ' {
+                            return Err(Error::GlyphOutlineError(cp));
+                        } else {
+                            rustybuzz::ttf_parser::Rect {
+                                x_min: 0,
+                                y_min: 0,
+                                x_max: 0,
+                                y_max: 0,
+                            }
+                        }
+                    }
+                };
+                // Compare bounding box in future
+                god.sort_segments_and_create_additional_segments(self.rays_per_outline_po2);
+                new_outline_data.push(god);
+            }
+        }
+
+        let new_outline_count = new_outline_data.len();
+        self.outline_data.reserve(new_outline_count);
+        let mut tail = self.outline_data.split_off(outline_index_end);
+        self.outline_data.append(&mut new_outline_data);
+        self.outline_data.append(&mut tail);
+
+        let outline_index_end = outline_index_end + new_outline_count;
+        self.outline_data[outline_index_start..outline_index_end]
+            .sort_unstable_by(|a, b| a.glyph_id.cmp(&b.glyph_id));
+
+        for fi in &mut self.font_infos[font..] {
+            fi.outline_offset += new_outline_count;
+        }
+
+        Ok(())
+    }
+
+    pub fn get_glyph_outline_data(&self) -> (&[GlyphOutlineData], u8) {
+        (&self.outline_data, self.rays_per_outline_po2)
+    }
+
+    pub fn push_text_line(&mut self, text_line: &str) {
+        if let Some(unicode_buffer) = &mut self.unicode_buffer_opt {
+            unicode_buffer.push_str(text_line);
+        } else {
+            panic!("How did this happen?");
+        }
+    }
+
+    pub fn get_glyph_line_render_info(
+        &mut self,
+        font: usize,
+        pt_size: u32,
+        dpi: f32,
+    ) -> Result<&[GlyphLineRenderInfo], Error> {
+        if let Some(unicode_buffer) = self.unicode_buffer_opt.take() {
+            let font_face = self.get_font_face(font)?;
+            let outline_index_start = if font == 0 {
+                0
+            } else {
+                self.font_infos[font - 1].outline_offset
+            };
+            let outline_index_end = self.font_infos[font].outline_offset;
+            let dpi_scale = self.font_infos[font].dpi_scale;
+            let scale = (pt_size as f32) * dpi_scale * dpi; // 92.36;
+            let dp = 1.0 / scale;
+            let glyph_buffer = rustybuzz::shape(&font_face, &self.shape_features, unicode_buffer);
+            self.line_render_info.clear();
+            let glyph_infos = glyph_buffer.glyph_infos();
+            let glyph_positions = glyph_buffer.glyph_positions();
+            for (gp_ind, gp) in glyph_positions.iter().enumerate() {
+                let glyph_id = glyph_infos[gp_ind].glyph_id;
+                // Could cache certain high probability glyphs in future
+                let outline_index = match self.outline_data[outline_index_start..outline_index_end]
+                    .binary_search_by(|od| od.glyph_id.cmp(&glyph_id))
+                {
+                    Ok(found_ind) => found_ind,
+                    Err(_insert_ind) => return Err(Error::NoGlyphIdInOutlines(glyph_id)),
+                };
+                let lri = if self.outline_data[outline_index].get_num_segments() > 0 {
+                    let u_min = self.outline_data[outline_index].x_min - dp;
+                    let u_max = self.outline_data[outline_index].x_max + dp;
+                    let v_min = self.outline_data[outline_index].y_min - dp;
+                    let v_max = self.outline_data[outline_index].y_max + dp;
+                    let pixel_width = (u_max - u_min) * scale;
+                    let pixel_height = (v_max - v_min) * scale;
+                    GlyphLineRenderInfo {
+                        outline: outline_index as u32,
+                        advance: (gp.x_advance as f32) * scale,
+                        offset: (
+                            (gp.x_offset as f32 + self.outline_data[outline_index].x_min) * scale,
+                            (gp.y_offset as f32 + self.outline_data[outline_index].y_min) * scale,
+                        ),
+                        dimensions: (pixel_width, pixel_height),
+                        p0: (u_min, v_min),
+                        p1: (u_max, v_max),
+                    }
+                } else {
+                    GlyphLineRenderInfo {
+                        outline: outline_index as u32,
+                        advance: (gp.x_advance as f32) * scale,
+                        offset: (0.0, 0.0),
+                        dimensions: (0.0, 0.0),
+                        p0: (0.0, 0.0),
+                        p1: (0.0, 0.0),
+                    }
+                };
+
+                self.line_render_info.push(lri);
+            }
+            self.unicode_buffer_opt = Some(glyph_buffer.clear());
+            Ok(&self.line_render_info)
+        } else {
+            panic!("How did this get reached?");
         }
     }
 }
 
-#[derive(Clone, Default)]
-struct SegmentCrossing {
+pub type GlyphOutlinePoint = (f32, f32);
+
+pub struct GlyphOutlineSegment {
+    pub p0: GlyphOutlinePoint,
+    pub p1: GlyphOutlinePoint,
+    pub pq: Option<GlyphOutlinePoint>,
+    pub x_max: f32,
+}
+
+pub struct GlyphOutlineData {
+    glyph_id: u32,
+    p0: GlyphOutlinePoint,
+    p1: GlyphOutlinePoint,
+    segments: Vec<GlyphOutlineSegment>,
+    x_min: f32,
     x_max: f32,
-    add_coverage: Option<f32>,
-    sub_coverage: Option<f32>,
+    y_min: f32,
+    y_max: f32,
 }
 
-impl SegmentCrossing {
-    fn new(seg: &OutlineSegment, scaler: f32, sample_pixel_y: f32) -> Option<Self> {
-        let s = seg.scale_new(scaler);
-        //print!("{:?}", s);
-        if s.is_quadratic {
-            let x_max = s.xq.max(s.x0.max(s.x1));
+const COSINE_CALC: [f32; 8] = [
+    1.0,
+    0.0,
+    #[allow(clippy::approx_constant)]
+    0.70710678,
+    #[allow(clippy::approx_constant)]
+    0.70710678,
+    0.38268343,
+    0.9238795,
+    0.9238795,
+    0.38268343,
+];
+const SINE_CALC: [f32; 8] = [
+    0.0,
+    1.0,
+    #[allow(clippy::approx_constant)]
+    -0.70710678,
+    #[allow(clippy::approx_constant)]
+    0.70710678,
+    -0.9238795,
+    -0.38268343,
+    0.38268343,
+    0.9238795,
+];
 
-            //print!("{:?}", s);
-            if s.y0 > sample_pixel_y {
-                if s.y1 <= sample_pixel_y {
-                    let ay = s.y0 - (2.0 * s.yq) + s.y1;
-                    let by = s.y0 - s.yq;
-                    let cy = s.y0 - sample_pixel_y;
-                    let d = ((by * by) - (ay * cy)).max(0.0).sqrt();
-                    let t1 = (by - d) / ay;
-                    let ax = s.x0 - (2.0 * s.xq) + s.x1;
-                    let bx = s.x0 - s.xq;
-                    let x1 = (ax * t1 - bx * 2.0) * t1 + s.x0;
-                    //if (t1 < 0.0) || (t1 > 1.0) {
-                    //println!("t1 | x1: {} | {}", t1, x1);
-                    //}
-
-                    Some(Self {
-                        x_max,
-                        add_coverage: Some(x1),
-                        sub_coverage: None,
-                    })
-                } else if s.yq <= sample_pixel_y {
-                    let ay = s.y0 - (2.0 * s.yq) + s.y1;
-                    let by = s.y0 - s.yq;
-                    let cy = s.y0 - sample_pixel_y;
-                    let d = ((by * by) - (ay * cy)).max(0.0).sqrt();
-                    let t1 = (by - d) / ay;
-                    let t2 = (by + d) / ay;
-                    let ax = s.x0 - (2.0 * s.xq) + s.x1;
-                    let bx = s.x0 - s.xq;
-                    let x1 = (ax * t1 - bx * 2.0) * t1 + s.x0;
-                    let x2 = (ax * t2 - bx * 2.0) * t2 + s.x0;
-                    //if (t1 < 0.0) || (t1 > 1.0) {
-                    //println!("t1 | x1: {} | {}", t1, x1);
-                    //}
-                    //println!("t2 | x2: {} | {}", t2, x2);
-                    Some(Self {
-                        x_max,
-                        add_coverage: Some(x1),
-                        sub_coverage: Some(x2),
-                    })
-                } else {
-                    None
-                }
-            } else if s.y1 > sample_pixel_y {
-                let ay = s.y0 - (2.0 * s.yq) + s.y1;
-                let by = s.y0 - s.yq;
-                let cy = s.y0 - sample_pixel_y;
-                let d = ((by * by) - (ay * cy)).max(0.0).sqrt();
-                let t2 = (by + d) / ay;
-                let ax = s.x0 - (2.0 * s.xq) + s.x1;
-                let bx = s.x0 - s.xq;
-                let x2 = (ax * t2 - bx * 2.0) * t2 + s.x0;
-                //println!("t2 | x2: {} | {}", t2, x2);
-                Some(Self {
-                    x_max,
-                    add_coverage: None,
-                    sub_coverage: Some(x2),
-                })
-            } else if s.yq > sample_pixel_y {
-                let ay = s.y0 - (2.0 * s.yq) + s.y1;
-                let by = s.y0 - s.yq;
-                let cy = s.y0 - sample_pixel_y;
-                let d = ((by * by) - (ay * cy)).max(0.0).sqrt();
-                let t1 = (by - d) / ay;
-                let t2 = (by + d) / ay;
-                let ax = s.x0 - (2.0 * s.xq) + s.x1;
-                let bx = s.x0 - s.xq;
-                let x1 = (ax * t1 - bx * 2.0) * t1 + s.x0;
-                let x2 = (ax * t2 - bx * 2.0) * t2 + s.x0;
-                //if (t1 < 0.0) || (t1 > 1.0) {
-                //println!("t1 | x1: {} | {}", t1, x1);
-                //}
-                //println!("t2 | x2: {} | {}", t2, x2);
-                Some(Self {
-                    x_max,
-                    add_coverage: Some(x1),
-                    sub_coverage: Some(x2),
-                })
-            } else {
-                None
-            }
-        } else {
-            let x_max = s.x0.max(s.x1);
-
-            //print!("{:?}", s);
-            if s.y0 > sample_pixel_y {
-                if s.y1 <= sample_pixel_y {
-                    let x = (sample_pixel_y - s.y0) * (s.x1 - s.x0) / (s.y1 - s.y0) + s.x0;
-                    Some(Self {
-                        x_max,
-                        add_coverage: Some(x),
-                        sub_coverage: None,
-                    })
-                } else {
-                    None
-                }
-            } else if s.y1 > sample_pixel_y {
-                let x = (sample_pixel_y - s.y0) * (s.x1 - s.x0) / (s.y1 - s.y0) + s.x0;
-                Some(Self {
-                    x_max,
-                    add_coverage: None,
-                    sub_coverage: Some(x),
-                })
-            } else {
-                None
-            }
-        }
-    }
-}
-
-struct GlyphOutline {
-    x_start: f32,
-    y_start: f32,
-    x_prev: f32,
-    y_prev: f32,
-    segments: Vec<OutlineSegment>,
-}
-
-impl GlyphOutline {
-    fn new() -> Self {
+impl GlyphOutlineData {
+    fn new(glyph_id: u32) -> Self {
         Self {
-            x_start: 0.0,
-            y_start: 0.0,
-            x_prev: 0.0,
-            y_prev: 0.0,
+            glyph_id,
+            p0: (0.0, 0.0),
+            p1: (0.0, 0.0),
             segments: Vec::new(),
+            x_min: f32::MAX,
+            x_max: f32::MIN,
+            y_min: f32::MAX,
+            y_max: f32::MIN,
         }
     }
 
-    fn get_sorted_segments_and_reset(&mut self) -> Vec<OutlineSegment> {
+    fn sort_segments_and_create_additional_segments(&mut self, rays_per_outline_po2: u8) {
         self.segments
-            .sort_unstable_by(|a, b| a.get_x_max().partial_cmp(&b.get_x_max()).unwrap().reverse());
+            .sort_unstable_by(|a, b| a.x_max.partial_cmp(&b.x_max).unwrap().reverse());
+        if rays_per_outline_po2 == 0 {
+            self.segments.shrink_to_fit();
+            return;
+        }
+
+        let num_segements_per_ray = self.segments.len();
+        let num_additional_rays = ((1 << rays_per_outline_po2) as usize) - 1;
+        self.segments
+            .reserve(num_segements_per_ray * num_additional_rays);
+        for ar in 0..num_additional_rays {
+            let cos = COSINE_CALC[ar + 1];
+            let sin = SINE_CALC[ar + 1];
+
+            let segment_start_index = self.segments.len();
+            for seg_ind in 0..num_segements_per_ray {
+                let seg = &self.segments[seg_ind];
+                let p0 = (
+                    (seg.p0.0 * cos) - (seg.p0.1 * sin),
+                    (seg.p0.0 * sin) + (seg.p0.1 * cos),
+                );
+                let p1 = (
+                    (seg.p1.0 * cos) - (seg.p1.1 * sin),
+                    (seg.p1.0 * sin) + (seg.p1.1 * cos),
+                );
+                let (pq, x_max) = if let Some(q) = seg.pq {
+                    let qx = (q.0 * cos) - (q.1 * sin);
+                    (
+                        Some((qx, (q.0 * sin) + (q.1 * cos))),
+                        qx.max(p0.0.max(p1.0)),
+                    )
+                } else {
+                    (None, p0.0.max(p1.0))
+                };
+                let rotated_gos = GlyphOutlineSegment { p0, p1, pq, x_max };
+                self.segments.push(rotated_gos);
+            }
+            self.segments[segment_start_index..]
+                .sort_unstable_by(|a, b| a.x_max.partial_cmp(&b.x_max).unwrap().reverse());
+        }
+
         self.segments.shrink_to_fit();
+    }
 
-        self.x_start = 0.0;
-        self.y_start = 0.0;
-        self.x_prev = 0.0;
-        self.y_prev = 0.0;
+    pub fn get_num_segments(&self) -> u32 {
+        self.segments.len() as u32
+    }
 
-        std::mem::take(&mut self.segments)
+    pub fn get_segment_data(&self) -> &[GlyphOutlineSegment] {
+        &self.segments
     }
 }
 
-impl ttf_parser::OutlineBuilder for GlyphOutline {
+impl rustybuzz::ttf_parser::OutlineBuilder for GlyphOutlineData {
     fn move_to(&mut self, x: f32, y: f32) {
-        self.x_start = x;
-        self.y_start = y;
-        self.x_prev = self.x_start;
-        self.y_prev = self.y_start;
+        self.p1 = (x, y);
+        self.p0 = self.p1;
+
+        if x < self.x_min {
+            self.x_min = x;
+        }
+        if x > self.x_max {
+            self.x_max = x;
+        }
+        if y < self.y_min {
+            self.y_min = y;
+        }
+        if y > self.y_max {
+            self.y_max = y;
+        }
     }
 
     fn line_to(&mut self, x: f32, y: f32) {
-        self.segments.push(OutlineSegment {
-            is_quadratic: false,
-            x0: self.x_prev,
-            x1: x,
-            xq: 0.0,
-            y0: self.y_prev,
-            y1: y,
-            yq: 0.0,
+        let x_max = x.max(self.p0.0);
+        self.segments.push(GlyphOutlineSegment {
+            p0: self.p0,
+            p1: (x, y),
+            pq: None,
+            x_max,
         });
-        self.x_prev = x;
-        self.y_prev = y;
+        self.p0 = (x, y);
+
+        if x < self.x_min {
+            self.x_min = x;
+        }
+        if x > self.x_max {
+            self.x_max = x;
+        }
+        if y < self.y_min {
+            self.y_min = y;
+        }
+        if y > self.y_max {
+            self.y_max = y;
+        }
     }
 
     fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
-        self.segments.push(OutlineSegment {
-            is_quadratic: true,
-            x0: self.x_prev,
-            x1: x,
-            xq: x1,
-            y0: self.y_prev,
-            y1: y,
-            yq: y1,
+        let x_max = x1.max(x.max(self.p0.0));
+        self.segments.push(GlyphOutlineSegment {
+            p0: self.p0,
+            p1: (x, y),
+            pq: Some((x1, y1)),
+            x_max,
         });
-        self.x_prev = x;
-        self.y_prev = y;
+        self.p0 = (x, y);
+
+        if x1 < self.x_min {
+            self.x_min = x1;
+        }
+        if x1 > self.x_max {
+            self.x_max = x1;
+        }
+        if y1 < self.y_min {
+            self.y_min = y1;
+        }
+        if y1 > self.y_max {
+            self.y_max = y1;
+        }
+        if x < self.x_min {
+            self.x_min = x;
+        }
+        if x > self.x_max {
+            self.x_max = x;
+        }
+        if y < self.y_min {
+            self.y_min = y;
+        }
+        if y > self.y_max {
+            self.y_max = y;
+        }
     }
 
     fn curve_to(&mut self, _x1: f32, _y1: f32, _x2: f32, _y2: f32, _x: f32, _y: f32) {
@@ -271,274 +520,24 @@ impl ttf_parser::OutlineBuilder for GlyphOutline {
     }
 
     fn close(&mut self) {
-        if (self.x_prev != self.x_start) || (self.y_prev != self.y_start) {
-            self.segments.push(OutlineSegment {
-                is_quadratic: false,
-                x0: self.x_prev,
-                x1: self.x_start,
-                xq: 0.0,
-                y0: self.y_prev,
-                y1: self.y_start,
-                yq: 0.0,
+        if self.p0 != self.p1 {
+            let x_max = self.p1.0.max(self.p0.0);
+            self.segments.push(GlyphOutlineSegment {
+                p0: self.p0,
+                p1: self.p1,
+                pq: None,
+                x_max,
             });
         }
     }
 }
 
-#[derive(Clone)]
-struct GlyphData {
-    horizontal_advance: u16,
-    top_left_x: i16,
-    top_left_y: i16,
-    bottom_right_x: i16,
-    bottom_right_y: i16,
-    segments: Vec<OutlineSegment>,
-}
-
-impl GlyphData {
-    fn top_left_scale_and_round(&self, scaler: f32) -> (f32, f32) {
-        //Improve actual rounding later
-        let x = ((self.top_left_x as f32) * scaler).round() + 0.5;
-        let y = ((self.top_left_y as f32) * scaler).round() - 0.5;
-        (x, y)
-    }
-
-    fn bottom_right_scale_and_round(&self, scaler: f32) -> (f32, f32) {
-        //Improve actual rounding later
-        let x = ((self.bottom_right_x as f32) * scaler).round() - 0.5;
-        let y = ((self.bottom_right_y as f32) * scaler).round() + 0.5;
-        (x, y)
-    }
-}
-
-pub struct FontGlyphs {
-    dpi_scale: f32,
-    single_byte_data: Vec<GlyphData>, // Space -> Tilde in UTF-8
-}
-
-impl FontGlyphs {
-    pub fn new(font_data: &[u8]) -> Option<Self> {
-        let face = match ttf_parser::Face::parse(font_data, 0) {
-            Ok(f) => f,
-            Err(_e) => return None,
-        };
-
-        // println!(
-        //     "Face Width, Height: {:?}, {:?}",
-        //     face.units_per_em(),
-        //     face.height()
-        // );
-        let dpi_scale = 1.0 / (72.0 * (face.units_per_em() as f32));
-
-        let space = ' ';
-        let glyph_id = match face.glyph_index(space) {
-            Some(id) => id,
-            None => return None,
-        };
-
-        let mut single_byte_data = Vec::with_capacity(94);
-
-        let horizontal_advance = face.glyph_hor_advance(glyph_id).unwrap(); //unwrap for now...
-        let mut glyph_outline = GlyphOutline::new();
-        let bounding_box =
-            face.outline_glyph(glyph_id, &mut glyph_outline)
-                .unwrap_or(ttf_parser::Rect {
-                    x_min: 0,
-                    y_min: 0,
-                    x_max: 0,
-                    y_max: 0,
-                });
-
-        let space_glyph_data = GlyphData {
-            horizontal_advance,
-            top_left_x: bounding_box.x_min,
-            top_left_y: bounding_box.y_max,
-            bottom_right_x: bounding_box.x_max,
-            bottom_right_y: bounding_box.y_min,
-            segments: glyph_outline.get_sorted_segments_and_reset(),
-        };
-        single_byte_data.push(space_glyph_data.clone());
-
-        for code_point in '!'..='~' {
-            match face.glyph_index(code_point) {
-                Some(glyph_id) => {
-                    let horizontal_advance = face.glyph_hor_advance(glyph_id).unwrap(); //unwrap for now...
-                    let bounding_box = face.outline_glyph(glyph_id, &mut glyph_outline).unwrap_or(
-                        ttf_parser::Rect {
-                            x_min: 0,
-                            y_min: 0,
-                            x_max: 0,
-                            y_max: 0,
-                        },
-                    );
-                    let glyph_data = GlyphData {
-                        horizontal_advance,
-                        top_left_x: bounding_box.x_min,
-                        top_left_y: bounding_box.y_max,
-                        bottom_right_x: bounding_box.x_max,
-                        bottom_right_y: bounding_box.y_min,
-                        segments: glyph_outline.get_sorted_segments_and_reset(),
-                    };
-                    single_byte_data.push(glyph_data);
-                }
-                None => single_byte_data.push(space_glyph_data.clone()),
-            }
-        }
-
-        Some(Self {
-            dpi_scale,
-            single_byte_data,
-        })
-    }
-
-    pub fn print_outline(&self, character: char) {
-        if (' '..='~').contains(&character) {
-            let byte_data_index = (character as usize) - (' ' as usize);
-            println!(
-                "{} Outline Data: {:?}",
-                character, self.single_byte_data[byte_data_index].segments,
-            );
-        }
-    }
-
-    pub fn render_character(
-        &self,
-        pixel_data: &mut [u32],
-        pitch: usize,
-        origin_index: usize,
-        character: char,
-        pt_size: u32,
-    ) {
-        let byte_data_index = if (' '..='~').contains(&character) {
-            (character as usize) - (' ' as usize)
-        } else {
-            return;
-        };
-
-        let scaler = pt_size as f32 * self.dpi_scale * 92.36;
-        let (top_left_x, top_left_y) =
-            &self.single_byte_data[byte_data_index].top_left_scale_and_round(scaler);
-        let (bottom_right_x, bottom_right_y) =
-            &self.single_byte_data[byte_data_index].bottom_right_scale_and_round(scaler);
-
-        let top_left_index =
-            origin_index - (pitch * (top_left_y - 0.5) as usize) + (top_left_x - 0.5) as usize;
-
-        let num_pixels_x = (bottom_right_x - top_left_x) as usize + 1;
-        let num_pixels_y = (top_left_y - bottom_right_y) as usize + 1;
-
-        let num_segments = self.single_byte_data[byte_data_index].segments.len();
-        let mut crossing_segments = vec![SegmentCrossing::default(); num_pixels_y * num_segments];
-        let mut num_crossings = vec![0; num_pixels_y];
-        #[allow(clippy::needless_range_loop)]
-        for pixel_y in 0..num_pixels_y {
-            let start_index = pixel_y * num_segments;
-            let mut index = start_index;
-            let sample_pixel_y = top_left_y - (pixel_y as f32);
-            for s in &self.single_byte_data[byte_data_index].segments {
-                if let Some(sc) = SegmentCrossing::new(s, scaler, sample_pixel_y) {
-                    crossing_segments[index] = sc;
-                    index += 1;
-                }
-            }
-            num_crossings[pixel_y] = index - start_index;
-        }
-        #[allow(clippy::needless_range_loop)]
-        for pixel_y in 0..num_pixels_y {
-            let mut pixel_index = top_left_index + (pixel_y * pitch);
-            for pixel_x in 0..num_pixels_x {
-                let mut coverage = 0.0;
-
-                let sample_pixel_x = top_left_x + (pixel_x as f32) - 0.5;
-                let start_index = pixel_y * num_segments;
-                #[allow(clippy::needless_range_loop)]
-                for sc_index in start_index..(start_index + num_crossings[pixel_y]) {
-                    if sample_pixel_x > crossing_segments[sc_index].x_max {
-                        break;
-                    }
-
-                    if let Some(add_coverage) = crossing_segments[sc_index].add_coverage {
-                        let coverage_dif = add_coverage - sample_pixel_x;
-                        if coverage_dif >= 1.0 {
-                            coverage += 1.0;
-                        } else if coverage_dif > 0.0 {
-                            coverage += coverage_dif
-                        }
-                    }
-                    if let Some(sub_coverage) = crossing_segments[sc_index].sub_coverage {
-                        let coverage_dif = sub_coverage - sample_pixel_x;
-                        if coverage_dif >= 1.0 {
-                            coverage -= 1.0;
-                        } else if coverage_dif > 0.0 {
-                            coverage -= coverage_dif
-                        }
-                    }
-                }
-
-                //println!("Sample Pixel: {}", coverage);
-                let sub_value = (255.0 * coverage.abs().clamp(0.0, 1.0)) as u32;
-                if sub_value != 0 {
-                    //println!("Coverage: {}", coverage);
-                    pixel_data[pixel_index] = 0;
-                    pixel_data[pixel_index] =
-                        0xFFFFFF - (sub_value << 16) - (sub_value << 8) - sub_value;
-                }
-                pixel_index += 1;
-            }
-        }
-    }
-
-    pub fn get_num_glyphs(&self) -> u32 {
-        self.single_byte_data.len() as u32
-    }
-
-    pub fn get_segment_offsets(&self) -> Vec<u32> {
-        let num_offsets = self.single_byte_data.len() + 1;
-        let additional_len = (4 - (num_offsets & 0x3)) & 0x3;
-        let mut segment_offsets = Vec::with_capacity(num_offsets + additional_len);
-        let mut offset = 0;
-        segment_offsets.push(offset);
-        for g in &self.single_byte_data {
-            offset += g.segments.len() as u32;
-            segment_offsets.push(offset);
-        }
-        for _i in 0..additional_len {
-            segment_offsets.push(0);
-        }
-        segment_offsets
-    }
-
-    pub fn get_segment_data(&self, glyph_index: u32) -> &[OutlineSegment] {
-        &self.single_byte_data[glyph_index as usize].segments
-    }
-
-    pub fn get_character_info(
-        &self,
-        character: char,
-        pt_size: u32,
-    ) -> (u32, f32, f32, f32, f32, f32, f32) {
-        if (' '..='~').contains(&character) {
-            let index = (character as usize) - (' ' as usize);
-            let scale = (pt_size as f32) * self.dpi_scale * 92.36;
-            let bottom_left_x = self.single_byte_data[index].top_left_x as f32;
-            let bottom_left_y = self.single_byte_data[index].bottom_right_y as f32;
-            let top_right_x = self.single_byte_data[index].bottom_right_x as f32;
-            let top_right_y = self.single_byte_data[index].top_left_y as f32;
-            let pixel_width = ((top_right_x - bottom_left_x) * scale) + 2.0;
-            let pixel_height = ((top_right_y - bottom_left_y) * scale) + 2.0;
-            let dx = 1.0 / scale;
-            //println!("Scale: {}", scale);
-            (
-                index as u32,
-                pixel_width,
-                pixel_height,
-                bottom_left_x - dx,
-                bottom_left_y - dx,
-                top_right_x + dx,
-                top_right_y + dx,
-            )
-        } else {
-            (0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-        }
-    }
+#[derive(Debug)]
+pub struct GlyphLineRenderInfo {
+    pub outline: u32,
+    pub advance: f32,
+    pub offset: GlyphOutlinePoint,
+    pub dimensions: GlyphOutlinePoint,
+    pub p0: GlyphOutlinePoint,
+    pub p1: GlyphOutlinePoint,
 }

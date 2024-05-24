@@ -28,7 +28,7 @@ autobenches = false
 
 [features]
 default = ["client"]
-client = ["dep:swiftlet_audio"]
+client = ["dep:swiftlet_audio", "dep:swiftlet_graphics"]
 
 [dependencies]
 # Argument parsing
@@ -37,7 +37,10 @@ bpaf = { version = "*", features = ["derive"] }
 # Thread Sync Requirements:
 rtrb = "*"
 
-# Terminal Requirements:
+# Client Graphics Requirements:
+swiftlet_graphics = { version = "*", path = "graphics", optional = true }
+
+# Server Terminal Requirements:
 crossterm = "*"
 ratatui = "*"
 

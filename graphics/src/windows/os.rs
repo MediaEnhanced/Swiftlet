@@ -27,7 +27,7 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Graphics::Gdi::{COLOR_BACKGROUND, HBRUSH};
 use windows::Win32::System::{LibraryLoader, Threading};
-use windows::Win32::UI::WindowsAndMessaging;
+use windows::Win32::UI::{Input::KeyboardAndMouse, WindowsAndMessaging};
 
 mod dxgi;
 mod manifest;
@@ -48,6 +48,102 @@ pub(super) fn get_device_luid() -> Result<Option<[u32; 2]>, OsError> {
         Err(e) => return Err(OsError::Dxgi(e)),
     };
     Ok(Some(interface.get_luid()))
+}
+
+#[derive(Debug)]
+pub enum KeyCode {
+    Unknown,
+    LeftMouse, // Forgot if it is considered primary for switch buttons
+    RightMouse,
+    MiddleMouse,
+    X1Mouse,
+    X2Mouse,
+    Backspace,
+    Tab,
+    Enter,
+    Escape,
+    Space,
+    LeftArrow,
+    UpArrow,
+    RightArrow,
+    DownArrow,
+    Char(char),
+    Chars(([char; 7], usize)),
+}
+
+impl KeyCode {
+    fn get_from_virtual_code(virtual_key_code: u32, scan_code: u32) -> Self {
+        // println!(
+        //     "Virtual Key Code | Scan Code: {} | {}",
+        //     virtual_key_code, scan_code
+        // );
+        match KeyboardAndMouse::VIRTUAL_KEY(virtual_key_code as u16) {
+            KeyboardAndMouse::VK_LBUTTON => Self::LeftMouse,
+            KeyboardAndMouse::VK_RBUTTON => Self::RightMouse,
+            KeyboardAndMouse::VK_MBUTTON => Self::MiddleMouse,
+            KeyboardAndMouse::VK_XBUTTON1 => Self::X1Mouse,
+            KeyboardAndMouse::VK_XBUTTON2 => Self::X2Mouse,
+            KeyboardAndMouse::VK_BACK => Self::Backspace,
+            KeyboardAndMouse::VK_TAB => Self::Tab,
+            KeyboardAndMouse::VK_RETURN => Self::Enter,
+            KeyboardAndMouse::VK_ESCAPE => Self::Escape,
+            KeyboardAndMouse::VK_SPACE => Self::Space,
+            KeyboardAndMouse::VK_LEFT => Self::LeftArrow,
+            KeyboardAndMouse::VK_UP => Self::UpArrow,
+            KeyboardAndMouse::VK_RIGHT => Self::RightArrow,
+            KeyboardAndMouse::VK_DOWN => Self::DownArrow,
+            _ => {
+                let mut keyboard_state = [0; 256];
+                unsafe { KeyboardAndMouse::GetKeyboardState(&mut keyboard_state) }.unwrap();
+                let mut u16_buff = [0; 8];
+                let code_units = unsafe {
+                    KeyboardAndMouse::ToUnicode(
+                        virtual_key_code,
+                        scan_code,
+                        Some(&keyboard_state),
+                        &mut u16_buff[..7],
+                        0x4,
+                    )
+                };
+                if code_units > 0 {
+                    let buff_iter = u16_buff.into_iter();
+                    let decode_iter = char::decode_utf16(buff_iter);
+                    let mut char_buff = ['\0'; 7];
+                    let mut char_buff_len = 0;
+                    for char_res in decode_iter {
+                        match char_res {
+                            Ok(c) => {
+                                if c == '\0' {
+                                    break;
+                                }
+                                char_buff[char_buff_len] = c;
+                                char_buff_len += 1;
+                            }
+                            Err(_e) => {
+                                char_buff[char_buff_len] = char::REPLACEMENT_CHARACTER;
+                                char_buff_len += 1;
+                            }
+                        }
+                    }
+                    #[allow(clippy::comparison_chain)]
+                    if char_buff_len == 1 {
+                        Self::Char(char_buff[0])
+                    } else if char_buff_len > 1 {
+                        Self::Chars((char_buff, char_buff_len))
+                    } else {
+                        Self::Unknown
+                    }
+                } else {
+                    Self::Unknown
+                }
+            }
+        }
+    }
+}
+
+#[repr(isize)]
+enum CallbackResult {
+    Destroy = 0,
 }
 
 unsafe extern "system" fn os_window_callback(
@@ -73,7 +169,7 @@ unsafe extern "system" fn os_window_callback(
         }
         WindowsAndMessaging::WM_DESTROY => {
             unsafe { WindowsAndMessaging::PostQuitMessage(0) };
-            LRESULT(0)
+            LRESULT(CallbackResult::Destroy as isize)
         }
         _ => unsafe { WindowsAndMessaging::DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
@@ -92,6 +188,7 @@ pub(super) enum OsWindowState {
     CloseAttempt,
     Closing,
     ShouldDrop,
+    KeyPressed(KeyCode),
 }
 
 impl OsWindow {
@@ -220,10 +317,20 @@ impl OsWindow {
             if bool_res.0 == 0 {
                 return Ok(OsWindowState::Normal);
             } else if self.msg.message != WindowsAndMessaging::WM_USER {
-                if self.msg.message != WindowsAndMessaging::WM_QUIT {
+                if self.msg.message == WindowsAndMessaging::WM_KEYDOWN {
+                    if (self.msg.lParam.0 & 0x40000000) == 0 {
+                        // Key was up previously
+                        let virtual_key_code = self.msg.wParam.0 as u32;
+                        let scan_code = (self.msg.lParam.0 >> 16) & 0xFF;
+                        return Ok(OsWindowState::KeyPressed(KeyCode::get_from_virtual_code(
+                            virtual_key_code,
+                            scan_code as u32,
+                        )));
+                    }
+                } else if self.msg.message != WindowsAndMessaging::WM_QUIT {
                     let _res = unsafe { WindowsAndMessaging::DispatchMessageW(&self.msg) };
                 } else {
-                    println!("Msg Info: {:?}", self.msg);
+                    //println!("Msg Info: {:?}", self.msg);
                     return Ok(OsWindowState::ShouldDrop);
                 }
             } else {

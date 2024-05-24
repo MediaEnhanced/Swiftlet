@@ -31,7 +31,8 @@ build = "build.rs"
 cc = { version = "1" }
 
 [dependencies]
-ttf-parser = { version = "0.20" }
+# swash = { version = "0.1.15", default-features = false, features = ["scale"]}
+rustybuzz = { version = "0.14" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.54", features = [
@@ -41,30 +42,31 @@ windows = { version = "0.54", features = [
 	"Win32_Security",
 	"Win32_Graphics_Dxgi",
 	"Win32_Graphics_Gdi",
-	"Win32_UI_WindowsAndMessaging"
+	"Win32_UI_WindowsAndMessaging",
+	"Win32_UI_Input_KeyboardAndMouse",
 ]}
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = { path = "src/icrate/crates/objc2" }
-objc2-foundation = { path = "src/icrate/framework-crates/objc2-foundation", features = [
-	"Foundation_NSString",
-	"Foundation_NSGeometry",
-	"Foundation_NSNotification",
-	"Foundation_NSObject",
-	"Foundation_NSDate",
-	"Foundation_NSThread",
-	"Foundation_NSRunLoop",
-	] }
-objc2-app-kit = { path = "src/icrate/framework-crates/objc2-app-kit", features = [
-	"AppKit_NSApplication",
-	"AppKit_NSRunningApplication",
-	"AppKit_NSGraphics",
-	"AppKit_NSGraphicsContext",
-	"AppKit_NSEvent",
-	"AppKit_NSWindow",
-	"AppKit_NSView",
-	"AppKit_NSResponder",
-	] }
+# objc2 = { path = "src/icrate/crates/objc2" }
+# objc2-foundation = { path = "src/icrate/framework-crates/objc2-foundation", features = [
+# 	"Foundation_NSString",
+# 	"Foundation_NSGeometry",
+# 	"Foundation_NSNotification",
+# 	"Foundation_NSObject",
+# 	"Foundation_NSDate",
+# 	"Foundation_NSThread",
+# 	"Foundation_NSRunLoop",
+# 	] }
+# objc2-app-kit = { path = "src/icrate/framework-crates/objc2-app-kit", features = [
+# 	"AppKit_NSApplication",
+# 	"AppKit_NSRunningApplication",
+# 	"AppKit_NSGraphics",
+# 	"AppKit_NSGraphicsContext",
+# 	"AppKit_NSEvent",
+# 	"AppKit_NSWindow",
+# 	"AppKit_NSView",
+# 	"AppKit_NSResponder",
+# 	] }
 #objc2-quartz-core = { path = "src/icrate/framework-crates/objc2-quartz-core", features = ["QuartzCore_CALayer", "QuartzCore_CAMediaTiming"] }
 rustix = { version = "0.38", features = [
     "event",
@@ -108,17 +110,8 @@ harness = false
 bench = false
 
 [[example]]
-name = "font"
-path = "examples/font.rs"
-crate-type = ["bin"]
-doc = false
-test = false
-harness = false
-bench = false
-
-[[example]]
-name = "triangle"
-path = "examples/triangle.rs"
+name = "triglyph"
+path = "examples/triglyph.rs"
 crate-type = ["bin"]
 doc = false
 test = false

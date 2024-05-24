@@ -28,6 +28,7 @@ pub mod vulkan;
 #[cfg_attr(target_os = "linux", path = "linux/os.rs")]
 #[cfg_attr(target_os = "macos", path = "mac/os.rs")]
 mod os;
+pub use os::KeyCode;
 pub use os::OsEventSignaler;
 use vulkan::GlyphSegment;
 //use os::{AudioInput, AudioOutput, AudioOwner};
@@ -221,56 +222,94 @@ impl VulkanWindow {
     }
 }
 
-pub trait VulkanTriangleCallbacks {
-    fn draw_triangles(
+pub trait VulkanTriglyphCallbacks {
+    fn draw(
         &mut self,
-        verticies: &mut [vulkan::TriangleVertex],
-        indicies: &mut [vulkan::TriangleIndicies],
-        colors: &mut [vulkan::TriangleColorFont],
+        input_data: &mut vulkan::TriglyphInputData,
         width: u32,
         height: u32,
     ) -> (u32, u32);
+
+    fn key_pressed(&mut self, key_code: KeyCode) -> bool;
+
+    fn tick(&mut self) -> bool;
 }
 
-fn create_glyph_data_from_font_glyphs(font_glyphs: &font::FontGlyphs) -> vulkan::GlyphData {
-    let num_glyphs = font_glyphs.get_num_glyphs();
-    let segment_offsets = font_glyphs.get_segment_offsets();
+fn create_glyph_data_from_glyph_outline_data(
+    glyph_outline_data: &[font::GlyphOutlineData],
+    rays_per_outline_po2: u8,
+) -> vulkan::GlyphData {
+    let num_glyphs = glyph_outline_data.len() as u32;
+
+    let num_offsets = glyph_outline_data.len() + 1;
+    let additional_len = (4 - (num_offsets & 0x3)) & 0x3;
+    let mut segment_offsets = Vec::with_capacity(num_offsets + additional_len);
+    let mut offset = 0;
+    segment_offsets.push(offset);
+    for g in glyph_outline_data {
+        offset += g.get_num_segments();
+        segment_offsets.push(offset);
+    }
+    for _i in 0..additional_len {
+        segment_offsets.push(0);
+    }
+
     let mut segment_data = Vec::with_capacity(segment_offsets[num_glyphs as usize] as usize);
-    for glyph_index in 0..num_glyphs {
-        let segments = font_glyphs.get_segment_data(glyph_index);
+    for g in glyph_outline_data {
+        let segments = g.get_segment_data();
         for s in segments {
-            segment_data.push(GlyphSegment::new(
-                s.is_quadratic,
-                (s.x0, s.y0),
-                (s.x1, s.y1),
-                (s.xq, s.yq),
-            ));
+            let glyph_segment = if let Some((xq, yq)) = s.pq {
+                GlyphSegment {
+                    is_quad: 1.0,
+                    y0: s.p0.1,
+                    y1: s.p1.1,
+                    yq,
+                    xmax: s.x_max,
+                    x0: s.p0.0,
+                    x1: s.p1.0,
+                    xq,
+                }
+            } else {
+                GlyphSegment {
+                    is_quad: 0.0,
+                    y0: s.p0.1,
+                    y1: s.p1.1,
+                    yq: 0.0,
+                    xmax: s.x_max,
+                    x0: s.p0.0,
+                    x1: s.p1.0,
+                    xq: 0.0,
+                }
+            };
+            segment_data.push(glyph_segment);
         }
     }
 
+    println!("Rays_per_outline: {}", 1 << rays_per_outline_po2);
+
     vulkan::GlyphData {
         num_glyphs,
-        num_aliasing: 1,
+        num_aliasing: rays_per_outline_po2 as u32,
         segment_offsets,
         segment_data,
     }
 }
 
-pub struct VulkanTriangle {
-    swapchain_triangle_render: vulkan::SwapchainTriangleRender,
+pub struct VulkanTriglyph {
+    swapchain_triglyph_render: vulkan::SwapchainTriglyphRender,
     window: os::OsWindow,
     draw_trigger_external: os::OsEvent,
     render_width: u32,
     render_height: u32,
 }
 
-impl VulkanTriangle {
+impl VulkanTriglyph {
     /// max_triangles needs to be a multiple of 8
     pub fn new(
         width: u32,
         height: u32,
         max_triangles: u32,
-        font_glyphs: &font::FontGlyphs,
+        glyph_outline_data: (&[font::GlyphOutlineData], u8),
     ) -> Result<(Self, os::OsEventSignaler), Error> {
         //let layer_names = [];
         let layer_names = [vulkan::LAYER_NAME_VALIDATION];
@@ -322,17 +361,18 @@ impl VulkanTriangle {
             Err(e) => return Err(Error::VulkanError(e)),
         };
 
-        let glyph_data = create_glyph_data_from_font_glyphs(font_glyphs);
+        let glyph_data =
+            create_glyph_data_from_glyph_outline_data(glyph_outline_data.0, glyph_outline_data.1);
 
         let swapchain_triangle_render =
-            match vulkan::SwapchainTriangleRender::new(swapchain, max_triangles, glyph_data) {
+            match vulkan::SwapchainTriglyphRender::new(swapchain, max_triangles, glyph_data) {
                 Ok(s) => s,
                 Err(e) => return Err(Error::VulkanError(e)),
             };
 
         Ok((
-            VulkanTriangle {
-                swapchain_triangle_render,
+            VulkanTriglyph {
+                swapchain_triglyph_render: swapchain_triangle_render,
                 window,
                 draw_trigger_external,
                 render_width: width,
@@ -342,7 +382,7 @@ impl VulkanTriangle {
         ))
     }
 
-    pub fn run(&mut self, mut callback: impl VulkanTriangleCallbacks) -> Result<(), Error> {
+    pub fn run(&mut self, callback: &mut impl VulkanTriglyphCallbacks) -> Result<(), Error> {
         // Maybe one-time setup/start code here in future
         loop {
             match self.window.process_messages() {
@@ -355,21 +395,24 @@ impl VulkanTriangle {
                 Ok(os::OsWindowState::ShouldDrop) => {
                     break;
                 }
+                Ok(os::OsWindowState::KeyPressed(key_code)) => {
+                    if callback.key_pressed(key_code) {
+                        if let Err(e) = self.window.close_window() {
+                            return Err(Error::OsError(e));
+                        }
+                    }
+                    continue;
+                }
                 Ok(_) => {}
                 Err(e) => return Err(Error::OsError(e)),
             }
-            match self.draw_trigger_external.check() {
-                Ok(false) => {}
-                Ok(true) => match self.swapchain_triangle_render.get_verticies_and_indicies() {
-                    Ok((verticies, indicies, colors)) => {
-                        let (num_verticies, num_triangles) = callback.draw_triangles(
-                            verticies,
-                            indicies,
-                            colors,
-                            self.render_width,
-                            self.render_height,
-                        );
-                        if let Err(e) = self.swapchain_triangle_render.render(
+            let should_draw = callback.tick();
+            if should_draw {
+                match self.swapchain_triglyph_render.get_data() {
+                    Ok(mut input_data) => {
+                        let (num_verticies, num_triangles) =
+                            callback.draw(&mut input_data, self.render_width, self.render_height);
+                        if let Err(e) = self.swapchain_triglyph_render.render(
                             num_verticies,
                             num_triangles,
                             self.render_width,
@@ -379,7 +422,32 @@ impl VulkanTriangle {
                         }
                     }
                     Err(e) => return Err(Error::VulkanError(e)),
-                },
+                }
+            }
+            match self.draw_trigger_external.check() {
+                Ok(false) => {}
+                Ok(true) => {
+                    if !should_draw {
+                        match self.swapchain_triglyph_render.get_data() {
+                            Ok(mut input_data) => {
+                                let (num_verticies, num_triangles) = callback.draw(
+                                    &mut input_data,
+                                    self.render_width,
+                                    self.render_height,
+                                );
+                                if let Err(e) = self.swapchain_triglyph_render.render(
+                                    num_verticies,
+                                    num_triangles,
+                                    self.render_width,
+                                    self.render_height,
+                                ) {
+                                    return Err(Error::VulkanError(e));
+                                }
+                            }
+                            Err(e) => return Err(Error::VulkanError(e)),
+                        }
+                    }
+                }
                 Err(e) => return Err(Error::OsError(e)),
             }
         }
