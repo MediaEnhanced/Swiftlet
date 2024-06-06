@@ -1,7 +1,7 @@
 #version 460
 //#extension GL_EXT_debug_printf : enable
 
-layout (location = 0) in vec2 glyphOutlineCoord; // Which is an interpolated value
+layout (location = 0) in vec2 textureCoord; // Which is an interpolated value
 layout (location = 0) out vec4 preMultipliedAlphaColorOutput;
 
 struct PrimitiveInfo {
@@ -49,22 +49,23 @@ void main()
         uint numSegments = glyphOutlines.segmentOffsets[outlineIndex + 1] - segmentStartIndex;
         uint numSegmentsPerRay = numSegments >> glyphOutlines.po2RaysPerOutline;
 
-        vec2 dF = vec2(dFdx(glyphOutlineCoord.x), -dFdy(glyphOutlineCoord.y));
+        vec2 dF = vec2(dFdx(textureCoord.x), -dFdy(textureCoord.y));
 
         float coverage = 0.0;
         float scaler = 1.0 / dF.x;
-        vec2 samplePart1 = vec2(-glyphOutlineCoord.y, glyphOutlineCoord.x);
+        vec2 samplePart1 = vec2(-textureCoord.y, textureCoord.x);
 
         uint po2RaysPerFragment = min(primitiveInfo.glyphOutlineInfo.y, glyphOutlines.po2RaysPerOutline);
         po2RaysPerFragment = min(po2RaysPerFragment, 3);
         uint rayIndex = 0;
         uint numRays = 1 << po2RaysPerFragment;
-        float avg_mult = 1.0 / float(numRays);
+        float avg_div = float(numRays);
+        //float avg_mult = 1.0 / float(numRays);
 
         // bool debug_print = numRays > 2;
         // if (debug_print) {
         //     avg_mult = 1.0;
-        //     //debugPrintfEXT("NR: (%u, %f)\n", numRays, glyphOutlineCoord.g);
+        //     //debugPrintfEXT("NR: (%u, %f)\n", numRays, textureCoord.g);
         // }
         
         while (numRays > 0) {
@@ -74,7 +75,7 @@ void main()
             //     continue;
             // }
 
-            vec2 part0 = glyphOutlineCoord * cosPreCalc[rayIndex];
+            vec2 part0 = textureCoord * cosPreCalc[rayIndex];
             vec2 part1 = samplePart1 * sinPreCalc[rayIndex];
             vec2 s = part0 + part1;
             float xCheck = s.x - (dF.x * xTestOffset[rayIndex]);
@@ -110,7 +111,7 @@ void main()
                             float add_coverage = (x1 - xCheck) * scaler;
                             coverage += clamp(add_coverage, 0.0, 1.0);
                             // if (debug_print) {
-                            //     debugPrintfEXT("AC0 %u: %f (%f, %f)\n", cnt, add_coverage, glyphOutlineCoord.r, glyphOutlineCoord.g);
+                            //     debugPrintfEXT("AC0 %u: %f (%f, %f)\n", cnt, add_coverage, textureCoord.r, textureCoord.g);
                             // }
                         } else if (segY.a <= smpY) {
                             float ay = segY.g - (2.0 * segY.a) + segY.b;
@@ -154,7 +155,7 @@ void main()
                         float sub_coverage = (x2 - xCheck) * scaler;
                         coverage -= clamp(sub_coverage, 0.0, 1.0);
                         // if (debug_print) {
-                        //     debugPrintfEXT("SC2 %u: %f (%f, %f)\n", cnt, sub_coverage, glyphOutlineCoord.r, glyphOutlineCoord.g);
+                        //     debugPrintfEXT("SC2 %u: %f (%f, %f)\n", cnt, sub_coverage, textureCoord.r, textureCoord.g);
                         // }
                     } else if (segY.a > smpY) {
                         float ay = segY.g - (2.0 * segY.a) + segY.b;
@@ -211,12 +212,12 @@ void main()
         }
 
 
-        //debugPrintfEXT("UV: (%f, %f)\n", glyphOutlineCoord.r, glyphOutlineCoord.g);
-        //bool debug_print = (glyphOutlineCoord.r > 550.0) && (glyphOutlineCoord.r < 750.0) && (glyphOutlineCoord.g > 550.0) && (glyphOutlineCoord.g < 670.0);
+        //debugPrintfEXT("UV: (%f, %f)\n", textureCoord.r, textureCoord.g);
+        //bool debug_print = (textureCoord.r > 550.0) && (textureCoord.r < 750.0) && (textureCoord.g > 550.0) && (textureCoord.g < 670.0);
         
         // if (debug_print) {
         //     debugPrintfEXT("DF: %f, %f\n", dF.x, dF.y);
-        //     //debugPrintfEXT("DF: %f, %f, %f, %f\n", dFdxCoarse(glyphOutlineCoord.r), dFdxCoarse(glyphOutlineCoord.g), dFdyCoarse(glyphOutlineCoord.r), dFdyCoarse(glyphOutlineCoord.g));
+        //     //debugPrintfEXT("DF: %f, %f, %f, %f\n", dFdxCoarse(textureCoord.r), dFdxCoarse(textureCoord.g), dFdyCoarse(textureCoord.r), dFdyCoarse(textureCoord.g));
         // }
         //debugPrintfEXT("Offset|NumSegments: %u: %u | %u\n", glyph, segment_data_offset, segment_data_length);
 
@@ -227,7 +228,7 @@ void main()
         // if (debug_print) {
         //     debugPrintfEXT("TC %f\n", coverage);
         // }
-        float alpha = clamp(abs(coverage * avg_mult), 0.0, 1.0);
+        float alpha = clamp(abs(coverage) / avg_div , 0.0, 1.0);
         //Maybe discard in future if alpha is fully transparent!
         //Also check alpha * alpha theory
         preMultipliedAlphaColorOutput = color * alpha;

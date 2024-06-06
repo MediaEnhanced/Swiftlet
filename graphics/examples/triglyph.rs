@@ -26,7 +26,7 @@ use swiftlet_graphics::vulkan::{
 };
 use swiftlet_graphics::KeyCode;
 
-const FONT_PATH: &str = "font/opensans/OpenSans-Regular.ttf"; // Location of the Font
+const FONT_PATH: &str = "font/firasans/FiraSans-Regular.ttf"; // Location of the Font
 
 fn main() -> std::io::Result<()> {
     println!("Graphics Window Starting!");
@@ -38,6 +38,7 @@ fn main() -> std::io::Result<()> {
         720,
         104 * 8,
         triangle_example.glyphs.get_glyph_outline_data(),
+        true,
     ) {
         Ok((w, s)) => (w, s),
         Err(e) => {
@@ -129,7 +130,7 @@ impl TriglyphExample {
         for (ind, v) in linear_rgb_lut.iter_mut().enumerate() {
             *v = get_linear_rgb_float_from_srgb_byte(ind as u8)
         }
-        let mut glyphs = swiftlet_graphics::font::Glyphs::new(FONT_PATH, 0, 2, "en").unwrap();
+        let mut glyphs = swiftlet_graphics::font::Glyphs::new_from_font_file(FONT_PATH, 0, 2, "en").unwrap();
         glyphs.add_glyph_outline_data(0, ' ', '~').unwrap();
         TriglyphExample {
             times_called: 0,

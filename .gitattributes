@@ -5,8 +5,16 @@
 *.bat eol=crlf
 
 # Denote all files that are truly binary and should not be modified.
-*.opus binary
-*.pem binary
-*.png binary
-&.woff2 binary
+## Executables / (Dynamic) Libraries
+*.exe binary
 *.so binary
+## Network Security Files (Certificates)
+*.pem binary
+## Audio Files
+*.opus binary
+## Graphics (Vulkan) Shader Files
+*.spv binary
+## Graphics Font and Image Files
+*.ttf binary
+*.jxl binary
+

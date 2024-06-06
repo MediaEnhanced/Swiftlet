@@ -26,7 +26,7 @@ const AUDIO_FILES: [&str; 3] = [
     "audio/song.opus",
 ];
 const TRANSFER_AUDIO: &str = "audio/transfer.opus";
-const FONT_PATH: &str = "font/opensans/OpenSans-Regular.ttf";
+const FONT_PATH: &str = "font/roboto/Roboto-Regular.ttf";
 
 pub(crate) mod audio;
 use swiftlet_audio::opus::OpusData;
@@ -43,26 +43,12 @@ use swiftlet_graphics::vulkan::{
 use swiftlet_graphics::KeyCode;
 use swiftlet_quic::endpoint::SocketAddr;
 
-fn get_linear_rgb_float_from_srgb_byte(byte_value: u8) -> f32 {
-    let base = (byte_value as f32) / 255.0;
-    if base > 0.04045 {
-        let adjusted_base = (base + 0.055) / 1.055;
-        adjusted_base.powf(2.4)
-    } else {
-        base / 12.92
-    }
-}
-
 struct Client {
     is_in_vc: bool,
     server_name: String,
     server_address: SocketAddr,
     connections: Vec<NetworkStateConnection>,
     my_conn_ind: Option<usize>,
-    debug_title: String,
-    debug_string: String,
-    debug_lines: u16,
-    debug_scroll: u16,
 
     network_channels: TerminalNetworkThreadChannels,
     audio_channels: TerminalAudioThreadChannels,
@@ -86,22 +72,18 @@ impl Client {
         network_channels: TerminalNetworkThreadChannels,
         audio_channels: TerminalAudioThreadChannels,
         glyphs: swiftlet_graphics::font::Glyphs,
-    ) -> Self {
+    ) -> std::io::Result<Self> {
         let mut linear_rgb_lut = [0.0; 256];
         for (ind, v) in linear_rgb_lut.iter_mut().enumerate() {
-            *v = get_linear_rgb_float_from_srgb_byte(ind as u8)
+            *v = swiftlet_graphics::color::get_linear_rgb_float_from_srgb_byte(ind as u8)
         }
 
-        Client {
+        Ok(Client {
             is_in_vc: false,
             server_name: String::from("Connecting..."),
             server_address,
             connections: Vec::new(),
             my_conn_ind: None,
-            debug_title: String::from("Debug"),
-            debug_string: String::from("Client Console Started!\n"),
-            debug_lines: 1,
-            debug_scroll: 0,
             network_channels,
             audio_channels,
             already_transfered: false,
@@ -115,7 +97,7 @@ impl Client {
             linear_rgb_lut,
             glyphs,
             should_draw: false,
-        }
+        })
     }
 
     fn reset_draw_stats(&mut self, width: u32, height: u32) {
@@ -341,166 +323,88 @@ impl swiftlet_graphics::VulkanTriglyphCallbacks for Client {
             0xEEEEEE,
             1.0,
         );
+
+        let server_name_pt_size = 18;
+        let server_name_line_info = self
+            .glyphs
+            .get_font_line_info(0, server_name_pt_size, self.dpi)
+            .unwrap();
+        let mut pos = self.get_vertex_for_pixel(4, 4);
+        pos.1 += server_name_line_info.0 * self.y_mult;
+
         let mut line = self.server_name.clone();
         line.push_str("  @  ");
         line.push_str(&self.server_address.to_string());
-        let mut pos = self.get_vertex_for_pixel(20, 100);
-        let pt_size = (20, 1);
+        let mut pt_size = (server_name_pt_size, 2);
         self.draw_glyph_line(pos, &line, pt_size, input_data, 0, 1.0);
+        pos.0 += 20.0 * self.x_mult;
+        pos.1 += server_name_line_info.1 * self.y_mult;
 
-        //let main_areas = self.main_layout.split(frame.size());
+        let connection_name_pt_size = 16;
+        let connection_name_line_info = self
+            .glyphs
+            .get_font_line_info(0, connection_name_pt_size, self.dpi)
+            .unwrap();
+        pt_size.0 = connection_name_pt_size;
+        if let Some(my_ind) = self.my_conn_ind {
+            line.clear();
+            line.push_str(&self.connections[my_ind].name);
+            pos.1 += connection_name_line_info.0 * self.y_mult;
+            self.draw_glyph_line(pos, &line, pt_size, input_data, 0, 1.0);
+            pos.1 += connection_name_line_info.1 * self.y_mult;
 
-        // if let Some(my_ind) = self.my_conn_ind {
-        //     let username_line = Line::default().spans([
-        //         Span::from("  "),
-        //         Span::from(self.connections[my_ind].name.clone()),
-        //         //Span::from(self.server_address.to_string()), Volume in future
-        //     ]);
+            // line.clear();
+            // let state_check = self.connections[my_ind].state;
+            // if (state_check & 0x4) > 0 {
+            //     line.push_str("In Voice Chat!  ");
+            // }
+            // if (state_check & 0x8) > 0 {
+            //     line.push_str("Voice Looped Back  ");
+            // }
+            // if (state_check & 0x2) > 0 {
+            //     line.push_str("Listening to Server Song  ");
+            // }
+            // if (state_check & 0x1) > 0 {
+            //     line.push_str("Uploading Song to Server");
+            // }
+            // pos.0 += 20.0 * self.x_mult;
+            // pos.1 += 30.0 * self.y_mult;
+            // self.draw_glyph_line(pos, &line, pt_size, input_data, 0, 1.0);
+            // pos.0 -= 20.0 * self.x_mult;
+            // pos.1 += 30.0 * self.y_mult;
 
-        //     let ivc_span = if (self.connections[my_ind].state & 0x4) == 0 {
-        //         Span::from("< >")
-        //     } else {
-        //         Span::from("<X>")
-        //     };
-        //     let vlb_span = if (self.connections[my_ind].state & 0x8) == 0 {
-        //         Span::from("< >")
-        //     } else {
-        //         Span::from("<X>")
-        //     };
-        //     let lss_span = if (self.connections[my_ind].state & 0x2) == 0 {
-        //         Span::from("< >")
-        //     } else {
-        //         Span::from("<X>")
-        //     };
-        //     let uss_span = if (self.connections[my_ind].state & 0x1) == 0 {
-        //         Span::from("< >")
-        //     } else {
-        //         Span::from("<X>")
-        //     };
+            // Render Connections and their States
 
-        //     let voice_chat_line = Line::default().spans([
-        //         Span::from("    "),
-        //         ivc_span,
-        //         Span::from(" InVoiceChat  "),
-        //         vlb_span,
-        //         Span::from(" VoiceLoopBack"),
-        //     ]);
+            for conn_ind in 0..self.connections.len() {
+                if conn_ind != my_ind {
+                    line.clear();
+                    line.push_str(&self.connections[conn_ind].name);
+                    pos.1 += connection_name_line_info.0 * self.y_mult;
+                    self.draw_glyph_line(pos, &line, pt_size, input_data, 0, 1.0);
+                    pos.1 += connection_name_line_info.1 * self.y_mult;
 
-        //     let server_listen_line = Line::default().spans([
-        //         Span::from("    "),
-        //         lss_span,
-        //         Span::from(" ListenToServerSong"),
-        //     ]);
-
-        //     let upload_song_line = Line::default().spans([
-        //         Span::from("    "),
-        //         uss_span,
-        //         Span::from(" UploadSongToServer"),
-        //     ]);
-
-        //     let blank_line = Line::default();
-
-        //     let header_list = List::new([
-        //         server_line,
-        //         username_line,
-        //         voice_chat_line,
-        //         server_listen_line,
-        //         upload_song_line,
-        //         blank_line,
-        //     ]);
-
-        //     frame.render_widget(header_list, main_areas[0]);
-
-        //     // Render Connections and their States
-        //     let mut rows = Vec::new();
-        //     for (conn_ind, conn) in self.connections.iter().enumerate() {
-        //         if conn_ind != my_ind {
-        //             let mut row = Vec::new();
-        //             let mut username_string = String::from("    ");
-        //             username_string.push_str(&conn.name);
-        //             let username_cell = Cell::from(username_string);
-        //             row.push(username_cell);
-
-        //             let mut state_test = 1;
-        //             for i in 1..8 {
-        //                 if conn.state & state_test > 0 {
-        //                     row.push(Cell::from("<X>"));
-        //                 } else {
-        //                     row.push(Cell::from("< >"));
-        //                 }
-        //                 state_test <<= 1;
-        //             }
-
-        //             rows.push(Row::new(row));
-        //         }
-        //     }
-
-        //     let header_row = [
-        //         String::from("  Peers"),
-        //         String::from("LSS"),
-        //         String::from("USS"),
-        //         String::from("IVC"),
-        //         String::from("VLB"),
-        //     ];
-
-        //     let widths = [
-        //         Constraint::Length(38),
-        //         Constraint::Length(4),
-        //         Constraint::Length(4),
-        //         Constraint::Length(4),
-        //         Constraint::Length(4),
-        //     ];
-
-        //     let table = Table::new(rows, widths)
-        //         .header(Row::new(header_row))
-        //         .column_spacing(0);
-
-        //     frame.render_widget(table, main_areas[1]);
-        // } else {
-        //     //let blank_lines = [Line::default(); 5];
-        //     let header_list = List::new([
-        //         server_line,
-        //         Line::default(),
-        //         Line::default(),
-        //         Line::default(),
-        //         Line::default(),
-        //         Line::default(),
-        //     ]);
-        //     frame.render_widget(header_list, main_areas[0]);
-
-        //     frame.render_widget(Clear, main_areas[1]);
-        // }
-
-        // frame.render_widget(Clear, main_areas[2]);
-
-        // // Render Debug Text
-        // frame.render_widget(
-        //     Paragraph::new(self.debug_string.as_str())
-        //         .scroll((self.debug_scroll, 0))
-        //         .block(
-        //             Block::new()
-        //                 .borders(Borders::ALL)
-        //                 .title(self.debug_title.as_str()),
-        //         ),
-        //     main_areas[3],
-        // );
-
-        // // Add scrolling to debug text
-        // let scrollbar = Scrollbar::default()
-        //     .orientation(ScrollbarOrientation::VerticalRight)
-        //     .begin_symbol(Some("↑"))
-        //     .end_symbol(Some("↓"));
-        // let mut scrollbar_state =
-        //     ScrollbarState::new(self.debug_lines as usize).position(self.debug_scroll as usize);
-
-        // frame.render_stateful_widget(
-        //     scrollbar,
-        //     main_areas[3].inner(&Margin {
-        //         vertical: 1,
-        //         horizontal: 0,
-        //     }), // using a inner vertical margin of 1 unit makes the scrollbar inside the block
-        //     &mut scrollbar_state,
-        // );
+                    // line.clear();
+                    // let state_check = self.connections[conn_ind].state;
+                    // if (state_check & 0x4) > 0 {
+                    //     line.push_str("In Voice Chat!  ");
+                    // }
+                    // if (state_check & 0x8) > 0 {
+                    //     line.push_str("Voice Looped Back  ");
+                    // }
+                    // if (state_check & 0x2) > 0 {
+                    //     line.push_str("Listening to Server Song  ");
+                    // }
+                    // if (state_check & 0x1) > 0 {
+                    //     line.push_str("Uploading Song to Server");
+                    // }
+                    // pos.0 += 20.0 * self.x_mult;
+                    // pos.1 += 30.0 * self.y_mult;
+                    // self.draw_glyph_line(pos, &line, pt_size, input_data, 0, 1.0);
+                    // pos.0 -= 20.0 * self.x_mult;
+                    // pos.1 += 30.0 * self.y_mult;
+                }
+            }
+        }
 
         ((self.num_verticies as u32), (self.num_triangles as u32))
     }
@@ -509,16 +413,16 @@ impl swiftlet_graphics::VulkanTriglyphCallbacks for Client {
         //println!("Got Key Code: {:?}", key_code);
         match key_code {
             KeyCode::UpArrow => {
-                if self.debug_scroll > 0 {
-                    self.debug_scroll -= 1;
-                    self.should_draw = true;
-                }
+                // if self.debug_scroll > 0 {
+                //     self.debug_scroll -= 1;
+                //     self.should_draw = true;
+                // }
             }
             KeyCode::DownArrow => {
-                if self.debug_scroll < (self.debug_lines - 1) {
-                    self.debug_scroll += 1;
-                    self.should_draw = true;
-                }
+                // if self.debug_scroll < (self.debug_lines - 1) {
+                //     self.debug_scroll += 1;
+                //     self.should_draw = true;
+                // }
             }
             KeyCode::Char(c) => {
                 let uc = c.to_ascii_uppercase();
@@ -638,9 +542,7 @@ impl swiftlet_graphics::VulkanTriglyphCallbacks for Client {
                     break;
                 }
                 Ok(recv_string) => {
-                    self.debug_string.push_str(&recv_string);
-                    self.debug_lines += 1;
-                    self.should_draw = true;
+                    print!("{}", recv_string);
                 }
             }
         }
@@ -651,9 +553,7 @@ impl swiftlet_graphics::VulkanTriglyphCallbacks for Client {
                     break;
                 }
                 Ok(recv_string) => {
-                    self.debug_string.push_str(&recv_string);
-                    self.debug_lines += 1;
-                    self.should_draw = true;
+                    print!("{}", recv_string);
                 }
             }
         }
@@ -664,9 +564,7 @@ impl swiftlet_graphics::VulkanTriglyphCallbacks for Client {
                     break;
                 }
                 Ok(recv_string) => {
-                    self.debug_string.push_str(&recv_string);
-                    self.debug_lines += 1;
-                    self.should_draw = true;
+                    print!("{}", recv_string);
                 }
             }
         }
@@ -703,13 +601,15 @@ impl ClientRunner {
             }
         }
 
-        let mut glyphs = swiftlet_graphics::font::Glyphs::new(FONT_PATH, 0, 2, "en").unwrap();
+        let mut glyphs =
+            swiftlet_graphics::font::Glyphs::new_from_font_file(FONT_PATH, 0, 2, "en").unwrap();
         glyphs.add_glyph_outline_data(0, ' ', '~').unwrap();
         let (window, signaler) = match swiftlet_graphics::VulkanTriglyph::new(
             1280,
             720,
             104 * 8,
             glyphs.get_glyph_outline_data(),
+            true,
         ) {
             Ok((w, s)) => (w, s),
             Err(e) => {
@@ -720,7 +620,7 @@ impl ClientRunner {
         // Get (initial) window dpi here in future to pass to initial client startup
 
         Ok(ClientRunner {
-            client: Client::new(server_address, network_channels, audio_channels, glyphs),
+            client: Client::new(server_address, network_channels, audio_channels, glyphs)?,
             window,
             signaler,
         })

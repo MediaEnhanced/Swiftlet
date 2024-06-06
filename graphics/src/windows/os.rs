@@ -27,7 +27,7 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Graphics::Gdi::{COLOR_BACKGROUND, HBRUSH};
 use windows::Win32::System::{LibraryLoader, Threading};
-use windows::Win32::UI::{Input::KeyboardAndMouse, WindowsAndMessaging};
+use windows::Win32::UI::{HiDpi, Input::KeyboardAndMouse, WindowsAndMessaging};
 
 mod dxgi;
 mod manifest;
@@ -40,6 +40,7 @@ pub enum OsError {
     UnknownMsgHandle,
     Event(Error),
     UnexpectedEventCheckResult,
+    TimerSet,
 }
 
 pub(super) fn get_device_luid() -> Result<Option<[u32; 2]>, OsError> {
@@ -344,6 +345,64 @@ impl OsWindow {
             Err(OsError::Window(e))
         } else {
             Ok(())
+        }
+    }
+
+    pub(super) fn get_dpi(&self) -> u32 {
+        unsafe { HiDpi::GetDpiForWindow(self.handle) }
+    }
+}
+
+pub(super) struct OsWait {
+    handle: HANDLE,
+}
+
+impl OsWait {
+    pub(super) fn new() -> Result<Self, OsError> {
+        let timer_name = PCWSTR(std::ptr::null());
+        match unsafe {
+            Threading::CreateWaitableTimerExW(
+                None,
+                timer_name,
+                Threading::CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                Threading::TIMER_MODIFY_STATE.0 | Threading::SYNCHRONIZATION_SYNCHRONIZE.0,
+            )
+        } {
+            Ok(handle) => Ok(OsWait { handle }),
+            Err(e) => Err(OsError::Event(e)),
+        }
+    }
+
+    pub(super) fn wait(&self, timeout_duration: std::time::Duration) -> Result<bool, OsError> {
+        let time_convert = (timeout_duration.as_secs() * 10_000_000)
+            + (timeout_duration.subsec_nanos() as u64 / 100);
+        let relative_time = -(time_convert as i64);
+        match unsafe {
+            Threading::SetWaitableTimer(self.handle, &relative_time, 0, None, None, BOOL(0))
+        } {
+            Ok(_) => {
+                let millisecond_timeout = (timeout_duration.as_millis() as u32) + 100;
+                let wait_event =
+                    unsafe { Threading::WaitForSingleObject(self.handle, millisecond_timeout) };
+                if wait_event == WAIT_TIMEOUT {
+                    Ok(false)
+                } else if wait_event == WAIT_OBJECT_0 {
+                    Ok(true)
+                } else if wait_event == WAIT_FAILED {
+                    Err(OsError::Event(unsafe { GetLastError().into() }))
+                } else {
+                    Err(OsError::UnexpectedEventCheckResult)
+                }
+            }
+            Err(_e) => Err(OsError::TimerSet),
+        }
+    }
+}
+
+impl Drop for OsWait {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.handle);
         }
     }
 }

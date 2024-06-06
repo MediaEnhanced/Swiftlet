@@ -29,6 +29,7 @@ pub enum Error {
     GlyphNotFoundInFonts(char),
     GlyphOutlineError(char),
     NoGlyphIdInOutlines(u32),
+    NoGlyphIndex(char),
 }
 
 struct FontInfo {
@@ -50,7 +51,7 @@ pub struct Glyphs {
 }
 
 impl Glyphs {
-    pub fn new(
+    pub fn new_from_font_file(
         font_path: &str,
         font_index: u32,
         mut rays_per_outline_po2: u8,
@@ -92,20 +93,44 @@ impl Glyphs {
 
     pub fn add_new_font(&mut self, font_path: &str, font_index: u32) -> Result<(), Error> {
         let font_data_offset = self.font_data.len();
-        match std::fs::read(font_path) {
-            Ok(d) => self.font_data.extend_from_slice(&d),
+        let units_per_em = match std::fs::read(font_path) {
+            Ok(d) => {
+                let units_per_em = match rustybuzz::Face::from_slice(&d, font_index) {
+                    Some(f) => f.units_per_em(),
+                    None => return Err(Error::CannotCreateFontFace),
+                };
+                self.font_data.extend_from_slice(&d);
+                units_per_em
+            }
             Err(e) => return Err(Error::FileRead(e)),
-        }
-        let face =
-            match rustybuzz::Face::from_slice(&self.font_data[font_data_offset..], font_index) {
-                Some(f) => f,
-                None => return Err(Error::CannotCreateFontFace),
-            };
+        };
         self.font_infos.push(FontInfo {
             data_start_index: font_data_offset,
             data_end_index: self.font_data.len(),
             index: font_index,
-            dpi_scale: 1.0 / (72.0 * (face.units_per_em() as f32)),
+            dpi_scale: 1.0 / (72.0 * (units_per_em as f32)),
+            outline_offset: self.outline_data.len(),
+        });
+
+        Ok(())
+    }
+
+    pub fn add_new_font_from_bytes(
+        &mut self,
+        font_bytes: &[u8],
+        font_index: u32,
+    ) -> Result<(), Error> {
+        let font_data_offset = self.font_data.len();
+        let units_per_em = match rustybuzz::Face::from_slice(font_bytes, font_index) {
+            Some(f) => f.units_per_em(),
+            None => return Err(Error::CannotCreateFontFace),
+        };
+        self.font_data.extend_from_slice(font_bytes);
+        self.font_infos.push(FontInfo {
+            data_start_index: font_data_offset,
+            data_end_index: self.font_data.len(),
+            index: font_index,
+            dpi_scale: 1.0 / (72.0 * (units_per_em as f32)),
             outline_offset: self.outline_data.len(),
         });
 
@@ -206,7 +231,7 @@ impl Glyphs {
                 let _bounding_box = match font_face.outline_glyph(glyph_id, &mut god) {
                     Some(bb) => bb,
                     None => {
-                        if cp != ' ' {
+                        if god.get_num_segments() > 0 {
                             return Err(Error::GlyphOutlineError(cp));
                         } else {
                             rustybuzz::ttf_parser::Rect {
@@ -221,6 +246,8 @@ impl Glyphs {
                 // Compare bounding box in future
                 god.sort_segments_and_create_additional_segments(self.rays_per_outline_po2);
                 new_outline_data.push(god);
+            } else {
+                return Err(Error::NoGlyphIndex(cp));
             }
         }
 
@@ -243,6 +270,24 @@ impl Glyphs {
 
     pub fn get_glyph_outline_data(&self) -> (&[GlyphOutlineData], u8) {
         (&self.outline_data, self.rays_per_outline_po2)
+    }
+
+    pub fn get_font_line_info(
+        &self,
+        font: usize,
+        pt_size: u32,
+        dpi: f32,
+    ) -> Result<(f32, f32), Error> {
+        let font_face = self.get_font_face(font)?;
+        let dpi_scale = self.font_infos[font].dpi_scale;
+        let scale = (pt_size as f32) * dpi_scale * dpi;
+        let ascender = (font_face.ascender() as f32) * scale;
+        let descender = (-font_face.descender() as f32) * scale;
+        let line_gap = match font_face.line_gap() {
+            0 => ((font_face.ascender() - font_face.descender()) as f32) * 0.2 * scale,
+            other => (other as f32) * scale,
+        };
+        Ok((ascender, descender + line_gap))
     }
 
     pub fn push_text_line(&mut self, text_line: &str) {
