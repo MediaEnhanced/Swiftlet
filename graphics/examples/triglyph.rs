@@ -130,7 +130,8 @@ impl TriglyphExample {
         for (ind, v) in linear_rgb_lut.iter_mut().enumerate() {
             *v = get_linear_rgb_float_from_srgb_byte(ind as u8)
         }
-        let mut glyphs = swiftlet_graphics::font::Glyphs::new_from_font_file(FONT_PATH, 0, 2, "en").unwrap();
+        let mut glyphs =
+            swiftlet_graphics::font::Glyphs::new_from_font_file(FONT_PATH, 0, 2, "en").unwrap();
         glyphs.add_glyph_outline_data(0, ' ', '~').unwrap();
         TriglyphExample {
             times_called: 0,
@@ -368,7 +369,7 @@ impl swiftlet_graphics::VulkanTriglyphCallbacks for TriglyphExample {
         self.draw_glyph_line(
             origin,
             "The quick brown fox jumped over the lazy dog!",
-            (32, 1),
+            (32, 0),
             input_data,
             0,
             1.0,

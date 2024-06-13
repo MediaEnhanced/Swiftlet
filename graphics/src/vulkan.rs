@@ -172,7 +172,7 @@ impl Instance {
         }
 
         //println!("Instance Function!");
-        let debug_create = if layer_names.is_empty() {
+        let debug_create = if !layer_names.is_empty() {
             let fn_name_cstr = match CString::new(FUNCTION_EXTENSION_NAME_CREATE_DEBUG) {
                 Ok(s) => s,
                 Err(_e) => return Err(Error::StringConversion),
@@ -3370,9 +3370,17 @@ struct TriInd {
 struct TriPrimData {
     linear_rgb: [f32; 3],
     linear_alpha: f32,
-    glyph_index: u32,
-    rays_per_outline_po2: u32,
-    reserved: [u32; 2],
+    glyph_index: u32, // If glyph: [rays_per_outline_po2 (2 bits), index (30 bits)], else [rect_type (2 bits), 0x3FFF_FFFF]
+    texture_width: f32,
+    texture_height: f32,
+    extra: f32,
+}
+
+#[repr(C)]
+struct UniformData {
+    x_mult: f32, // Normalized Horizontal Distance per Pixel
+    y_mult: f32, // Normalized Vertical Distance Per Pixel
+                 // "Texture" Modifiers here in future
 }
 
 pub struct Primitives2d<'a> {
@@ -3381,15 +3389,219 @@ pub struct Primitives2d<'a> {
     data: &'a mut [TriPrimData],
     num_verticies: usize,
     num_triangles: usize,
-    //width: u32,
-    //height: u32,
-    x_mult: f32,
-    y_mult: f32,
+    width: f32,
+    height: f32,
+}
+
+#[derive(Default)]
+pub struct PrimitivePosition {
+    pub x: f32,
+    pub y: f32,
+}
+
+pub struct PrimitiveColor {
+    linear_rgb: [f32; 3],
+    linear_alpha: f32,
+}
+
+impl PrimitiveColor {
+    pub fn new_from_linear_rgb_and_alpha(mut linear_rgb: [f32; 3], mut alpha: f32) -> Self {
+        alpha = alpha.max(0.0);
+        alpha = alpha.min(1.0);
+        for l in &mut linear_rgb {
+            *l *= alpha;
+        }
+
+        Self {
+            linear_rgb,
+            linear_alpha: alpha,
+        }
+    }
+}
+
+pub enum PrimitiveRectangleModifier {
+    None,
+    Ellipse,
+    RoundedCorners(f32),
+    Diamond,
 }
 
 impl<'a> Primitives2d<'a> {
-    pub fn get_num_verts_and_tris(&self) -> (u16, u32) {
+    pub(super) fn get_num_verts_and_tris(&self) -> (u16, u32) {
         (self.num_verticies as u16, self.num_triangles as u32)
+    }
+
+    pub fn get_position_from_percentage(&self, mut x: f32, mut y: f32) -> PrimitivePosition {
+        x = x.max(0.0);
+        y = y.max(0.0);
+        x = x.min(100.0);
+        y = y.min(100.0);
+        PrimitivePosition {
+            x: x * self.width * 0.01,
+            y: y * self.height * 0.01,
+        }
+    }
+
+    pub fn get_position_from_inch(&self, dpi: f32, mut x: f32, mut y: f32) -> PrimitivePosition {
+        x = x.max(0.0);
+        y = y.max(0.0);
+        x = x.min(self.width);
+        y = y.min(self.height);
+        PrimitivePosition {
+            x: x * dpi,
+            y: y * dpi,
+        }
+    }
+
+    pub fn add_rectangle(
+        &mut self,
+        top_left_pixels: (f32, f32),
+        dimensions: (f32, f32),
+        color: &PrimitiveColor,
+        modifier: PrimitiveRectangleModifier,
+    ) {
+        let tex_x_max = dimensions.0 + 1.0;
+        let tex_y_max = dimensions.1 + 1.0;
+        let x_min = top_left_pixels.0 - 1.0;
+        let y_min = top_left_pixels.1 - 1.0;
+        let x_max = top_left_pixels.0 + tex_x_max;
+        let y_max = top_left_pixels.1 + tex_y_max;
+
+        self.verticies[self.num_verticies] = TriVert {
+            x: x_min,
+            y: y_min,
+            tex_x: -1.0,
+            tex_y: -1.0,
+        };
+        self.verticies[self.num_verticies + 1] = TriVert {
+            x: x_max,
+            y: y_min,
+            tex_x: tex_x_max,
+            tex_y: -1.0,
+        };
+        self.verticies[self.num_verticies + 2] = TriVert {
+            x: x_max,
+            y: y_max,
+            tex_x: tex_x_max,
+            tex_y: tex_y_max,
+        };
+        self.verticies[self.num_verticies + 3] = TriVert {
+            x: x_min,
+            y: y_max,
+            tex_x: -1.0,
+            tex_y: tex_y_max,
+        };
+
+        self.indicies[self.num_triangles] = TriInd {
+            p0: self.num_verticies as u16,
+            p1: (self.num_verticies + 1) as u16,
+            p2: (self.num_verticies + 2) as u16,
+        };
+        self.indicies[self.num_triangles + 1] = TriInd {
+            p0: (self.num_verticies + 3) as u16,
+            p1: self.num_verticies as u16,
+            p2: (self.num_verticies + 2) as u16,
+        };
+
+        let (glyph_index, extra) = match modifier {
+            PrimitiveRectangleModifier::None => (0x3FFF_FFFF, 0.0),
+            PrimitiveRectangleModifier::Ellipse => (0x7FFF_FFFF, 0.0),
+            PrimitiveRectangleModifier::RoundedCorners(radius) => (0xBFFF_FFFF, radius),
+            PrimitiveRectangleModifier::Diamond => (0xFFFF_FFFF, 0.0),
+        };
+
+        self.data[self.num_triangles] = TriPrimData {
+            linear_rgb: color.linear_rgb,
+            linear_alpha: color.linear_alpha,
+            glyph_index,
+            texture_width: dimensions.0,
+            texture_height: dimensions.1,
+            extra,
+        };
+        self.data[self.num_triangles + 1] = TriPrimData {
+            linear_rgb: color.linear_rgb,
+            linear_alpha: color.linear_alpha,
+            glyph_index,
+            texture_width: dimensions.0,
+            texture_height: dimensions.1,
+            extra,
+        };
+
+        self.num_verticies += 4;
+        self.num_triangles += 2;
+    }
+
+    pub fn add_glyph(
+        &mut self,
+        p0: &PrimitivePosition,
+        color: &PrimitiveColor,
+        offsets: (f32, f32),
+        dimensions: (f32, f32),
+        tex_min: (f32, f32),
+        tex_max: (f32, f32),
+        glyph_index: u32,
+        texture_width: f32,
+    ) {
+        let x_min = p0.x + offsets.0;
+        let x_max = x_min + dimensions.0;
+        let y_max = p0.y - offsets.1;
+        let y_min = y_max - dimensions.1;
+
+        self.verticies[self.num_verticies] = TriVert {
+            x: x_min,
+            y: y_max,
+            tex_x: tex_min.0,
+            tex_y: tex_min.1,
+        };
+        self.verticies[self.num_verticies + 1] = TriVert {
+            x: x_max,
+            y: y_max,
+            tex_x: tex_max.0,
+            tex_y: tex_min.1,
+        };
+        self.verticies[self.num_verticies + 2] = TriVert {
+            x: x_max,
+            y: y_min,
+            tex_x: tex_max.0,
+            tex_y: tex_max.1,
+        };
+        self.verticies[self.num_verticies + 3] = TriVert {
+            x: x_min,
+            y: y_min,
+            tex_x: tex_min.0,
+            tex_y: tex_max.1,
+        };
+
+        self.indicies[self.num_triangles] = TriInd {
+            p0: self.num_verticies as u16,
+            p1: (self.num_verticies + 1) as u16,
+            p2: (self.num_verticies + 2) as u16,
+        };
+        self.indicies[self.num_triangles + 1] = TriInd {
+            p0: (self.num_verticies + 3) as u16,
+            p1: self.num_verticies as u16,
+            p2: (self.num_verticies + 2) as u16,
+        };
+
+        self.data[self.num_triangles] = TriPrimData {
+            linear_rgb: color.linear_rgb,
+            linear_alpha: color.linear_alpha,
+            glyph_index,
+            texture_width,
+            texture_height: 0.0,
+            extra: 0.0,
+        };
+        self.data[self.num_triangles + 1] = TriPrimData {
+            linear_rgb: color.linear_rgb,
+            linear_alpha: color.linear_alpha,
+            glyph_index,
+            texture_width,
+            texture_height: 0.0,
+            extra: 0.0,
+        };
+
+        self.num_verticies += 4;
+        self.num_triangles += 2;
     }
 }
 
@@ -3405,6 +3617,8 @@ pub struct TwoDimensionRender {
     shader_stages: [api::PipelineShaderStageCreateInfo; 2],
     gpu_glyph_buffer_mem: OpaqueHandle,
     gpu_glyph_buffer: OpaqueHandle,
+    gpu_uniform_buffer_mem: OpaqueHandle,
+    gpu_uniform_buffer: OpaqueHandle,
     gpu_triangle_buffer_mem: OpaqueHandle,
     gpu_triangle_buffer: OpaqueHandle,
     gpu_primitive_data_offset: u64,
@@ -3734,6 +3948,104 @@ impl TwoDimensionRender {
             return Err(Error::VkResult(result));
         }
 
+        // Create Uniform Buffer
+        let uniform_buffer_size = mem::size_of::<UniformData>() as u64;
+        let uniform_buffer_create_info = api::BufferCreateInfo {
+            header: StructureHeader::new(StructureType::BufferCreateInfo),
+            flags: api::BufferCreateFlagBit::None as api::BufferCreateFlags,
+            size: uniform_buffer_size,
+            usage: (api::BufferUsageFlagBit::TransferDst as api::BufferUsageFlags)
+                | (api::BufferUsageFlagBit::UniformBuffer as api::BufferUsageFlags),
+            sharing_mode: api::SharingMode::Exclusive,
+            queue_family_index_count: 0, // Exclusive to zero here
+            p_queue_family_indices: ptr::null(),
+        };
+
+        let gpu_uniform_buffer = ptr::null();
+        let result: i32 = unsafe {
+            api::vkCreateBuffer(
+                swapchain.device.handle,
+                &uniform_buffer_create_info,
+                ptr::null(),
+                &gpu_uniform_buffer,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        let buf_mem_reqs_info = api::BufferMemoryRequirementsInfo2 {
+            header: StructureHeader::new(StructureType::BufferMemoryRequirementsInfo2),
+            buffer: gpu_uniform_buffer,
+        };
+        unsafe {
+            api::vkGetBufferMemoryRequirements2(
+                swapchain.device.handle,
+                &buf_mem_reqs_info,
+                &mem_reqs,
+            )
+        };
+        let uniform_buffer_mem_reqs_size = mem_reqs.size;
+
+        let mem_alloc_info = api::MemoryAllocateInfo {
+            header: StructureHeader::new(StructureType::MemoryAllocateInfo),
+            allocation_size: uniform_buffer_mem_reqs_size,
+            memory_type_index: swapchain
+                .device
+                .physical_device
+                .local_only_memory_type_index,
+        };
+        let gpu_uniform_buffer_mem = ptr::null();
+        let result = unsafe {
+            api::vkAllocateMemory(
+                swapchain.device.handle,
+                &mem_alloc_info,
+                ptr::null(),
+                &gpu_uniform_buffer_mem,
+            )
+        };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+        let bind_buf_mem_info = api::BindBufferMemoryInfo {
+            header: StructureHeader::new(StructureType::BindBufferMemoryInfo),
+            buffer: gpu_uniform_buffer,
+            memory: gpu_uniform_buffer_mem,
+            memory_offset: 0,
+        };
+        let result =
+            unsafe { api::vkBindBufferMemory2(swapchain.device.handle, 1, &bind_buf_mem_info) };
+        if result != 0 {
+            return Err(Error::VkResult(result));
+        }
+
+        // Fill in Initial Uniform Data Buffer
+        let uniform_data = unsafe {
+            std::slice::from_raw_parts_mut(cpu_staging_buffer_mapped_ptr as *mut UniformData, 1)
+        };
+        uniform_data[0].x_mult = 2.0 / (swapchain.width as f32);
+        uniform_data[0].y_mult = 2.0 / (swapchain.height as f32);
+        println!(
+            "Uniform Data: {}, {}",
+            uniform_data[0].x_mult, uniform_data[0].y_mult
+        );
+
+        let copy_buffer_region = api::BufferCopy2 {
+            header: StructureHeader::new(StructureType::BufferCopy2),
+            src_offset: 0,
+            dst_offset: 0,
+            size: uniform_buffer_size,
+        };
+        let copy_buffer_info = api::CopyBufferInfo2 {
+            header: StructureHeader::new(StructureType::CopyBufferInfo2),
+            src_buffer: cpu_staging_buffer,
+            dst_buffer: gpu_uniform_buffer,
+            region_count: 1,
+            regions: &copy_buffer_region,
+        };
+
+        swapchain.stage_buffer_copy(&copy_buffer_info)?;
+
         // Glyph Data Buffer Create
         let glyph_info_offset_size = ((glyph_data.segment_offsets.len() + 4) << 2) as u64;
         let glyph_segment_data_size =
@@ -3809,6 +4121,7 @@ impl TwoDimensionRender {
         }
 
         // Add glyph data to staging buffer
+        println!("Glyph Buffer Size: {}", glyph_buffer_size);
         if glyph_buffer_size > cpu_staging_buffer_size {
             return Err(Error::GlyphBufferSizeTooBig);
         }
@@ -3877,31 +4190,39 @@ impl TwoDimensionRender {
         // Create Pipeline Layout
         let descriptor_set_layout_binding = [
             api::DescriptorSetLayoutBinding {
-                binding: 0, // Primitive Info
+                binding: 0, // Primitive Data Buffer
                 descriptor_type: api::DescriptorType::StorageBuffer,
                 descriptor_count: 1,
                 stage_flags: api::ShaderStageFlagBit::Fragment as api::ShaderStageFlags,
                 immutable_samplers: ptr::null(),
             },
             api::DescriptorSetLayoutBinding {
-                binding: 1, // Font Info
+                binding: 1, // Glyph Info Buffer
                 descriptor_type: api::DescriptorType::StorageBuffer,
                 descriptor_count: 1,
                 stage_flags: api::ShaderStageFlagBit::Fragment as api::ShaderStageFlags,
                 immutable_samplers: ptr::null(),
             },
             api::DescriptorSetLayoutBinding {
-                binding: 2, // Glyph Segments
+                binding: 2, // Glyph Data Buffer
                 descriptor_type: api::DescriptorType::StorageBuffer,
                 descriptor_count: 1,
                 stage_flags: api::ShaderStageFlagBit::Fragment as api::ShaderStageFlags,
+                immutable_samplers: ptr::null(),
+            },
+            api::DescriptorSetLayoutBinding {
+                binding: 3, // Shared Uniform Buffer
+                descriptor_type: api::DescriptorType::UniformBuffer,
+                descriptor_count: 1,
+                stage_flags: (api::ShaderStageFlagBit::Vertex as api::ShaderStageFlags)
+                    | (api::ShaderStageFlagBit::Fragment as api::ShaderStageFlags),
                 immutable_samplers: ptr::null(),
             },
         ];
         let descriptor_set_layout_create_info = api::DescriptorSetLayoutCreateInfo {
             header: StructureHeader::new(StructureType::DescriptorSetLayoutCreateInfo),
             flags: 0,
-            binding_count: 3,
+            binding_count: 4,
             bindings: descriptor_set_layout_binding.as_ptr(),
         };
 
@@ -4094,16 +4415,22 @@ impl TwoDimensionRender {
         }
 
         // Descriptor{Pool, Set, etc} Create
-        let descriptor_pool_size = api::DescriptorPoolSize {
-            descriptor_type: api::DescriptorType::StorageBuffer,
-            descriptor_count: 3,
-        };
+        let descriptor_pool_sizes = [
+            api::DescriptorPoolSize {
+                descriptor_type: api::DescriptorType::StorageBuffer,
+                descriptor_count: 3,
+            },
+            api::DescriptorPoolSize {
+                descriptor_type: api::DescriptorType::UniformBuffer,
+                descriptor_count: 1,
+            },
+        ];
         let descriptor_pool_create_info = api::DescriptorPoolCreateInfo {
             header: StructureHeader::new(StructureType::DescriptorPoolCreateInfo),
             flags: api::DescriptorPoolCreateFlagBit::None as api::DescriptorPoolCreateFlags,
             max_sets: 1,
-            pool_size_count: 1,
-            pool_sizes: &descriptor_pool_size,
+            pool_size_count: 2,
+            pool_sizes: descriptor_pool_sizes.as_ptr(),
         };
         let descriptor_pool = ptr::null();
         let result = unsafe {
@@ -4151,6 +4478,11 @@ impl TwoDimensionRender {
             offset: glyph_info_offset_size,
             range: glyph_segment_data_size,
         };
+        let uniform_descriptor_buffer_info = api::DescriptorBufferInfo {
+            buffer: gpu_uniform_buffer,
+            offset: 0,
+            range: uniform_buffer_size,
+        };
         let write_descriptors = [
             api::WriteDescriptorSet {
                 header: StructureHeader::new(StructureType::WriteDescriptorSet),
@@ -4185,11 +4517,22 @@ impl TwoDimensionRender {
                 buffer_info: &segment_descriptor_buffer_info,
                 texel_buffer_view: ptr::null(),
             },
+            api::WriteDescriptorSet {
+                header: StructureHeader::new(StructureType::WriteDescriptorSet),
+                dst_set: descriptor_set,
+                dst_binding: 3,
+                dst_array_element: 0,
+                descriptor_type: api::DescriptorType::UniformBuffer,
+                descriptor_count: 1,
+                image_info: ptr::null(),
+                buffer_info: &uniform_descriptor_buffer_info,
+                texel_buffer_view: ptr::null(),
+            },
         ];
         unsafe {
             api::vkUpdateDescriptorSets(
                 swapchain.device.handle,
-                3,
+                4,
                 write_descriptors.as_ptr(),
                 0,
                 ptr::null(),
@@ -4254,6 +4597,8 @@ impl TwoDimensionRender {
             shader_stages,
             gpu_glyph_buffer_mem,
             gpu_glyph_buffer,
+            gpu_uniform_buffer_mem,
+            gpu_uniform_buffer,
             gpu_triangle_buffer_mem,
             gpu_triangle_buffer,
             gpu_primitive_data_offset,
@@ -4267,13 +4612,14 @@ impl TwoDimensionRender {
             render_pass_begin_info,
             swapchain,
         };
-        tdr.render_clear()?; // Render a clear for a sanity test and to allow the fence to be signalled
 
+        tdr.render_clear()?; // Render a clear for a sanity test and to allow the fence to be signalled
         Ok(tdr)
     }
 
     fn render_clear(&mut self) -> Result<(), Error> {
         let next_image_index = self.swapchain.get_next_image_index()? as usize;
+        self.render_pass_begin_info.framebuffer = self.framebuffers[next_image_index];
         self.render_pass_begin_info.clear_values = &self.clear_value;
 
         let cmd_buffer = self.swapchain.cmd_buffer_submit_infos[next_image_index].command_buffer;
@@ -4319,6 +4665,7 @@ impl TwoDimensionRender {
     pub fn render(&mut self, num_verticies: u16, num_triangles: u32) -> Result<(), Error> {
         // Resize if necessary here in future based on next image index results
         let next_image_index = self.swapchain.get_next_image_index()? as usize;
+        self.render_pass_begin_info.framebuffer = self.framebuffers[next_image_index];
         self.render_pass_begin_info.clear_values = &self.clear_value;
 
         let triangle_buffer_copy_regions = [
@@ -4466,10 +4813,8 @@ impl TwoDimensionRender {
             },
             num_verticies: 0,
             num_triangles: 0,
-            //width: self.swapchain.width,
-            //height: self.swapchain.height,
-            x_mult: 2.0 / (self.swapchain.width as f32),
-            y_mult: 2.0 / (self.swapchain.height as f32),
+            width: self.swapchain.width as f32,
+            height: self.swapchain.height as f32,
         })
     }
 }

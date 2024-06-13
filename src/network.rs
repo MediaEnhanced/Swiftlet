@@ -276,8 +276,10 @@ impl ServerState {
             StreamMsgType::NewStateRequest => {
                 let mut potential_new_state = read_data[0];
                 if (potential_new_state & 2) > 0 {
+                    //self.send_debug_text("Trying To Play Music!");
                     if !self.music_storage.is_empty() {
                         if self.music_playback.is_none() {
+                            //self.send_debug_text("Start Music Playback!");
                             self.music_playback =
                                 Some(MusicPlayback::new(0, self.music_storage[0].is_stereo));
                         }

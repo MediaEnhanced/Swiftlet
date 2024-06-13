@@ -118,3 +118,12 @@ doc = false
 test = false
 harness = false
 bench = false
+
+[[example]]
+name = "primitives"
+path = "examples/primitives.rs"
+crate-type = ["bin"]
+doc = false
+test = false
+harness = false
+bench = false

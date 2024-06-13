@@ -9,6 +9,7 @@ run-audio-example-playback = "run -p swiftlet_audio --example playback --feature
 run-graphics-example-basic = "run -p swiftlet_graphics --example basic"
 run-graphics-example-color = "run -p swiftlet_graphics --example color"
 run-graphics-example-triglyph = "run -p swiftlet_graphics --example triglyph"
+run-graphics-example-primitives = "run -p swiftlet_graphics --example primitives"
 run-binaural-example = "run -p swiftlet_binaural --example demo"
 
 windows-cross-windows-x64 = "--config target.x86_64-pc-windows-gnu.linker='../zig/zcc.bat' --config target.x86_64-pc-windows-gnu.rustflags=['-C','link-arg=--target=x86_64-windows'] build --target x86_64-pc-windows-gnu"

@@ -20,16 +20,133 @@
 //OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //SOFTWARE.
 
+use rustybuzz::Direction;
+
 #[derive(Debug)]
 pub enum Error {
     FileRead(std::io::Error),
     CannotCreateFontFace,
+    InvalidCodepointSplit,
+    InvalidCodepointParse,
+    InvalidCodepointValue,
+    NoGlyphIndex(char),
+
     InvalidFont(usize),
     FontIndexAlreadyExists,
     GlyphNotFoundInFonts(char),
     GlyphOutlineError(char),
     NoGlyphIdInOutlines(u32),
-    NoGlyphIndex(char),
+}
+
+pub struct FontIcons {
+    data: Vec<u8>,
+    codepoints_data: String,
+    codepoint_delimiter: char,
+    codepoint_radix: u32,
+    rays_per_outline_po2: u8,
+    // Variable Font Adjustments Here
+    outline_data: Vec<GlyphOutlineData>,
+}
+
+impl FontIcons {
+    pub fn new_from_files(
+        icon_font_path: &str,
+        icon_font_codepoints_path: &str,
+        codepoint_delimiter: char,
+        codepoint_radix: u32,
+        mut rays_per_outline_po2: u8,
+    ) -> Result<Self, Error> {
+        let data = match std::fs::read(icon_font_path) {
+            Ok(d) => d,
+            Err(e) => return Err(Error::FileRead(e)),
+        };
+        if rustybuzz::Face::from_slice(&data, 0).is_none() {
+            return Err(Error::CannotCreateFontFace);
+        }
+
+        let codepoints_data = match std::fs::read_to_string(icon_font_codepoints_path) {
+            Ok(f) => f,
+            Err(e) => return Err(Error::FileRead(e)),
+        };
+
+        if rays_per_outline_po2 > 3 {
+            rays_per_outline_po2 = 3;
+        }
+        Ok(Self {
+            data,
+            codepoints_data,
+            codepoint_delimiter,
+            codepoint_radix,
+            rays_per_outline_po2,
+            outline_data: Vec::new(),
+        })
+    }
+
+    pub fn add_icon_outline_data(&mut self, icon_names: &[&str]) -> Result<(), Error> {
+        let font_face = match rustybuzz::Face::from_slice(&self.data, 0) {
+            Some(f) => f,
+            None => return Err(Error::CannotCreateFontFace),
+        };
+
+        let mut num_icons = icon_names.len();
+        let outline_start_position = self.outline_data.len();
+        self.outline_data
+            .resize_with(num_icons, || GlyphOutlineData::new(u32::MAX));
+        for l in self.codepoints_data.lines() {
+            let (name, code_point) = match l.split_once(self.codepoint_delimiter) {
+                Some((name, cp_str)) => {
+                    let cp = match u32::from_str_radix(cp_str, self.codepoint_radix) {
+                        Ok(v) => match char::from_u32(v) {
+                            Some(c) => c,
+                            None => return Err(Error::InvalidCodepointValue),
+                        },
+                        Err(_e) => return Err(Error::InvalidCodepointParse),
+                    };
+                    (name, cp)
+                }
+                None => return Err(Error::InvalidCodepointSplit),
+            };
+
+            for (ind, n) in icon_names.iter().enumerate() {
+                if *n == name {
+                    //println!("Found Icon: {}, with cp: {}", *n, code_point);
+                    if let Some(glyph_id) = font_face.glyph_index(code_point) {
+                        let builder = &mut self.outline_data[outline_start_position + ind];
+                        let _bounding_box = match font_face.outline_glyph(glyph_id, builder) {
+                            Some(bb) => bb,
+                            None => {
+                                if builder.get_num_segments() > 0 {
+                                    return Err(Error::GlyphOutlineError(code_point));
+                                } else {
+                                    rustybuzz::ttf_parser::Rect {
+                                        x_min: 0,
+                                        y_min: 0,
+                                        x_max: 0,
+                                        y_max: 0,
+                                    }
+                                }
+                            }
+                        };
+                        //println!("Icon Segment Count: {}", builder.get_num_segments());
+                        // Compare bounding box in future
+                        builder.sort_segments_and_create_additional_segments(
+                            self.rays_per_outline_po2,
+                        );
+                    } else {
+                        return Err(Error::NoGlyphIndex(code_point));
+                    }
+                    num_icons -= 1;
+                    if num_icons > 0 {
+                        break;
+                    } else {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 struct FontInfo {
@@ -41,16 +158,39 @@ struct FontInfo {
 }
 
 pub struct Glyphs {
+    pub(super) num_icons: usize,
+    pub(super) outline_data: Vec<GlyphOutlineData>,
     font_data: Vec<u8>,
-    outline_data: Vec<GlyphOutlineData>,
-    rays_per_outline_po2: u8,
     font_infos: Vec<FontInfo>,
+    rays_per_outline_po2: u8,
     unicode_buffer_opt: Option<rustybuzz::UnicodeBuffer>,
     shape_features: Vec<rustybuzz::Feature>,
     line_render_info: Vec<GlyphLineRenderInfo>,
 }
 
 impl Glyphs {
+    pub fn new_from_font_icons(font_icons: FontIcons) -> Result<Self, Error> {
+        let num_icons = font_icons.outline_data.len();
+        let outline_data = font_icons.outline_data;
+        //println!("Num Segments: {}", outline_data[0].get_num_segments());
+
+        let mut unicode_buffer = rustybuzz::UnicodeBuffer::new();
+        //unicode_buffer.set_language(rustybuzz::Language(String::from(language)));
+        unicode_buffer.set_direction(rustybuzz::Direction::LeftToRight);
+        //unicode_buffer.set_cluster_level(rustybuzz::BufferClusterLevel::Characters);
+
+        Ok(Self {
+            num_icons,
+            outline_data,
+            font_data: Vec::new(),
+            font_infos: Vec::new(),
+            rays_per_outline_po2: font_icons.rays_per_outline_po2,
+            unicode_buffer_opt: Some(unicode_buffer),
+            shape_features: Vec::new(),
+            line_render_info: Vec::new(),
+        })
+    }
+
     pub fn new_from_font_file(
         font_path: &str,
         font_index: u32,
@@ -81,9 +221,10 @@ impl Glyphs {
             rays_per_outline_po2 = 3;
         }
         Ok(Self {
+            num_icons: 0,
+            outline_data: Vec::new(),
             font_data,
             font_infos,
-            outline_data: Vec::new(),
             rays_per_outline_po2,
             unicode_buffer_opt: Some(unicode_buffer),
             shape_features: Vec::new(),
@@ -135,6 +276,23 @@ impl Glyphs {
         });
 
         Ok(())
+    }
+
+    pub fn get_icon_dims(&self, icon: u32) -> (f32, f32) {
+        let icon_id = icon as usize;
+        if icon_id < self.num_icons {
+            let icon_outline = &self.outline_data[icon_id];
+            if !icon_outline.segments.is_empty() {
+                (
+                    icon_outline.x_max - icon_outline.x_min,
+                    icon_outline.y_max - icon_outline.y_min,
+                )
+            } else {
+                (0.0, 0.0)
+            }
+        } else {
+            (0.0, 0.0)
+        }
     }
 
     fn does_font_exist(&self, font: usize) -> Result<(), Error> {
@@ -197,7 +355,7 @@ impl Glyphs {
     ) -> Result<(), Error> {
         let font_face = self.get_font_face(font)?;
         let outline_index_start = if font == 0 {
-            0
+            self.num_icons
         } else {
             self.font_infos[font - 1].outline_offset
         };
@@ -365,6 +523,32 @@ impl Glyphs {
             panic!("How did this get reached?");
         }
     }
+
+    pub fn get_font_face_shaper(&self, font: usize) -> Result<GlyphFaceShaper, Error> {
+        let font_face = self.get_font_face(font)?;
+        let outline_index_start = if font == 0 {
+            0
+        } else {
+            self.font_infos[font - 1].outline_offset
+        };
+        let outline_index_end = self.font_infos[font].outline_offset;
+        let dpi_scale = self.font_infos[font].dpi_scale;
+        let plan = rustybuzz::ShapePlan::new(
+            &font_face,
+            Direction::LeftToRight,
+            Some(rustybuzz::script::UNKNOWN),
+            None,
+            &self.shape_features,
+        );
+
+        Ok(GlyphFaceShaper {
+            font_face,
+            plan,
+            dpi_scale,
+            outline_index_offset: outline_index_start,
+            outline_indicies: &self.outline_data[outline_index_start..outline_index_end],
+        })
+    }
 }
 
 pub type GlyphOutlinePoint = (f32, f32);
@@ -377,7 +561,7 @@ pub struct GlyphOutlineSegment {
 }
 
 pub struct GlyphOutlineData {
-    glyph_id: u32,
+    pub(super) glyph_id: u32,
     p0: GlyphOutlinePoint,
     p1: GlyphOutlinePoint,
     segments: Vec<GlyphOutlineSegment>,
@@ -478,6 +662,22 @@ impl GlyphOutlineData {
 
     pub fn get_segment_data(&self) -> &[GlyphOutlineSegment] {
         &self.segments
+    }
+
+    pub fn set_render_info(
+        &self,
+        tex_min: &mut GlyphOutlinePoint,
+        tex_max: &mut GlyphOutlinePoint,
+    ) -> bool {
+        if !self.segments.is_empty() {
+            tex_min.0 = self.x_min;
+            tex_min.1 = self.y_min;
+            tex_max.0 = self.x_max;
+            tex_max.1 = self.y_max;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -585,4 +785,83 @@ pub struct GlyphLineRenderInfo {
     pub dimensions: GlyphOutlinePoint,
     pub p0: GlyphOutlinePoint,
     pub p1: GlyphOutlinePoint,
+}
+
+pub struct GlyphFaceShaper<'a> {
+    pub(super) font_face: rustybuzz::Face<'a>,
+    plan: rustybuzz::ShapePlan,
+    pub(super) dpi_scale: f32,
+    pub(super) outline_index_offset: usize,
+    pub(super) outline_indicies: &'a [GlyphOutlineData],
+}
+
+impl<'a> GlyphFaceShaper<'a> {
+    pub fn get_ascender_descender_gap(&self, pt_size: u32, dpi: f32) -> (f32, f32, f32) {
+        let scale = (pt_size as f32) * self.dpi_scale * dpi;
+        let a = self.font_face.ascender();
+        let d = self.font_face.descender();
+        let ascender = (a as f32) * scale;
+        let descender = (-d as f32) * scale;
+        let line_gap = match self.font_face.line_gap() {
+            0 => ((a - d) as f32) * 0.2 * scale,
+            other => (other as f32) * scale,
+        };
+        (ascender, descender, line_gap)
+    }
+
+    pub fn create_glyph_buffer_render_info(
+        &self,
+        pt_size: u32,
+        dpi: f32,
+        mut text_buffer: TextBuffer,
+    ) -> GlyphBufferRenderInfo {
+        text_buffer
+            .unicode_buffer
+            .set_script(rustybuzz::script::UNKNOWN);
+        let glyph_buffer =
+            rustybuzz::shape_with_plan(&self.font_face, &self.plan, text_buffer.unicode_buffer);
+        let scale = (pt_size as f32) * self.dpi_scale * dpi;
+        GlyphBufferRenderInfo {
+            glyph_buffer,
+            scale,
+            dp: 1.0 / scale,
+            outline_index_offset: self.outline_index_offset as u32,
+            outline_indicies: self.outline_indicies,
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct TextBuffer {
+    unicode_buffer: rustybuzz::UnicodeBuffer,
+}
+
+// impl Default for TextBuffer {
+//     fn default() -> Self {
+//         let mut unicode_buffer = rustybuzz::UnicodeBuffer::default();
+//         unicode_buffer.set_script(rustybuzz::script::UNKNOWN);
+//         Self { unicode_buffer }
+//     }
+// }
+
+impl TextBuffer {
+    pub fn add_text(&mut self, text: &str) {
+        self.unicode_buffer.push_str(text);
+    }
+}
+
+pub struct GlyphBufferRenderInfo<'a> {
+    pub(super) glyph_buffer: rustybuzz::GlyphBuffer,
+    pub(super) scale: f32,
+    pub(super) dp: f32,
+    pub(super) outline_index_offset: u32,
+    pub(super) outline_indicies: &'a [GlyphOutlineData],
+}
+
+impl<'a> GlyphBufferRenderInfo<'a> {
+    pub fn get_text_buffer(self) -> TextBuffer {
+        TextBuffer {
+            unicode_buffer: self.glyph_buffer.clear(),
+        }
+    }
 }

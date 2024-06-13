@@ -29,3 +29,30 @@ pub fn get_linear_rgb_float_from_srgb_byte(byte_value: u8) -> f32 {
         base / 12.92
     }
 }
+
+pub struct LinearRGB {
+    srgb_lut: [f32; 256],
+}
+
+impl LinearRGB {
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        let mut srgb_lut = [0.0; 256];
+        for (ind, v) in srgb_lut.iter_mut().enumerate() {
+            *v = get_linear_rgb_float_from_srgb_byte(ind as u8)
+        }
+
+        Self { srgb_lut }
+    }
+
+    pub fn get_linear_rgb_from_srgb(&self, srgb: u32) -> [f32; 3] {
+        let red_ind = ((srgb >> 16) & 0xFF) as usize;
+        let green_ind = ((srgb >> 8) & 0xFF) as usize;
+        let blue_ind = (srgb & 0xFF) as usize;
+        [
+            self.srgb_lut[red_ind],
+            self.srgb_lut[green_ind],
+            self.srgb_lut[blue_ind],
+        ]
+    }
+}

@@ -21,6 +21,7 @@
 //SOFTWARE.
 
 #![allow(dead_code)] // Temporary
+#![allow(clippy::too_many_arguments)]
 
 pub mod vulkan;
 
@@ -471,6 +472,211 @@ impl VulkanTriglyph {
 //     //New Icons, New Images
 // }
 
+pub enum DrawJustification {
+    Left,
+    Center,
+    Right,
+}
+
+impl font::Glyphs {
+    // Baseline Center Point
+    pub fn draw_icon(
+        &self,
+        primitives: &mut vulkan::Primitives2d,
+        p0: &vulkan::PrimitivePosition,
+        color: &vulkan::PrimitiveColor,
+        rays_per_outline_po2: u32,
+        icon: u32,
+        height: f32,
+        justification: DrawJustification,
+    ) {
+        let icon_comp = icon as usize;
+        if icon_comp < self.num_icons {
+            let mut tex_min = (0.0, 0.0);
+            let mut tex_max = (0.0, 0.0);
+            if self.outline_data[icon_comp].set_render_info(&mut tex_min, &mut tex_max) {
+                let mut dimensions = (tex_max.0 - tex_min.0, tex_max.1 - tex_min.1);
+                //println!("Icon Dims: {}, {}", dimensions.0, dimensions.1);
+                //println!("Icon Offsets: {}, {}", tex_min.0, tex_min.1);
+                let scale = height / dimensions.1;
+                let dp = 1.0 / scale;
+
+                dimensions.0 = (dimensions.0 * scale) + 2.0;
+                dimensions.1 = (dimensions.1 * scale) + 2.0;
+
+                let offsets = match justification {
+                    DrawJustification::Center => (dimensions.0 * -0.5, 0.0),
+                    DrawJustification::Left => (0.0, 0.0),
+                    DrawJustification::Right => (-dimensions.0, 0.0),
+                };
+
+                tex_min.0 -= dp;
+                tex_min.1 -= dp;
+                tex_max.0 += dp;
+                tex_max.1 += dp;
+
+                let glyph_index_bits = rays_per_outline_po2 << 30;
+                primitives.add_glyph(
+                    p0,
+                    color,
+                    offsets,
+                    dimensions,
+                    tex_min,
+                    tex_max,
+                    icon | glyph_index_bits,
+                    dp,
+                )
+            }
+        }
+    }
+}
+
+impl<'a> font::GlyphFaceShaper<'a> {
+    // Baseline Center Point
+    pub fn draw_glyph(
+        &self,
+        primitives: &mut vulkan::Primitives2d,
+        p0: &vulkan::PrimitivePosition,
+        color: &vulkan::PrimitiveColor,
+        rays_per_outline_po2: u32,
+        pt_size: u32,
+        dpi: f32,
+        code_point: char,
+        justification: DrawJustification,
+    ) {
+        if let Some(glyph_id_w) = self.font_face.glyph_index(code_point) {
+            let glyph_id = glyph_id_w.0 as u32;
+            let outline_index = match self
+                .outline_indicies
+                .binary_search_by(|od| od.glyph_id.cmp(&glyph_id))
+            {
+                Ok(found_ind) => found_ind,
+                Err(_insert_ind) => return,
+            };
+
+            let mut tex_min = (0.0, 0.0);
+            let mut tex_max = (0.0, 0.0);
+            if self.outline_indicies[outline_index].set_render_info(&mut tex_min, &mut tex_max) {
+                let mut dimensions = (tex_max.0 - tex_min.0, tex_max.1 - tex_min.1);
+                let scale = (pt_size as f32) * self.dpi_scale * dpi;
+                let dp = 1.0 / scale;
+
+                dimensions.0 = (dimensions.0 * scale) + 2.0;
+                dimensions.1 = (dimensions.1 * scale) + 2.0;
+
+                let offsets = match justification {
+                    DrawJustification::Center => (dimensions.0 * -0.5, (tex_min.1 * scale) + 1.0),
+                    DrawJustification::Left => (0.0, (tex_min.1 * scale) + 1.0),
+                    DrawJustification::Right => (-dimensions.0, (tex_min.1 * scale) + 1.0),
+                };
+
+                tex_min.0 -= dp;
+                tex_min.1 -= dp;
+                tex_max.0 += dp;
+                tex_max.1 += dp;
+
+                let glyph_index_bits = rays_per_outline_po2 << 30;
+                primitives.add_glyph(
+                    p0,
+                    color,
+                    offsets,
+                    dimensions,
+                    tex_min,
+                    tex_max,
+                    ((self.outline_index_offset + outline_index) as u32) | glyph_index_bits,
+                    dp,
+                )
+            }
+        }
+    }
+}
+
+impl<'a> font::GlyphBufferRenderInfo<'a> {
+    pub fn draw_glyphs(
+        &self,
+        primitives: &mut vulkan::Primitives2d,
+        p0: &vulkan::PrimitivePosition,
+        color: &vulkan::PrimitiveColor,
+        rays_per_outline_po2: u32,
+        justification: DrawJustification,
+    ) {
+        let glyph_infos = self.glyph_buffer.glyph_infos();
+        let glyph_positions = self.glyph_buffer.glyph_positions();
+
+        let mut line_width = 0.0;
+        for gp in glyph_positions {
+            line_width += (gp.x_advance as f32) * self.scale;
+        }
+
+        let mut baseline_p0 = match justification {
+            DrawJustification::Left => vulkan::PrimitivePosition { x: p0.x, y: p0.y },
+            DrawJustification::Right => vulkan::PrimitivePosition {
+                x: p0.x - line_width,
+                y: p0.y,
+            },
+            DrawJustification::Center => vulkan::PrimitivePosition {
+                x: p0.x - (line_width * 0.5),
+                y: p0.y,
+            },
+        };
+        //println!("Dp: {}", self.dp);
+
+        let glyph_index_bits = rays_per_outline_po2 << 30;
+
+        let mut tex_min = (0.0, 0.0);
+        let mut tex_max = (0.0, 0.0);
+        for (gp_ind, gp) in glyph_positions.iter().enumerate() {
+            let glyph_id = glyph_infos[gp_ind].glyph_id;
+            // Could cache certain high probability glyphs in future
+
+            let outline_index = match self
+                .outline_indicies
+                .binary_search_by(|od| od.glyph_id.cmp(&glyph_id))
+            {
+                Ok(found_ind) => found_ind,
+                Err(_insert_ind) => {
+                    baseline_p0.x += (gp.x_advance as f32) * self.scale;
+                    continue;
+                }
+            };
+
+            if self.outline_indicies[outline_index].set_render_info(&mut tex_min, &mut tex_max) {
+                let mut offsets = (
+                    tex_min.0 + (gp.x_offset as f32),
+                    tex_min.1 + (gp.y_offset as f32),
+                );
+                offsets.0 = (offsets.0 * self.scale) + 1.0;
+                offsets.1 = (offsets.1 * self.scale) + 1.0;
+                let mut dimensions = (tex_max.0 - tex_min.0, tex_max.1 - tex_min.1);
+                // println!(
+                //     "Glyph Dims: {}, {}, {}",
+                //     dimensions.0, dimensions.1, self.scale
+                // );
+                dimensions.0 = (dimensions.0 * self.scale) + 2.0;
+                dimensions.1 = (dimensions.1 * self.scale) + 2.0;
+
+                tex_min.0 -= self.dp;
+                tex_min.1 -= self.dp;
+                tex_max.0 += self.dp;
+                tex_max.1 += self.dp;
+
+                //println!("GP: {}, {}", gp_ind, outline_index);
+                primitives.add_glyph(
+                    &baseline_p0,
+                    color,
+                    offsets,
+                    dimensions,
+                    tex_min,
+                    tex_max,
+                    (self.outline_index_offset + (outline_index as u32)) | glyph_index_bits,
+                    self.dp,
+                )
+            }
+            baseline_p0.x += (gp.x_advance as f32) * self.scale;
+        }
+    }
+}
+
 pub trait Vulkan2dWindowCallbacks {
     fn draw(&mut self, primitives: &mut vulkan::Primitives2d, glyphs: &font::Glyphs);
 
@@ -490,32 +696,36 @@ pub struct Vulkan2dWindow {
     window: os::OsWindow,
 }
 
+pub enum Vulkan2dWindowMode {
+    Normal,
+    ValidationDebug,
+}
+
 impl Vulkan2dWindow {
     pub fn new(
         width: u32,
         height: u32,
         reserved_cpu_mem: usize,
         glyphs: font::Glyphs,
-        use_validation_layers: bool,
+        mode: Vulkan2dWindowMode,
         //) -> Result<(Self, os::OsEventSignaler), Error> {
-    ) -> Result<Self, Error> {
-        let (layer_names, extension_names) = if use_validation_layers {
-            (
+    ) -> Result<(Self, u32), Error> {
+        let (layer_names, extension_names) = match mode {
+            Vulkan2dWindowMode::Normal => (
+                vec![],
+                vec![
+                    vulkan::INSTANCE_EXTENSION_NAME_SURFACE,
+                    vulkan::INSTANCE_EXTENSION_NAME_OS_SURFACE,
+                ],
+            ),
+            Vulkan2dWindowMode::ValidationDebug => (
                 vec![vulkan::LAYER_NAME_VALIDATION],
                 vec![
                     vulkan::INSTANCE_EXTENSION_NAME_SURFACE,
                     vulkan::INSTANCE_EXTENSION_NAME_OS_SURFACE,
                     vulkan::INSTANCE_EXTENSION_NAME_DEBUG,
                 ],
-            )
-        } else {
-            (
-                vec![],
-                vec![
-                    vulkan::INSTANCE_EXTENSION_NAME_SURFACE,
-                    vulkan::INSTANCE_EXTENSION_NAME_OS_SURFACE,
-                ],
-            )
+            ),
         };
 
         let instance = match vulkan::Instance::new(
@@ -546,7 +756,8 @@ impl Vulkan2dWindow {
             Ok(w) => w,
             Err(e) => return Err(Error::OsError(e)),
         };
-        println!("Window DPI: {}", window.get_dpi());
+        let window_dpi = window.get_dpi();
+        //println!("Window DPI: {}", window.get_dpi());
 
         // let draw_trigger_external = match os::OsEvent::new() {
         //     Ok(t) => t,
@@ -580,11 +791,14 @@ impl Vulkan2dWindow {
         //     signaler,
         // ))
 
-        Ok(Vulkan2dWindow {
-            glyphs,
-            render,
-            window,
-        })
+        Ok((
+            Vulkan2dWindow {
+                glyphs,
+                render,
+                window,
+            },
+            window_dpi,
+        ))
     }
 
     pub fn run(
@@ -634,8 +848,8 @@ impl Vulkan2dWindow {
                 }
             }
             let current_instant = std::time::Instant::now();
-            if current_instant > next_process_instant {
-                let timeout_duration = current_instant - next_process_instant;
+            if current_instant < next_process_instant {
+                let timeout_duration = next_process_instant - current_instant;
                 if let Err(e) = timer.wait(timeout_duration) {
                     return Err(Error::OsError(e));
                 }
